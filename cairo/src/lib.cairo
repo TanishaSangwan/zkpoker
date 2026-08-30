@@ -14,6 +14,10 @@ pub struct OpenNoteDeposit {
 pub trait IErc20<TState> {
     fn balance_of(self: @TState, account: ContractAddress) -> u256;
     fn approve(ref self: TState, spender: ContractAddress, amount: u256) -> bool;
+    // Security review (2026-08-30 re-audit, Finding 2): bet() must pull real
+    // funds instead of only incrementing table_pot, or a table's pot is
+    // fabricable with no backing.
+    fn transfer_from(ref self: TState, sender: ContractAddress, recipient: ContractAddress, amount: u256) -> bool;
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -48,14 +52,28 @@ pub trait IErc20<TState> {
 // payout to its table's token (`payout_token`) so `privacy_invoke` can
 // refuse a mismatched token; `privacy_invoke` has a reentrancy lock around
 // its external `balance_of` call; and settlement no longer strands the
-// integer-division remainder. Still open: the unchecked `approve()` return
-// value (Low-confidence, see the audit report), and `bet`/`fold`/
-// `commit_deal`/`mark_dealt`/`reveal_seed`/`join_table` still have no
-// per-seat caller check, so the pool's own deposit flow must remain the
-// source of truth for real fund movement until that's designed.
+// integer-division remainder. Follow-up (same date): `join_table` now
+// records a `seat_owner`, and `bet`/`fold` require the caller to be that
+// seat's owner; `commit_deal`/`mark_dealt`/`reveal_seed` require the caller
+// to be the table's `table_dealer`.
 //
-// Everything here remains unaudited beyond that one pass — re-run
-// cairo-auditor after any further change before this touches a real pool.
+// Re-audit (2026-08-30) of that follow-up found the identity checks held,
+// but 2 new Critical findings: (1) `bet` gated *identity* but not *value* —
+// a self-dealt table could still fabricate a pot with no real transfer,
+// drainable via privacy_invoke against the contract's shared per-token
+// balance; fixed by having `bet` pull funds via `transfer_from` before
+// crediting `table_pot`. (2) `pending_payout`/`payout_token` are keyed by
+// bare `note_id` with no `table_id`, so an attacker could register a
+// victim's real `note_id` on their own throwaway table and hijack that
+// note's payout; fixed with a `note_id_owner` map, bound once at
+// `join_table` and cross-checked in `settle_table`. Also flagged
+// (below-threshold, not yet fixed): no recovery path if a dealer goes dark
+// or `pool` needs rotating, and the constructor doesn't reject a zero
+// `pool` address.
+//
+// Still open: the unchecked `approve()` return value (Low-confidence).
+// Everything here remains unaudited beyond that pass — re-run cairo-auditor
+// after any further change before this touches a real pool.
 // ─────────────────────────────────────────────────────────────────────────
 
 #[starknet::interface]
@@ -123,6 +141,8 @@ pub trait IPokerGame<TState> {
     fn get_pending_payout(self: @TState, note_id: felt252) -> u128;
     fn get_pool(self: @TState) -> ContractAddress;
     fn get_table_dealer(self: @TState, table_id: felt252) -> ContractAddress;
+    fn get_seat_owner(self: @TState, table_id: felt252, seat: felt252) -> ContractAddress;
+    fn get_note_id_owner(self: @TState, note_id: felt252) -> ContractAddress;
 }
 
 #[starknet::contract]
@@ -130,6 +150,7 @@ mod PokerGame {
     use starknet::storage::{
         Map, StoragePathEntry, StoragePointerReadAccess, StoragePointerWriteAccess,
     };
+    use core::num::traits::Zero;
     use starknet::{ContractAddress, get_caller_address, get_contract_address};
     use super::{IErc20Dispatcher, IErc20DispatcherTrait, OpenNoteDeposit};
 
@@ -150,6 +171,9 @@ mod PokerGame {
         pub const BAD_TOKEN: felt252 = 'BAD_TOKEN';
         pub const NOT_DEALER: felt252 = 'NOT_DEALER';
         pub const REENTRANCY: felt252 = 'REENTRANCY';
+        pub const NOT_SEAT_OWNER: felt252 = 'NOT_SEAT_OWNER';
+        pub const NOTE_ID_TAKEN: felt252 = 'NOTE_ID_TAKEN';
+        pub const TRANSFER_FAILED: felt252 = 'TRANSFER_FAILED';
     }
 
     #[storage]
@@ -175,6 +199,14 @@ mod PokerGame {
         seat_note: Map<(felt252, felt252), felt252>,
         seat_taken: Map<(felt252, felt252), bool>,
         seat_folded: Map<(felt252, felt252), bool>,
+        // (table_id, seat) -> the address that joined it; bet/fold on that
+        // seat are only accepted from this address.
+        seat_owner: Map<(felt252, felt252), ContractAddress>,
+        // note_id -> the address that first registered it via join_table.
+        // pending_payout/payout_token are keyed by bare note_id with no
+        // table_id, so without this, any account could reuse a note_id
+        // it doesn't own from another table and hijack that note's payout.
+        note_id_owner: Map<felt252, ContractAddress>,
         // note_id -> amount owed, cleared once privacy_invoke pays it out
         pending_payout: Map<felt252, u128>,
         // note_id -> the token that payout is denominated in (Finding 1).
@@ -287,11 +319,35 @@ mod PokerGame {
             assert(!self.seat_taken.entry(key).read(), errors::SEAT_TAKEN);
             self.seat_taken.entry(key).write(true);
             self.seat_note.entry(key).write(hole_card_note_id);
+            // Security review follow-up: record who occupies this seat so
+            // bet/fold can be restricted to them. The caller here is the
+            // account that submitted the join — a fresh/shadow account per
+            // STRK20's privacy model, same as any other player action; this
+            // doesn't add any new identity leakage beyond what's already
+            // on-chain for the join call itself.
+            let caller = get_caller_address();
+            self.seat_owner.entry(key).write(caller);
+            // Security review (2026-08-30 re-audit, Finding 1): bind this
+            // note_id to whoever registers it first. pending_payout and
+            // payout_token are keyed by bare note_id with no table_id, so
+            // without this, a different account could reuse a note_id it
+            // doesn't own — copied from someone else's real table — to
+            // hijack that note's eventual payout via its own settle_table.
+            let existing_owner = self.note_id_owner.entry(hole_card_note_id).read();
+            if existing_owner.is_zero() {
+                self.note_id_owner.entry(hole_card_note_id).write(caller);
+            } else {
+                assert(existing_owner == caller, errors::NOTE_ID_TAKEN);
+            }
             self.emit(SeatJoined { table_id, seat, hole_card_note_id });
         }
 
         fn commit_deal(ref self: ContractState, table_id: felt252, seed_hash: felt252) {
             assert(self.table_exists.entry(table_id).read(), errors::NO_TABLE);
+            // Security review follow-up: only the table's dealer may commit
+            // a deal — otherwise anyone could overwrite the fairness
+            // commitment for a table they don't run.
+            assert(get_caller_address() == self.table_dealer.entry(table_id).read(), errors::NOT_DEALER);
             assert(!self.seed_committed.entry(table_id).read(), errors::ALREADY_COMMITTED);
             self.seed_hash.entry(table_id).write(seed_hash);
             self.seed_committed.entry(table_id).write(true);
@@ -299,12 +355,20 @@ mod PokerGame {
         }
 
         fn mark_dealt(ref self: ContractState, table_id: felt252) {
+            // Security review follow-up: dealer-only, same reasoning as
+            // commit_deal/reveal_seed — this is a dealer-authored claim
+            // about the table's fairness state.
+            assert(get_caller_address() == self.table_dealer.entry(table_id).read(), errors::NOT_DEALER);
             assert(self.seed_committed.entry(table_id).read(), errors::NOT_COMMITTED);
             self.dealt.entry(table_id).write(true);
             self.emit(Dealt { table_id });
         }
 
         fn reveal_seed(ref self: ContractState, table_id: felt252, seed: felt252) {
+            // Security review follow-up: only the dealer can reveal — a
+            // third party guessing or front-running the real seed would
+            // otherwise be indistinguishable from the dealer's own reveal.
+            assert(get_caller_address() == self.table_dealer.entry(table_id).read(), errors::NOT_DEALER);
             assert(self.seed_committed.entry(table_id).read(), errors::NOT_COMMITTED);
             assert(!self.seed_revealed.entry(table_id).read(), errors::ALREADY_REVEALED);
             // TODO(hash-choice): pick and pin the actual commitment hash (e.g.
@@ -320,13 +384,33 @@ mod PokerGame {
 
         fn bet(ref self: ContractState, table_id: felt252, seat: felt252, amount: u128) {
             assert(self.table_exists.entry(table_id).read(), errors::NO_TABLE);
+            // Security review follow-up: only the address that joined this
+            // seat may bet on it — previously any caller could inflate any
+            // table's pot for any seat with no real funds behind it.
+            let caller = get_caller_address();
+            assert(caller == self.seat_owner.entry((table_id, seat)).read(), errors::NOT_SEAT_OWNER);
             assert(!self.seat_folded.entry((table_id, seat)).read(), errors::FOLDED);
+            // Security review (2026-08-30 re-audit, Finding 2): the
+            // seat-ownership check above only gates *identity* — it says
+            // nothing about *value*. Without pulling real funds here,
+            // table_pot was fabricable by anyone acting as their own
+            // dealer/seat-owner, then drainable via privacy_invoke against
+            // the contract's shared balance for that token. The caller must
+            // approve this contract for at least `amount` beforehand.
+            let token = self.table_token.entry(table_id).read();
+            let erc20 = IErc20Dispatcher { contract_address: token };
+            let transferred = erc20.transfer_from(caller, get_contract_address(), amount.into());
+            assert(transferred, errors::TRANSFER_FAILED);
             let pot_entry = self.table_pot.entry(table_id);
             pot_entry.write(pot_entry.read() + amount);
             self.emit(Bet { table_id, seat, amount });
         }
 
         fn fold(ref self: ContractState, table_id: felt252, seat: felt252) {
+            assert(self.table_exists.entry(table_id).read(), errors::NO_TABLE);
+            // Security review follow-up: same seat-ownership check as bet —
+            // previously any caller could force-fold any seat at any table.
+            assert(get_caller_address() == self.seat_owner.entry((table_id, seat)).read(), errors::NOT_SEAT_OWNER);
             self.seat_folded.entry((table_id, seat)).write(true);
             self.emit(Fold { table_id, seat });
         }
@@ -362,6 +446,16 @@ mod PokerGame {
                 // an unrelated note it controls.
                 let seat = *winners.at(i);
                 assert(self.seat_note.entry((table_id, seat)).read() == note_id, errors::NO_TABLE);
+                // Security review (2026-08-30 re-audit, Finding 1): the
+                // check above only confirms note_id belongs to *some* seat
+                // at *this* table — it doesn't stop an attacker from having
+                // registered someone else's note_id via join_table on a
+                // throwaway table of their own. Cross-check against the
+                // note_id's registered owner (bound once, at join_table).
+                assert(
+                    self.note_id_owner.entry(note_id).read() == self.seat_owner.entry((table_id, seat)).read(),
+                    errors::NOTE_ID_TAKEN,
+                );
                 // Security review Finding 1: bind this payout to the
                 // table's token so privacy_invoke can refuse a mismatched
                 // token supplied by an untrusted caller.
@@ -446,6 +540,14 @@ mod PokerGame {
 
         fn get_table_dealer(self: @ContractState, table_id: felt252) -> ContractAddress {
             self.table_dealer.entry(table_id).read()
+        }
+
+        fn get_seat_owner(self: @ContractState, table_id: felt252, seat: felt252) -> ContractAddress {
+            self.seat_owner.entry((table_id, seat)).read()
+        }
+
+        fn get_note_id_owner(self: @ContractState, note_id: felt252) -> ContractAddress {
+            self.note_id_owner.entry(note_id).read()
         }
     }
 }

@@ -102,21 +102,56 @@ and checks `payout_note_ids` against real seat ownership; a reentrancy lock
 guards `privacy_invoke`'s external `balance_of` call; the integer-division
 remainder in `settle_table` no longer gets stranded.
 
+**Follow-up fix (same day):** added a `seat_owner` map — `join_table`
+records the joining caller, and `bet`/`fold` now require the caller to match
+it. `commit_deal`/`mark_dealt`/`reveal_seed` now require the caller to match
+`table_dealer`. All previously-unauthorized game-state entrypoints are now
+caller-checked.
+
+**Re-audit (2026-08-30):** ran `cairo-auditor` again against that follow-up.
+Confirmed holding, no bypass: the `seat_owner`/`table_dealer` identity
+checks (including the zero-address-default question above — a real caller
+can never be the zero address, so it fails closed), and the `privacy_invoke`
+reentrancy lock (traced concretely; fully closes the prior double-spend
+window). But surfaced **2 new Critical findings**:
+
+1. The `seat_owner` check gates *identity*, not *value* — a self-dealt table
+   (attacker is both dealer and sole seat-owner) could still call `bet` with
+   an arbitrary amount, since it only did `table_pot += amount` with no real
+   transfer, then drain the fabricated payout via `privacy_invoke` against
+   the contract's shared per-token balance.
+2. `pending_payout`/`payout_token` are keyed by bare `note_id` with no
+   `table_id`, and `join_table` accepted any caller-supplied `note_id` with
+   no ownership check — so an attacker could register a victim's real
+   `note_id` on their own throwaway table and hijack (freeze or
+   redenominate) that note's payout.
+
+**Fixed:** `bet` now calls `erc20.transfer_from(caller, this, amount)` before
+crediting `table_pot` (requires the caller to have approved this contract);
+`join_table` now binds each `note_id` to whoever registers it first via a
+`note_id_owner` map, and `settle_table` cross-checks it before honoring a
+payout.
+
+Also flagged, below the audit's confidence threshold, not yet fixed:
+- No recovery path if a dealer goes dark mid-table or `pool` needs rotating
+  — both are fixed forever at `create_table`/construction with no
+  grant/rotate ABI, so a stuck dealer or a redeployed pool permanently stalls
+  the affected table(s).
+- The constructor doesn't reject a zero `pool` address — a deploy mistake
+  would silently brick every `privacy_invoke` call.
+
 **Still open** (tracked, not yet fixed):
-- `bet`, `fold`, `join_table`, `commit_deal`, `mark_dealt`, `reveal_seed`
-  still have no per-seat/per-dealer caller check. `bet` in particular still
-  records amounts with no on-chain link to a real transfer — the pool's own
-  deposit flow must remain the source of truth for what a table legitimately
-  holds until seat-level authorization is designed.
 - `approve()`'s return value is unchecked in `privacy_invoke` (Low severity,
   non-conforming-ERC20 edge case).
-- Re-run `cairo-auditor` after any further change to `lib.cairo`, and again
-  before this goes anywhere near a real pool or real funds.
+- The two below-threshold items just above (dealer/pool recovery path, zero
+  `pool` guard).
+- Re-run `cairo-auditor` again after any further change to `lib.cairo`, and
+  once more before this goes anywhere near a real pool or real funds.
 
 ## Open items (in priority order for the hackathon)
 
-1. Seat/dealer authorization for `bet`/`fold`/`join_table`/`commit_deal`/
-   `mark_dealt`/`reveal_seed` (see "Still open" above).
+1. Decide whether to fix the dealer/pool recovery-path gap and the
+   zero-`pool` constructor guard now or accept them for the hackathon demo.
 2. Pin the actual commitment hash in `reveal_seed` (currently a placeholder
    equality check) — Poseidon, to match what the pool itself hashes with.
 3. Swap `deal_verify.py`'s PRNG for a Poseidon-based Fisher-Yates so the same
