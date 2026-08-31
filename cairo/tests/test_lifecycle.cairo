@@ -7,7 +7,9 @@ use snforge_std::{
     EventSpyAssertionsTrait, spy_events, start_cheat_caller_address, stop_cheat_caller_address,
 };
 use zkpoker::{IPokerGameDispatcherTrait, PokerGame};
-use super::helpers::{ALICE, BOB, DEALER, MALLORY, NOTE_A, NOTE_B, SEAT_0, TABLE_1, TABLE_2, deploy_pokergame};
+use super::helpers::{
+    ALICE, BOB, DEALER, MALLORY, NOTE_A, NOTE_B, SEAT_0, TABLE_1, TABLE_2, TWO_SEATS, deploy_pokergame,
+};
 
 const SEED: felt252 = 'MY_SECRET_SEED';
 
@@ -26,7 +28,7 @@ fn test_create_table_success() {
     let mut spy = spy_events();
 
     start_cheat_caller_address(game.contract_address, DEALER());
-    game.create_table(TABLE_1, DEALER(), 0);
+    game.create_table(TABLE_1, DEALER(), 0, TWO_SEATS);
     stop_cheat_caller_address(game.contract_address);
 
     assert(game.get_table_dealer(TABLE_1) == DEALER(), 'dealer not recorded');
@@ -39,7 +41,7 @@ fn test_create_table_success() {
                 (
                     game.contract_address,
                     PokerGame::Event::TableCreated(
-                        PokerGame::TableCreated { table_id: TABLE_1, token: DEALER(), buy_in: 0 },
+                        PokerGame::TableCreated { table_id: TABLE_1, token: DEALER(), buy_in: 0, max_seats: TWO_SEATS },
                     ),
                 ),
             ],
@@ -51,8 +53,8 @@ fn test_create_table_success() {
 fn test_create_table_duplicate_rejected() {
     let game = deploy_pokergame(DEALER());
     start_cheat_caller_address(game.contract_address, DEALER());
-    game.create_table(TABLE_1, DEALER(), 0);
-    game.create_table(TABLE_1, DEALER(), 0); // should panic
+    game.create_table(TABLE_1, DEALER(), 0, TWO_SEATS);
+    game.create_table(TABLE_1, DEALER(), 0, TWO_SEATS); // should panic
 }
 
 #[test]
@@ -61,9 +63,43 @@ fn test_create_table_caller_becomes_dealer_regardless_of_who() {
     // table) — the caller just becomes ITS dealer, not a global role.
     let game = deploy_pokergame(DEALER());
     start_cheat_caller_address(game.contract_address, MALLORY());
-    game.create_table(TABLE_2, DEALER(), 0);
+    game.create_table(TABLE_2, DEALER(), 0, TWO_SEATS);
     stop_cheat_caller_address(game.contract_address);
     assert(game.get_table_dealer(TABLE_2) == MALLORY(), 'wrong dealer recorded');
+}
+
+#[test]
+fn test_create_table_records_max_seats() {
+    // Regression: round 8 — the whole point of max_seats is that it's
+    // readable back later (join_table's bound check and, eventually,
+    // settle_table_by_hand's seat->deck-position wiring both depend on it).
+    let game = deploy_pokergame(DEALER());
+    start_cheat_caller_address(game.contract_address, DEALER());
+    game.create_table(TABLE_1, DEALER(), 0, TWO_SEATS);
+    stop_cheat_caller_address(game.contract_address);
+    assert(game.get_table_max_seats(TABLE_1) == TWO_SEATS, 'max_seats not recorded');
+}
+
+#[test]
+#[should_panic(expected: 'BAD_MAX_SEATS')]
+fn test_create_table_zero_max_seats_rejected() {
+    // Regression: round 8 — max_seats=0 would make every join_table call
+    // fail BAD_SEAT unconditionally (nothing is < 0), so reject it up
+    // front with a clearer error instead.
+    let game = deploy_pokergame(DEALER());
+    start_cheat_caller_address(game.contract_address, DEALER());
+    game.create_table(TABLE_1, DEALER(), 0, 0);
+}
+
+#[test]
+#[should_panic(expected: 'BAD_MAX_SEATS')]
+fn test_create_table_max_seats_too_large_rejected() {
+    // Regression: round 8 — max_seats must leave room for 5 community
+    // cards after every seat's 2 hole cards in a 52-card deck
+    // (2*max_seats+5 <= 52, i.e. max_seats <= 23); 24 doesn't fit.
+    let game = deploy_pokergame(DEALER());
+    start_cheat_caller_address(game.contract_address, DEALER());
+    game.create_table(TABLE_1, DEALER(), 0, 24);
 }
 
 // ─── join_table ──────────────────────────────────────────────────────────
@@ -72,7 +108,7 @@ fn test_create_table_caller_becomes_dealer_regardless_of_who() {
 fn test_join_table_success() {
     let game = deploy_pokergame(DEALER());
     start_cheat_caller_address(game.contract_address, DEALER());
-    game.create_table(TABLE_1, DEALER(), 0);
+    game.create_table(TABLE_1, DEALER(), 0, TWO_SEATS);
     stop_cheat_caller_address(game.contract_address);
 
     let mut spy = spy_events();
@@ -106,11 +142,41 @@ fn test_join_table_nonexistent_table_rejected() {
 }
 
 #[test]
+#[should_panic(expected: 'BAD_SEAT')]
+fn test_join_table_seat_at_max_seats_rejected() {
+    // Regression: round 8 — seat must be strictly < max_seats. TWO_SEATS
+    // means valid seats are {0, 1}; seat 2 is one past the end.
+    let game = deploy_pokergame(DEALER());
+    start_cheat_caller_address(game.contract_address, DEALER());
+    game.create_table(TABLE_1, DEALER(), 0, TWO_SEATS);
+    stop_cheat_caller_address(game.contract_address);
+
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.join_table(TABLE_1, 2, NOTE_A); // 2 >= max_seats (2)
+}
+
+#[test]
+#[should_panic(expected: 'BAD_SEAT')]
+fn test_join_table_seat_not_a_valid_u32_rejected() {
+    // Regression: round 8 — a felt252 too large to fit in u32 (not just
+    // "in range but too big") must also be rejected, not panic some other
+    // way or silently wrap.
+    let game = deploy_pokergame(DEALER());
+    start_cheat_caller_address(game.contract_address, DEALER());
+    game.create_table(TABLE_1, DEALER(), 0, TWO_SEATS);
+    stop_cheat_caller_address(game.contract_address);
+
+    start_cheat_caller_address(game.contract_address, ALICE());
+    // u32::MAX is 4294967295; this is well beyond it.
+    game.join_table(TABLE_1, 999999999999999999999999999999, NOTE_A);
+}
+
+#[test]
 #[should_panic(expected: 'SEAT_TAKEN')]
 fn test_join_table_seat_taken_rejected() {
     let game = deploy_pokergame(DEALER());
     start_cheat_caller_address(game.contract_address, DEALER());
-    game.create_table(TABLE_1, DEALER(), 0);
+    game.create_table(TABLE_1, DEALER(), 0, TWO_SEATS);
     stop_cheat_caller_address(game.contract_address);
 
     start_cheat_caller_address(game.contract_address, ALICE());
@@ -129,8 +195,8 @@ fn test_join_table_note_id_reuse_by_different_owner_rejected() {
     // to later hijack its payout via their own settle_table.
     let game = deploy_pokergame(DEALER());
     start_cheat_caller_address(game.contract_address, DEALER());
-    game.create_table(TABLE_1, DEALER(), 0);
-    game.create_table(TABLE_2, DEALER(), 0);
+    game.create_table(TABLE_1, DEALER(), 0, TWO_SEATS);
+    game.create_table(TABLE_2, DEALER(), 0, TWO_SEATS);
     stop_cheat_caller_address(game.contract_address);
 
     start_cheat_caller_address(game.contract_address, ALICE());
@@ -147,8 +213,8 @@ fn test_join_table_note_id_reuse_by_same_owner_allowed() {
     // only a DIFFERENT account reusing it is the attack.
     let game = deploy_pokergame(DEALER());
     start_cheat_caller_address(game.contract_address, DEALER());
-    game.create_table(TABLE_1, DEALER(), 0);
-    game.create_table(TABLE_2, DEALER(), 0);
+    game.create_table(TABLE_1, DEALER(), 0, TWO_SEATS);
+    game.create_table(TABLE_2, DEALER(), 0, TWO_SEATS);
     stop_cheat_caller_address(game.contract_address);
 
     start_cheat_caller_address(game.contract_address, ALICE());
@@ -164,7 +230,7 @@ fn test_join_table_note_id_reuse_by_same_owner_allowed() {
 fn setup_created_table() -> zkpoker::IPokerGameDispatcher {
     let game = deploy_pokergame(DEALER());
     start_cheat_caller_address(game.contract_address, DEALER());
-    game.create_table(TABLE_1, DEALER(), 0);
+    game.create_table(TABLE_1, DEALER(), 0, TWO_SEATS);
     stop_cheat_caller_address(game.contract_address);
     game
 }

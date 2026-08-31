@@ -7,13 +7,28 @@ This is a client-side auditing tool, not part of the Cairo contract. Anyone
 who observed `commit_deal` (the seed_hash) and `reveal_seed` (the seed) events
 on-chain can run this independently of the dealer.
 
-PRNG NOTE: this uses Python's `random.Random(seed)` as a stand-in so the tool
-runs with zero dependencies during the hackathon. That PRNG is NOT something
-you could re-derive inside a Cairo contract or a STARK circuit. Before this
-claim ships anywhere real, swap `seeded_shuffle` for a Poseidon-based
-Fisher-Yates (or equivalent STARK-friendly construction) so the same
-computation can eventually be proven on-chain per the RFP's "STARK-proven
-dealing" requirement, instead of only being reproducible off-chain.
+SHUFFLE: `seeded_shuffle` below is a line-for-line port of
+../cairo/src/shuffle.cairo's `shuffled_deck` — same Poseidon-based
+Fisher-Yates, same per-step draw (`poseidon_hash([seed, step]) % bound`),
+same swap order — so this script's output matches the on-chain computation
+bit-for-bit, not just "plausibly similar". That equivalence is pinned by two
+Cairo regression tests (`poseidon_vector_check.cairo`,
+`shuffle_vector_check.cairo`) that assert Cairo's `core::poseidon` and this
+file's Poseidon dependency (`poseidon-py`, see requirements.txt) agree on
+concrete test vectors — re-run those tests if you touch either side.
+
+Needs: `pip install -r requirements.txt` (just `poseidon-py`, a small
+prebuilt-wheel package — no native/Rust toolchain required).
+
+NOTE on scope: this script reproduces the *deck* from a revealed seed. The
+Cairo contract does not yet check a submitted hole/community card against a
+specific position in that deck at settlement (`settle_table_by_hand` only
+checks cards are in-range and distinct — see docs/DESIGN.md open items).
+Doing that on-chain needs a fixed seat->deck-position convention, which
+needs a `max_seats`-like concept the contract doesn't have yet. Until then,
+this script's per-seat dealing order (round-robin, matching how Hold'em is
+actually dealt) is this tool's own convention for *presenting* a recomputed
+deal — not something the contract enforces.
 
 Usage:
 
@@ -35,8 +50,9 @@ from __future__ import annotations
 
 import argparse
 import json
-import random
 import sys
+
+from poseidon_py.poseidon_hash import poseidon_hash_many
 
 DECK_SIZE = 52
 
@@ -50,17 +66,27 @@ def card_name(index: int) -> str:
     return f"{rank}{suit}"
 
 
-def seeded_shuffle(seed: int) -> list[int]:
-    """Deterministic Fisher-Yates over a 52-card deck, seeded by `seed`.
+def _draw_index(seed: int, step: int, bound: int) -> int:
+    """Matches cairo/src/shuffle.cairo's `draw_index` exactly: a Poseidon
+    hash of (seed, step), reduced mod bound. Not rejection-sampled (small
+    modulo bias) — same accepted simplification as the Cairo side, at this
+    scale (52-element deck)."""
+    h = poseidon_hash_many([seed, step])
+    return h % bound
 
-    See the PRNG NOTE above: swap this for a Poseidon-based construction
-    before treating its output as provable rather than merely reproducible.
+
+def seeded_shuffle(seed: int) -> list[int]:
+    """Poseidon-based Fisher-Yates over a 52-card deck, seeded by `seed`.
+
+    Line-for-line match of cairo/src/shuffle.cairo's `shuffled_deck` — see
+    the module docstring above for how that equivalence is verified.
     """
     deck = list(range(DECK_SIZE))
-    rng = random.Random(seed)
-    for i in range(DECK_SIZE - 1, 0, -1):
-        j = rng.randrange(i + 1)
-        deck[i], deck[j] = deck[j], deck[i]
+    idx = DECK_SIZE - 1
+    while idx != 0:
+        j = _draw_index(seed, idx, idx + 1)
+        deck[idx], deck[j] = deck[j], deck[idx]
+        idx -= 1
     return deck
 
 

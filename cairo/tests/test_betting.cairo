@@ -9,8 +9,8 @@ use snforge_std::{
 use zkpoker::mocks::IMockErc20AdminDispatcherTrait;
 use zkpoker::{IErc20DispatcherTrait, IPokerGameDispatcherTrait, PokerGame};
 use super::helpers::{
-    ALICE, DEALER, MALLORY, NOTE_A, SEAT_0, TABLE_1, deploy_pokergame, deploy_mock_token, fund_and_approve,
-    setup_table_with_two_seats,
+    ALICE, DEALER, MALLORY, NOTE_A, SEAT_0, TABLE_1, TWO_SEATS, deploy_pokergame, deploy_mock_token,
+    fund_and_approve, setup_table_with_two_seats,
 };
 
 const FUND: u256 = 10_000;
@@ -113,7 +113,7 @@ fn test_bet_reentrancy_blocked() {
     let (token_addr, token, admin) = deploy_mock_token();
 
     start_cheat_caller_address(game.contract_address, token_addr);
-    game.create_table(TABLE_1, token_addr, 0);
+    game.create_table(TABLE_1, token_addr, 0, TWO_SEATS);
     game.join_table(TABLE_1, SEAT_0, NOTE_A);
     stop_cheat_caller_address(game.contract_address);
 
@@ -162,7 +162,7 @@ fn setup_stalled_table() -> (zkpoker::IPokerGameDispatcher, zkpoker::IErc20Dispa
 
     start_cheat_block_timestamp(game.contract_address, T0);
     start_cheat_caller_address(game.contract_address, DEALER());
-    game.create_table(TABLE_1, token_addr, 0);
+    game.create_table(TABLE_1, token_addr, 0, TWO_SEATS);
     stop_cheat_caller_address(game.contract_address);
 
     start_cheat_caller_address(game.contract_address, ALICE());

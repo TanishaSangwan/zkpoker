@@ -28,16 +28,15 @@ references to that name anywhere, they're stale; the project's real name is
 yet**. The user has been asked and hasn't requested a commit — don't commit
 without asking first.
 
-**⚠️ Important caveat on "what's been checked":** every audit round (1-5) in
-this project scanned only `cairo/src/lib.cairo` as it stood after round 5.
-Two more Cairo files exist now — `cairo/src/mocks.cairo` (test-only,
-`#[cfg(test)]`-gated, never in the production build, low stakes) and
-`cairo/src/poker_hand.cairo` (production code, genuinely unit-tested for
-*correctness* but never security-audited) — plus `lib.cairo` itself grew a
-real chunk of new code (multi-street betting, `settle_table_by_hand`) after
-round 5 that no audit round has seen at all. Nothing outside `cairo/` —
-frontend, scripts, docs — has ever had a security review. See §5's "Round 6"
-note for exactly what's unaudited right now.
+**⚠️ Important caveat on "what's been checked":** rounds 1-5 scanned only
+`cairo/src/lib.cairo` as it stood after round 5. Round 7 covered
+`cairo/src/poker_hand.cairo` too (round 6's addition), explicitly
+targeted rather than a full-repo scan. `cairo/src/mocks.cairo` has never
+been audited and never will need to be under normal circumstances —
+`#[cfg(test)]`-gated, never in the production build, low stakes, and was
+deliberately excluded from round 7's scope for that reason. Nothing
+outside `cairo/` — frontend, scripts, docs — has ever had a security
+review. See §5's "Round 7" entry for exactly what it covered and found.
 
 ---
 
@@ -75,9 +74,19 @@ note for exactly what's unaudited right now.
 zkpoker/
   cairo/src/lib.cairo          PokerGame contract — see §4/§5
   cairo/src/poker_hand.cairo    Texas Hold'em hand evaluation, pure functions.
-                                 Genuinely unit-tested (19 tests, passing) via
+                                 Genuinely unit-tested (24 tests, passing) via
                                  `scarb test -- -t unit` — see §4a. Part of
                                  the production build. NOT security-audited.
+  cairo/src/shuffle.cairo       Poseidon-based Fisher-Yates deck shuffle from
+                                 a seed. Pure functions, genuinely tested same
+                                 way as poker_hand — see §4b. WIRED into
+                                 settle_table_by_hand (§4c) — provenance gap
+                                 closed, see §7 item 5.
+  cairo/src/poseidon_vector_check.cairo,
+  cairo/src/shuffle_vector_check.cairo
+                                 #[cfg(test)]-only regression tests pinning
+                                 Cairo's core::poseidon output against an
+                                 independently-computed Python value — see §4b
   cairo/src/mocks.cairo         test-only mock ERC20, #[cfg(test)]-gated,
                                  never in the production build
   cairo/Scarb.toml              package "zkpoker", scarb build succeeds
@@ -89,8 +98,12 @@ zkpoker/
                                  streets/settle_table_by_hand), WRITTEN BUT
                                  NOT RUN — see §4a and cairo/tests/README.md
                                  before you trust any of it
-  scripts/deal_verify.py        fairness-check CLI, tested working, PRNG is a
-                                 stand-in (see docs/DESIGN.md open items)
+  scripts/deal_verify.py        fairness-check CLI, tested working. Shuffle
+                                 is now the same Poseidon Fisher-Yates as
+                                 cairo/src/shuffle.cairo (was random.Random —
+                                 see §4b); needs `pip install -r
+                                 scripts/requirements.txt` (poseidon-py, a
+                                 small prebuilt wheel, no native toolchain)
   docs/DESIGN.md                architecture, fairness model, security-review
                                  timeline (keep this updated as you go)
   security-review-*.md          one file per audit round (5 so far — round 6
@@ -122,26 +135,34 @@ an abandoned dealer), `settle_table` (trusted winner list) plus
 `poker_hand::best_of_7` instead), and the STRK20 `privacy_invoke` payout
 hook.
 
-**It has been through five audit rounds, and round 6 (this multi-street +
-hand-eval addition) has NOT been audited at all.** Every Critical/High
-finding rounds 1-5 found has been fixed and rebuilt clean; round 5 was a
-genuinely fresh full pass and found nothing above Low severity. **One
-accepted low-severity gap remains from round 5** (constructor doesn't
-reject a zero `pool` address). That's real progress on the round-1-through-5
-surface, but round 6 added a substantial new entrypoint
-(`settle_table_by_hand`) that reuses `settle_table`'s security patterns
-by hand, not by construction — it has not been independently checked the
-way everything else has. **Do not treat round 6 as equally trustworthy to
-rounds 1-5.** A round 7 audit sweep targeting it specifically is the
-top item in §7. And regardless of audit status: don't deploy any of this
-anywhere with real value without also getting the test suite running (see
-§4a) and ideally a real, non-AI security review before mainnet. The file's
-own header comment (top of `cairo/src/lib.cairo`) is kept up to date with a
+**It has been through seven audit rounds** (five on rounds 1-5's code,
+round 7 targeted specifically at round 6's multi-street/hand-eval
+addition). Every Critical/High finding across all seven has been fixed and
+rebuilt clean. Round 8 (this session, after round 7, two passes) was
+feature work, not an audit round — see §4b: the on-chain deck-shuffle
+module, `create_table`/`join_table`'s new `max_seats`/seat-bound checks,
+and (the second pass) wiring that shuffle into `settle_table_by_hand` so
+it now checks submitted cards against the actual committed-and-revealed
+deck (`SEED_NOT_REVEALED`/`CARD_MISMATCH`) — all real new
+access-control/value-moving surface, unaudited — see §4b. **One accepted
+low-severity/below-threshold gap remains, plus one open item**: the
+constructor doesn't reject a zero `pool` address (round 5), and
+bet-matching/turn-order enforcement isn't implemented for `advance_street`.
+The shuffle-provenance gap that was open through round 7 (hole cards
+submitted to `settle_table_by_hand` not tied back to the seed commitment)
+is now **closed** — round 8 built the shuffle module, the seat-count
+precondition, and the `settle_table_by_hand` check itself, all three (see
+§7 item 5). None of the two remaining items are findings from any audit
+round; both are documented open items — see §7. Regardless of audit
+status: don't deploy any of this anywhere with real value without also
+getting the test suite running (see §4a) and ideally a real, non-AI
+security review before mainnet. The file's own
+header comment (top of `cairo/src/lib.cairo`) is kept up to date with a
 summary of this history — read it too.
 
 ### 4a. Test suite: written, mostly NOT run — one real exception
 
-**Exception, actually verified:** `cairo/src/poker_hand.cairo`'s own 19
+**Exception, actually verified:** `cairo/src/poker_hand.cairo`'s own 24
 unit tests genuinely run and pass, right now, on this machine:
 
 ```bash
@@ -185,6 +206,130 @@ impersonating the malicious token, which would have tripped the
 `NOT_SEAT_OWNER`/`NOT_DEALER` check before ever reaching the
 `reentrancy_lock` check being tested — fixed by having the token contract
 itself act as the seat owner/dealer).
+
+### 4b. Deck shuffle: also genuinely verified — and cross-checked vs. Python
+
+`cairo/src/shuffle.cairo`'s `shuffled_deck(seed) -> Array<u8>` is the same
+kind of pure-function module as `poker_hand.cairo` — no storage, no external
+calls, tested for real via `scarb test -- -t unit` (4 tests: correct length,
+genuine permutation of 0-51, deterministic per seed, differs across seeds —
+all passing today).
+
+What makes this one different from `poker_hand`: it also had to match a
+second implementation exactly — `scripts/deal_verify.py`'s Python side needs
+to reproduce the *identical* deck from a revealed seed, bit-for-bit, or the
+"anyone can independently verify" claim in docs/DESIGN.md is false. That was
+checked, not assumed:
+
+1. `pip install starknet-py` (the obvious choice for a battle-tested
+   Starknet Poseidon) hung for 20+ minutes resolving dependencies without
+   downloading anything, on this Windows machine with no Rust/cargo
+   toolchain (a known pain point — several of its native-extension deps
+   need a compiler). Killed it; don't retry that package here without a
+   Rust toolchain installed first.
+2. `pip install poseidon-py` instead — small, prebuilt Windows wheel,
+   installed in seconds, no native toolchain needed. `poseidon_py.
+   poseidon_hash.poseidon_hash_many` is what `scripts/deal_verify.py` now
+   uses (`scripts/requirements.txt` pins `poseidon-py==0.2.0`).
+3. Two Cairo regression tests prove the equivalence rather than just
+   assert it: `poseidon_vector_check.cairo` (Cairo's `core::poseidon::
+   poseidon_hash_span` vs. a Python-computed vector for the same input) and
+   `shuffle_vector_check.cairo` (the full 52-card `shuffled_deck(42)`
+   output vs. the same shuffle ported to Python, run end-to-end — this one
+   also exercises `shuffle.cairo`'s array-rebuild `swap` helper, not just
+   the hash). Both pass. Regenerate either vector's expected value with the
+   Python snippet in that Cairo file's own comment if you ever touch
+   `shuffle.cairo` or bump `poseidon-py`.
+
+**Seat-count concept added (same round 8, follow-up).** The shuffle module
+needs a fixed seat -> deck-position convention to ever be checked against
+(seat *N* at positions `2N`/`2N+1`), which needs the contract to know a
+table's seat count — it didn't (`seat` was an arbitrary `felt252`). Now:
+`create_table` takes `max_seats: u32` (nonzero, `<= MAX_TABLE_SEATS` = 23 —
+`2*23+5=51<=52`, leaves room for 5 community cards), stored per table and
+readable via the new `get_table_max_seats`; `join_table` rejects any `seat`
+that doesn't parse as a `u32 < max_seats` (`BAD_MAX_SEATS`/`BAD_SEAT`,
+respectively). **This is a breaking interface change** — every
+`create_table` call site was updated, including all of `cairo/tests/`
+(`helpers.cairo`'s new `TWO_SEATS` constant, plus new regression tests in
+`test_lifecycle.cairo` for both new error paths) — but like the rest of
+that suite, these new tests are unexecuted/unverified on this machine (no
+`snforge`). The `felt252 -> u32` conversion logic itself (the part that
+can't wait for `snforge` to at least sanity-check) WAS verified directly:
+a throwaway `scarb test -- -t unit` check confirmed `try_into()` panics on
+an out-of-`u32`-range felt252 and compares correctly in-range, matching
+exactly what `join_table` relies on, before that scratch file was deleted.
+
+### 4c. Provenance wiring: settle_table_by_hand now uses the real deck
+
+Same round 8, second pass (still this session): `settle_table_by_hand` now
+requires `reveal_seed` to have run for the table (`SEED_NOT_REVEALED`
+otherwise), recomputes `shuffle::shuffled_deck(revealed_seed)`, and checks
+every submitted card against its canonical position — seat *N*'s hole
+cards must be the deck's values at positions `2N`/`2N+1` (either order),
+and `community_cards[k]` must equal the deck's position `2*max_seats + k`
+(`CARD_MISMATCH` on any mismatch). This is the actual provenance fix — see
+`settle_table_by_hand`'s own doc comment in `lib.cairo` and
+docs/DESIGN.md's "Deck shuffle from seed" section. **The shuffle-from-seed
+item, across this whole round-8 arc, is now closed at the contract level.**
+
+The hard part of this pass wasn't the contract code — it was that
+`cairo/tests/test_hand_eval.cairo`'s existing `settle_table_by_hand` tests
+all used hand-picked cards (e.g. "ALICE holds pocket aces"), which now fail
+`CARD_MISMATCH` before ever reaching scoring, since they don't correspond
+to any real seed's shuffle output. Rather than leave those tests broken or
+delete the coverage, they were reworked to use **real cards derived from an
+actual committed/revealed seed**:
+
+1. Finding a seed that produces a clean win (and, separately, an exact
+   tie) between two specific seats isn't guessable by hand — solved by
+   brute-force search over seeds in Python, reusing the same
+   already-verified Poseidon shuffle from §4b, plus a Python port of
+   `poker_hand.cairo`'s exact scoring algorithm (category/tie-break rules,
+   wheel-straight handling, `best_of_7`'s 21-subset search).
+2. That Python scorer was cross-checked against `poker_hand.cairo`'s own
+   test vectors (wheel straight, straight-flush-beats-quads, full-house
+   trip-rank tie-break, `best_of_7` category selection) before being
+   trusted for the search — same "verify, don't assume" standard as the
+   Poseidon cross-check.
+3. The winning seeds' resulting deck positions were then independently
+   confirmed a **second, Cairo-only** way: a throwaway `scarb test --
+   -t unit` scratch test called `shuffle::shuffled_deck` directly and
+   asserted the exact card values at every relevant position, genuinely
+   run and passing, before being deleted and the same values baked into
+   the `snforge`-only test file. So the deck-math inputs to those tests
+   are independently confirmed twice (Python + Cairo), even though the
+   `snforge` test flow around them (dispatcher calls, cheat codes, event
+   assertions) remains unexecuted like the rest of `cairo/tests/`.
+4. `helpers.cairo` gained a shared `seed_hash_of` helper (previously only
+   `test_lifecycle.cairo` had a local copy) since `test_hand_eval.cairo`
+   now needs it too for `commit_deal`.
+5. Two new regression tests cover the new checks directly:
+   `test_settle_table_by_hand_seed_not_revealed_rejected` and
+   `test_settle_table_by_hand_wrong_hole_card_rejected` /
+   `..._wrong_community_card_rejected` (a real, distinct-but-wrong card
+   substituted for one real card — distinguishes this from the round-7
+   `assert_valid_deck_cards` check, which those wrong cards would still
+   pass).
+
+If you touch `shuffle.cairo`'s algorithm or `poker_hand.cairo`'s scoring,
+the baked-in seeds/cards in `test_hand_eval.cairo` may need regenerating —
+see that file's own header comment for the exact Python snippet.
+
+**Follow-up, same session: `max_seats != 2` coverage gap closed.** Every
+test above (and everywhere else in `cairo/tests/`) used a 2-seat table, so
+nothing exercised `settle_table_by_hand`'s `community_start = 2*max_seats`
+arithmetic at any other size — a subtle off-by-one specific to a
+non-2 `max_seats` could have slipped through. Closed with
+`test_settle_table_by_hand_three_seat_table`: a real 3-seat table (ALICE/
+BOB/new fixture `CAROL()`), same verification standard as above (a 3-seat
+deal for the same seed as the clear-winner scenario — `shuffled_deck`
+depends only on the seed, not on how many seats it gets sliced for, so
+seat0/seat1's cards are identical to the 2-seat case; only seat2's cards
+and the shifted `community_start` are new — independently confirmed via
+another throwaway `scarb test -- -t unit` scratch check before being
+baked in). `helpers.cairo` gained `CAROL()`, `SEAT_2`, `NOTE_C`, and
+`THREE_SEATS` for this.
 
 **If you run `cairo-auditor` again**, note that its file-discovery
 (`find ... -name "*.cairo"`) will now also pick up `cairo/src/mocks.cairo`
@@ -383,11 +528,46 @@ unit-tested — 19 tests, all passing, via `scarb test -- -t unit` (see
 different things; nothing has checked it (or `settle_table_by_hand`) for
 the kind of caller-identity/reentrancy/value-fabrication issues rounds 1-5
 found repeatedly elsewhere in this file. **No `security-review-*.md` file
-exists for round 6** — the next one created should cover it.
+exists for round 6** — round 7 (below) is that audit.
 
 Rebuilt clean (`scarb build`, zero warnings) after each of the three
 changes above; unit tests re-run and still 19/19 passing after the
 contract integration.
+
+### Round 7 (file: `security-review-20260831-120606.md`) — **FIXED**
+Targeted re-audit of round 6's additions specifically (explicit-file mode:
+`lib.cairo` + `poker_hand.cairo`, `mocks.cairo` deliberately excluded —
+test-only). Confirmed clean: `advance_street`/`settle_table_by_hand`'s
+dealer gating (byte-for-byte consistent with rounds 1-5); zero external
+calls anywhere in the new code, verified by direct read, so the existing
+check-without-hold `reentrancy_lock` pattern is sound there too (one real
+asymmetry found — `advance_street` skips the lock check entirely — traced
+to a dead end: requires attacker-controlled dealer AND token, and grants
+nothing beyond a direct call already would); `table_street` confirmed
+single-writer, never resettable; `settle_table_by_hand`'s independent
+reimplementation of `settle_table`'s write logic diffed line-by-line with
+nothing missing or weakened; pot-splitting math proven conservation-exact,
+division-by-zero structurally impossible; no partial-state-before-panic
+risk. Found **1 Medium**:
+1. **[conf 75, FIXED]** Neither `settle_table_by_hand` nor
+   `poker_hand::evaluate_5` checked submitted cards were real (`< 52`) or
+   distinct — a dealer could fabricate an impossible hand (duplicate card
+   values, or an out-of-range value silently folded by `% 13`) to steer
+   the computed winner. Didn't grant new *power* (dealer already controls
+   `settle_table`'s trusted list) but undermined `settle_table_by_hand`'s
+   own "checkable by anyone" claim. **Fix applied**: new
+   `poker_hand::assert_valid_deck_cards` (range + pairwise-distinct check
+   over the full community+hole card set), called before any scoring in
+   `settle_table_by_hand`. 5 new unit tests (now 24 total, all passing) +
+   2 new unverified integration regression tests in
+   `cairo/tests/test_hand_eval.cairo`.
+
+Rebuilt clean (`scarb build`, zero warnings) after the fix; unit tests
+re-run, 24/24 passing.
+
+**Full technical detail for all seven rounds is in the seven
+`security-review-*.md` files — this section is a summary, not a
+replacement for reading them before you touch this contract again.**
 
 ---
 
@@ -410,11 +590,14 @@ hold. **Only one accepted gap remained after round 5** (constructor
 zero-`pool` validation, Low, not attacker-reachable).
 
 **Then round 6 happened** (multi-street betting + `settle_table_by_hand` —
-see §5) — real feature work, genuinely valuable, but it's new code that
-has NOT been through the audit process rounds 1-5 went through. Don't read
-"five clean-ish rounds" as covering the current state of the contract; it
-covers the state as of round 5. A round 7 sweep targeting round 6's
-additions specifically (see §7) is the natural next security step.
+see §5) — real feature work, genuinely valuable, but new code that hadn't
+been through the audit process rounds 1-5 went through. **Round 7 closed
+that gap**: targeted specifically at round 6's additions, found and fixed
+one Medium (card validation in `settle_table_by_hand`). As of round 7, the
+contract's *entire* Cairo surface (`lib.cairo` + `poker_hand.cairo`; not
+`mocks.cairo`, deliberately — test-only) has been through at least one
+audit pass. Any *future* change still needs its own audit round, same as
+always — this isn't a one-time clearance.
 
 ---
 
@@ -423,31 +606,38 @@ additions specifically (see §7) is the natural next security step.
 In rough priority order — see `docs/DESIGN.md` "Open items" for the
 canonical, kept-up-to-date list:
 
-1. **Round 7 `cairo-auditor` sweep targeting round 6** — `settle_table_by_hand`
-   especially (biggest unaudited surface in the contract), plus the streets
-   changes and the `reveal_seed` Poseidon fix. See §5's "Round 6" entry for
-   exactly what to point it at.
-2. **Get the test suite actually running** — it's written (`cairo/tests/`,
+1. **Get the test suite actually running** — it's written (`cairo/tests/`,
    see §4a) but never executed or compile-checked on this machine (no
    `snforge` on Windows). `cairo/src/poker_hand.cairo`'s own unit tests DO
-   already run and pass (`scarb test -- -t unit`, §4a) — this item is
-   about everything else. Get onto a machine with `snforge`
+   already run and pass (`scarb test -- -t unit`, §4a, now 24 tests) —
+   this item is about everything else. Get onto a machine with `snforge`
    (Linux/Mac/WSL), follow `cairo/tests/README.md`, run it, fix whatever
    the first real pass surfaces.
-3. ~~Pin the real commitment hash in `reveal_seed`~~ — **DONE**, see round 6
+2. ~~Pin the real commitment hash in `reveal_seed`~~ — **DONE**, see round 6
    in §5.
-4. ~~Multi-street betting + hand evaluation~~ — **DONE** (round 6, §5):
-   `advance_street` + `settle_table_by_hand`. Two real follow-ups remain
-   though: bet-matching/turn-order enforcement isn't implemented (see
-   `advance_street`'s doc comment), and `settle_table_by_hand` doesn't
-   verify submitted hole cards against the seed commitment (needs item 5
-   below first).
-5. Move the shuffle-from-seed algorithm on-chain (Poseidon-based
-   Fisher-Yates, replacing `scripts/deal_verify.py`'s Python
-   `random.Random` stand-in). Two birds: this is also what
-   `settle_table_by_hand` needs to eventually verify a submitted hole card
-   actually matches the committed-and-revealed deck, not just trust the
-   dealer's submission.
+3. ~~Multi-street betting + hand evaluation~~ — **DONE** (round 6, §5):
+   `advance_street` + `settle_table_by_hand`. ~~Card validation~~ —
+   **DONE** (round 7, §5): `assert_valid_deck_cards`. ~~Bet-matching/
+   turn-order enforcement~~ is still open (see `advance_street`'s doc
+   comment); ~~`settle_table_by_hand` doesn't verify submitted hole cards
+   against the seed commitment~~ — **DONE**, see item 5.
+5. ~~Move the shuffle-from-seed algorithm on-chain~~ / ~~seat-count
+   concept~~ / ~~wire it into settle_table_by_hand~~ — **ALL DONE**
+   (round 8, §4b/§4c): `cairo/src/shuffle.cairo`'s Poseidon-based
+   Fisher-Yates exists, is genuinely tested, and is cross-verified
+   bit-for-bit against `scripts/deal_verify.py`'s Python side
+   (`random.Random` is gone). `create_table` takes `max_seats` and
+   `join_table` enforces `seat < max_seats` (`BAD_MAX_SEATS`/`BAD_SEAT`).
+   `settle_table_by_hand` now requires `reveal_seed` (`SEED_NOT_REVEALED`)
+   and asserts every submitted card matches its position in
+   `shuffle::shuffled_deck(revealed_seed)` (`CARD_MISMATCH`) — see §4c for
+   the full writeup, including how `cairo/tests/test_hand_eval.cairo`'s
+   existing hand-picked-card tests were reworked to use real,
+   seed-derived cards (found via a doubly-verified Python+Cairo search)
+   instead. **The shuffle-from-seed item is fully closed at the contract
+   level.** (`assert_valid_deck_cards`'s range/distinctness check is now
+   largely redundant for calls that reach it — kept anyway as
+   defense-in-depth.)
 6. Wire the frontend — `src/` still runs the starter kit's original demo UI
    (wallet connect + shield/unshield/echo). Nothing calls `PokerGame` yet.
 7. Deploy to Sepolia once tests pass — needs the real STRK20 pool address as
@@ -487,7 +677,23 @@ canonical, kept-up-to-date list:
   the GitHub releases page, extract to `%LOCALAPPDATA%\Programs\scarb\`, and
   add its `bin` to the **user** PATH via PowerShell's
   `[Environment]::SetEnvironmentVariable`. An already-open shell won't see
-  the new PATH — say so if a fresh `scarb: command not found` shows up.
+  the new PATH — say so if a fresh `scarb: command not found` shows up. **This
+  keeps happening across sessions** (hit again in round 8): `scarb` was not
+  on `PATH` in a brand-new shell even after the earlier PATH fix. Find it
+  fresh with (Bash) `find ~ -maxdepth 4 -iname "*scarb*" 2>/dev/null` (look
+  for `AppData/Local/Programs/scarb/scarb-v<version>.../bin`), then
+  `export PATH="<that bin dir>:$PATH"` for the session, rather than trusting
+  the PATH change persisted.
+- **`pip install starknet-py` can hang indefinitely on Windows without a
+  Rust/cargo toolchain** — dependency resolution alone ran 20+ minutes with
+  zero output and never started downloading (native-extension deps like
+  `fastecdsa`/`crypto-cpp-py` are the likely cause, same class of problem as
+  `snforge_std` needing `cargo fetch`). Don't wait on it again. For a
+  Starknet-matching Poseidon hash in Python with no native toolchain, use
+  `pip install poseidon-py` instead (`poseidon_py.poseidon_hash.
+  poseidon_hash_many`) — small prebuilt wheel, installs in seconds, and its
+  output was cross-verified to match Cairo's `core::poseidon::
+  poseidon_hash_span` exactly (see §4b).
 - **OneDrive file locks**: deleting/emptying a directory immediately after
   heavy file activity in it (e.g. right after `npm install` or unzipping)
   sometimes fails with "Device or resource busy" — OneDrive's sync process
@@ -511,9 +717,11 @@ canonical, kept-up-to-date list:
   `#[cfg(test)] mod tests { #[test] fn ... }` in the same file. Run with
   `scarb test -- -t unit` (`-t unit` is essential — it's what skips
   `cairo/tests/`, which still needs `snforge` and would otherwise fail the
-  whole run). This is how `cairo/src/poker_hand.cairo`'s 19 tests actually
-  run and pass in this environment — see §4a. Worth remembering for any
-  future pure-logic Cairo work here.
+  whole run). This is how `cairo/src/poker_hand.cairo`'s 24 tests (and
+  round 8's `shuffle.cairo`/`poseidon_vector_check.cairo`/
+  `shuffle_vector_check.cairo`, 8 more) actually run and pass in this
+  environment — see §4a/§4b. Worth remembering for any future pure-logic
+  Cairo work here.
 - **Cairo `felt252` short-string literals cap at 31 characters** — a
   `#[should_panic(expected: '...')]` or `assert(cond, '...')` string longer
   than that fails with `E3009: The value does not fit within the range of

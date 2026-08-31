@@ -321,9 +321,40 @@ pub fn best_of_7(cards: Span<u8>) -> u64 {
     best
 }
 
+/// Security review (round 7, Finding 1): `evaluate_5`/`best_of_7` derive
+/// rank/suit via `% 13`/`/ 13` with no bounds check — an out-of-range card
+/// (e.g. 200) silently folds into a valid-looking rank instead of
+/// reverting, and nothing anywhere checks the same card value isn't
+/// submitted twice (within one hand, or across different seats' hands at
+/// the same showdown). Neither issue causes a panic or overflow — the
+/// arithmetic stays well-defined for any u8 — but both let a caller
+/// fabricate a hand impossible with a real 52-card deck. Callers that feed
+/// externally-supplied cards into a value-moving decision (PokerGame's
+/// `settle_table_by_hand`) MUST call this on the full combined card set
+/// (community + every seat's hole cards) before scoring anything.
+pub fn assert_valid_deck_cards(cards: Span<u8>) {
+    let mut i: u32 = 0;
+    loop {
+        if i == cards.len() {
+            break;
+        }
+        let v = *cards.at(i);
+        assert(v < 52, 'BAD_CARDS');
+        let mut j: u32 = i + 1;
+        loop {
+            if j == cards.len() {
+                break;
+            }
+            assert(*cards.at(j) != v, 'BAD_CARDS');
+            j += 1;
+        };
+        i += 1;
+    };
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{best_of_7, evaluate_5};
+    use super::{assert_valid_deck_cards, best_of_7, evaluate_5};
 
     // rank 0-12 ('2'..'A'), suit 0-3 — matches scripts/deal_verify.py.
     fn card(rank: u8, suit: u8) -> u8 {
@@ -486,5 +517,39 @@ mod tests {
         // Four 9s is the actual best (all four 9s + any kicker) since all
         // four suits of rank 7 are present across hole+board.
         assert(s / 371293 == 7, 'expected four of a kind');
+    }
+
+    // ─── assert_valid_deck_cards (round 7, Finding 1 fix) ────────────────
+
+    #[test]
+    fn test_assert_valid_deck_cards_accepts_distinct_real_cards() {
+        // 7 genuinely distinct real deck cards should pass without panicking.
+        assert_valid_deck_cards(
+            array![card(0, 0), card(1, 1), card(2, 2), card(3, 3), card(4, 0), card(5, 1), card(6, 2)].span(),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected: 'BAD_CARDS')]
+    fn test_assert_valid_deck_cards_rejects_out_of_range() {
+        assert_valid_deck_cards(array![card(0, 0), 200].span());
+    }
+
+    #[test]
+    #[should_panic(expected: 'BAD_CARDS')]
+    fn test_assert_valid_deck_cards_rejects_duplicate() {
+        // card(5,1) appears twice — impossible with a real deck.
+        assert_valid_deck_cards(array![card(0, 0), card(5, 1), card(2, 2), card(5, 1)].span());
+    }
+
+    #[test]
+    fn test_assert_valid_deck_cards_boundary_51_ok_52_rejected() {
+        assert_valid_deck_cards(array![51_u8].span()); // highest real card, must pass
+    }
+
+    #[test]
+    #[should_panic(expected: 'BAD_CARDS')]
+    fn test_assert_valid_deck_cards_boundary_52_rejected() {
+        assert_valid_deck_cards(array![52_u8].span()); // one past the real deck
     }
 }

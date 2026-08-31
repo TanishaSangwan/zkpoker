@@ -37,6 +37,24 @@ pub mod mocks;
 // for why that works here but not for cairo/tests/).
 pub mod poker_hand;
 
+// Poseidon-based Fisher-Yates shuffle from a revealed seed — the on-chain
+// half of the commit-reveal fairness model. Part of the production build,
+// same pure-function testing story as poker_hand above.
+pub mod shuffle;
+
+// Regression test only: confirms core::poseidon::poseidon_hash_span
+// matches the Python `poseidon_py` package's poseidon_hash_many exactly
+// (verified 2026-08-31, poseidon_py 0.2.0 — see the file for the vector
+// and why this matters: scripts/deal_verify.py depends on that equality
+// to reproduce Cairo's shuffle off-chain). Test-only; no production code.
+#[cfg(test)]
+mod poseidon_vector_check;
+
+// Regression test: pins shuffle::shuffled_deck's output against an
+// independent Python computation (see the file for how to regenerate).
+#[cfg(test)]
+mod shuffle_vector_check;
+
 // ─────────────────────────────────────────────────────────────────────────
 // PokerGame: the STRK20 anonymizer for provably-fair on-chain poker.
 //
@@ -145,40 +163,119 @@ pub mod poker_hand;
 // doc comment specifies as the required off-chain construction. Existing
 // tests referencing the old placeholder behavior were updated to match.
 //
-// Round 6 (feature work, not a security finding — NOT yet audited):
-// multi-street betting (`advance_street`: PreFlop/Flop/Turn/River/Showdown,
-// dealer-only, `bet` closes once Showdown is reached) and
-// `settle_table_by_hand`, an on-chain-showdown alternative to
-// `settle_table` that computes each seat's best 5-of-7 hand via the new
+// Round 6 (feature work): multi-street betting (`advance_street`:
+// PreFlop/Flop/Turn/River/Showdown, dealer-only, `bet` closes once Showdown
+// is reached) and `settle_table_by_hand`, an on-chain-showdown alternative
+// to `settle_table` that computes each seat's best 5-of-7 hand via the new
 // `poker_hand` module and splits the pot among the actual strongest
-// hand(s) instead of trusting a dealer-supplied winner list. `poker_hand`
-// is genuinely unit-tested (19 tests, all passing — run with
-// `scarb test -- -t unit`, no snforge needed for that module). The new
+// hand(s) instead of trusting a dealer-supplied winner list. The new
 // contract entrypoints reuse settle_table's exact security patterns
 // (dealer-only, reentrancy check, table_settled, note_id_owner/
-// payout_token binding) but are new code and have NOT been through
-// cairo-auditor. Known simplifications, documented in full on
-// `advance_street`'s and `settle_table_by_hand`'s doc comments: no
+// payout_token binding). Known, still-open simplifications, documented in
+// full on `advance_street`'s and `settle_table_by_hand`'s doc comments: no
 // bet-matching/turn-order enforcement when advancing streets, and no
 // on-chain link yet between the submitted hole cards and the seed
 // commitment (that needs the shuffle-from-seed check to move on-chain
 // too — see docs/DESIGN.md open items).
 //
-// Everything here remains unaudited beyond round 5 — round 6's new code
-// (poseidon commitment fix, multi-street betting, settle_table_by_hand)
-// has not been through cairo-auditor at all. Re-run it after any further
-// change and before this touches a real pool.
+// Round 7 re-audit (targeted at round 6's additions specifically — full
+// detail in ../../security-review-20260831-120606.md): confirmed
+// `advance_street`/`settle_table_by_hand`'s dealer-only gating, zero
+// external calls, `table_street` single-writer status, and pot-splitting
+// math conservation identity all hold with no bypass. `poker_hand` itself
+// is genuinely unit-tested for correctness (now 24 tests, all passing —
+// run with `scarb test -- -t unit`, no snforge needed for that module),
+// but round 7 found a real SECURITY gap that unit-testing-for-correctness
+// alone couldn't catch: neither `settle_table_by_hand` nor `poker_hand`
+// checked submitted cards were real (< 52) or distinct, so a dealer could
+// fabricate an impossible hand (duplicate card values, or an out-of-range
+// value silently folded by `% 13`) to steer the computed winner —
+// undermining the "checkable by anyone" claim, though not granting new
+// *power* the dealer didn't already have via plain `settle_table`. FIXED:
+// new `poker_hand::assert_valid_deck_cards` (range + pairwise-distinct
+// check over the full combined community+hole card set), called before
+// any scoring in `settle_table_by_hand`.
+//
+// Round 8 (feature work, not an audit round): the on-chain half of the
+// shuffle-from-seed item — `shuffle::shuffled_deck(seed)`, a Poseidon-based
+// Fisher-Yates over the 52-card deck (see shuffle.cairo's module doc for
+// the algorithm). Genuinely unit-tested the same way as `poker_hand`
+// (permutation/determinism properties, `scarb test -- -t unit`, no
+// snforge), and cross-verified bit-for-bit against an independent Python
+// computation (poseidon_vector_check.cairo, shuffle_vector_check.cairo —
+// both regression tests, both passing) so scripts/deal_verify.py's
+// Python port is provably the same computation, not just plausibly
+// similar.
+//
+// create_table/join_table now also carry the seat-count concept the
+// shuffle module needs: create_table takes `max_seats` (nonzero, at most
+// MAX_TABLE_SEATS=23, chosen so 2*max_seats+5 <= 52 always leaves room for
+// 5 community cards) and join_table rejects any `seat` that doesn't parse
+// as a u32 less than max_seats (BAD_MAX_SEATS / BAD_SEAT). This is a
+// breaking interface change; every create_table caller (including all of
+// cairo/tests/) now passes max_seats.
+//
+// NOW WIRED into settle_table_by_hand (round 8, same session, follow-up
+// pass): it requires reveal_seed to have run for the table
+// (SEED_NOT_REVEALED otherwise), recomputes shuffled_deck(revealed_seed),
+// and checks every submitted card against its canonical position (seat N
+// at deck positions 2N/2N+1, community at 2*max_seats..2*max_seats+5) —
+// CARD_MISMATCH on any disagreement. This is the actual provenance fix:
+// the winner is now a deterministic function of the ACTUAL dealt cards,
+// not merely a plausible-looking hand a dealer chose to submit. See
+// settle_table_by_hand's own doc comment for the exact contract.
+// cairo/tests/test_hand_eval.cairo's settle_table_by_hand tests were
+// reworked to use real cards derived from an actual committed/revealed
+// seed (found via a Python search independently cross-checked against
+// poker_hand.cairo's own test vectors before being trusted — see that
+// test file's header) instead of hand-picked ones, since a fabricated (if
+// plausible) hand now fails CARD_MISMATCH before ever reaching scoring;
+// two new regression tests (SEED_NOT_REVEALED, CARD_MISMATCH on both a
+// wrong hole card and a wrong community card) cover the new checks
+// directly.
+//
+// The shuffle-from-seed item (this round's whole arc: shuffle module,
+// seat-count concept, and this wiring) is now fully closed at the
+// contract level. What is NOT covered: `cairo/tests/`'s new/reworked
+// tests are, like the rest of that suite, unexecuted on this machine (no
+// snforge) — the Cairo-side math they rely on (the exact deck positions
+// for the two seeds used) WAS independently confirmed via a genuinely-run
+// `scarb test -- -t unit` scratch check before being deleted, but the
+// snforge-level test flow itself (dispatcher calls, cheat codes, event
+// assertions) is unverified like everything else in that directory.
+//
+// Everything here remains unaudited beyond round 7. Round 8 added real
+// access-control-shaped surface (create_table's max_seats bound,
+// join_table's seat bound) AND a new value-moving check
+// (settle_table_by_hand's card-position assertions) that have NOT been
+// through cairo-auditor yet — treat BAD_MAX_SEATS/BAD_SEAT/
+// SEED_NOT_REVEALED/CARD_MISMATCH as unaudited until a fresh sweep covers
+// them. Re-run cairo-auditor after any further change and before this
+// touches a real pool.
 // ─────────────────────────────────────────────────────────────────────────
 
 #[starknet::interface]
 pub trait IPokerGame<TState> {
     // ── Table lifecycle ────────────────────────────────────────────────
-    // Dealer opens a table for a fixed buy-in, in a given token.
-    fn create_table(ref self: TState, table_id: felt252, token: ContractAddress, buy_in: u128);
+    // Dealer opens a table for a fixed buy-in, in a given token, with room
+    // for `max_seats` players (round 8). `max_seats` fixes a dense
+    // 0..max_seats-1 index space for this table's seats — join_table now
+    // rejects any `seat` that doesn't parse as a u32 in that range. This is
+    // what makes a seat -> shuffle-position convention possible (seat N's
+    // hole cards at shuffled_deck positions 2N/2N+1 — see shuffle.cairo);
+    // wiring that check into settle_table_by_hand is still a separate,
+    // not-yet-done step (see its own doc comment and docs/DESIGN.md open
+    // items). Must be nonzero and <= MAX_TABLE_SEATS (23 — the largest
+    // seat count that still leaves room for 5 community cards after every
+    // seat's 2 hole cards within a 52-card deck: 2*23+5=51<=52).
+    fn create_table(
+        ref self: TState, table_id: felt252, token: ContractAddress, buy_in: u128, max_seats: u32,
+    );
 
     // Player joins a seat. Actual buy-in shielding happens at the pool layer
     // (Deposit action); this just reserves the seat and records the note_id
-    // the player will be dealt into.
+    // the player will be dealt into. `seat` must parse as a u32 strictly
+    // less than the table's `max_seats` (round 8) — see create_table.
     fn join_table(ref self: TState, table_id: felt252, seat: felt252, hole_card_note_id: felt252);
 
     // ── Fairness: commit / deal / reveal ───────────────────────────────
@@ -245,14 +342,27 @@ pub trait IPokerGame<TState> {
     // seat(s) with the strongest hand (remainder to the first tied
     // winner, same rule as `settle_table`). This removes "trust the
     // dealer's claimed winner" — the winner is now a deterministic
-    // function of the submitted cards, checkable by anyone. It does NOT
-    // remove "trust that the submitted cards are the cards actually dealt"
-    // — that needs the shuffle-from-seed check to move on-chain too (see
-    // docs/DESIGN.md open items; scripts/deal_verify.py does this
-    // off-chain today). `seats`/`hole_cards`/`payout_note_ids` must be the
-    // same length and in the same order; each seat must not be folded, and
-    // requires `table_street == 4` (Showdown) — call `advance_street` four
-    // times first. Shares every other guard `settle_table` has (dealer,
+    // function of the submitted cards, checkable by anyone.
+    //
+    // Round 8: also removes "trust that the submitted cards are the cards
+    // actually dealt". Requires `reveal_seed` to have run for this table
+    // (`SEED_NOT_REVEALED` otherwise), then recomputes
+    // `shuffle::shuffled_deck(revealed_seed)` and checks every submitted
+    // card against its canonical position in it (`CARD_MISMATCH`
+    // otherwise): seat *N*'s hole cards must be the values at deck
+    // positions `2N`/`2N+1` (in either order — hole-card order carries no
+    // meaning), and `community_cards[k]` must equal the deck's position
+    // `2*max_seats + k` for `k` in `0..5`, in order (the natural
+    // flop/turn/river order). This makes `assert_valid_deck_cards`'s
+    // range/distinctness check largely redundant for a call that reaches
+    // this point (a genuine permutation is inherently valid and distinct)
+    // — kept anyway as defense-in-depth, and because it still runs first
+    // and gives a clearer error for a blatantly fabricated card.
+    //
+    // `seats`/`hole_cards`/`payout_note_ids` must be the same length and in
+    // the same order; each seat must not be folded, and requires
+    // `table_street == 4` (Showdown) — call `advance_street` four times
+    // first. Shares every other guard `settle_table` has (dealer,
     // reentrancy, `table_settled`, `note_id_owner`/`payout_token` binding).
     fn settle_table_by_hand(
         ref self: TState,
@@ -307,6 +417,10 @@ pub trait IPokerGame<TState> {
     fn get_seat_contributed(self: @TState, table_id: felt252, seat: felt252) -> u128;
     fn get_table_settled(self: @TState, table_id: felt252) -> bool;
     fn get_table_street(self: @TState, table_id: felt252) -> u8;
+    // Round 8. 0 for a table that was never created (matches the rest of
+    // this contract's convention of reading storage defaults directly
+    // rather than reverting on a nonexistent table_id for view functions).
+    fn get_table_max_seats(self: @TState, table_id: felt252) -> u32;
 }
 
 // pub: tests/ compiles as a separate crate and needs zkpoker::PokerGame::
@@ -346,6 +460,21 @@ pub mod PokerGame {
         pub const BETTING_CLOSED: felt252 = 'BETTING_CLOSED';
         pub const NOT_SHOWDOWN: felt252 = 'NOT_SHOWDOWN';
         pub const BAD_CARDS: felt252 = 'BAD_CARDS';
+        // Round 8: create_table's max_seats is 0, or exceeds MAX_TABLE_SEATS.
+        pub const BAD_MAX_SEATS: felt252 = 'BAD_MAX_SEATS';
+        // Round 8: join_table's seat doesn't parse as a u32, or is >=
+        // the table's max_seats.
+        pub const BAD_SEAT: felt252 = 'BAD_SEAT';
+        // Round 8: settle_table_by_hand called before reveal_seed for this
+        // table — there's no revealed seed yet to check submitted cards
+        // against.
+        pub const SEED_NOT_REVEALED: felt252 = 'SEED_NOT_REVEALED';
+        // Round 8: a card submitted to settle_table_by_hand (hole or
+        // community) doesn't match its required position in
+        // shuffle::shuffled_deck(revealed_seed) — the actual provenance
+        // check. Distinct from BAD_CARDS (assert_valid_deck_cards), which
+        // only checks a card COULD be real, not that it IS the one dealt.
+        pub const CARD_MISMATCH: felt252 = 'CARD_MISMATCH';
     }
 
     // Security review (round 3, Finding 2): how long a table may sit
@@ -361,6 +490,13 @@ pub mod PokerGame {
     // one flat betting phase, matching every pre-round-6 test/usage.
     const SHOWDOWN_STREET: u8 = 4;
 
+    // Round 8: the largest max_seats create_table will accept. Chosen so a
+    // future seat -> shuffle-position wiring (seat N's hole cards at
+    // shuffled_deck positions 2N/2N+1, community cards after all seats'
+    // slots) always has room for all 5 community cards in a 52-card deck:
+    // 2*MAX_TABLE_SEATS + 5 <= 52.
+    const MAX_TABLE_SEATS: u32 = 23;
+
     #[storage]
     struct Storage {
         // Security review (2026-08-31, cairo-auditor): pinned once at deploy
@@ -374,6 +510,11 @@ pub mod PokerGame {
         table_exists: Map<felt252, bool>,
         // table_id -> the address permitted to advance/settle it (Finding 2).
         table_dealer: Map<felt252, ContractAddress>,
+        // table_id -> seat capacity, fixed at create_table (round 8). Seats
+        // are a dense 0..max_seats-1 index space so a future seat ->
+        // shuffle-position wiring is possible — see create_table's doc
+        // comment and shuffle.cairo.
+        table_max_seats: Map<felt252, u32>,
         // table_id -> commit/reveal state
         seed_hash: Map<felt252, felt252>,
         seed_committed: Map<felt252, bool>,
@@ -440,6 +581,7 @@ pub mod PokerGame {
         table_id: felt252,
         token: ContractAddress,
         buy_in: u128,
+        max_seats: u32,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -517,22 +659,37 @@ pub mod PokerGame {
 
     #[abi(embed_v0)]
     impl PokerGameImpl of super::IPokerGame<ContractState> {
-        fn create_table(ref self: ContractState, table_id: felt252, token: ContractAddress, buy_in: u128) {
+        fn create_table(
+            ref self: ContractState, table_id: felt252, token: ContractAddress, buy_in: u128, max_seats: u32,
+        ) {
             assert(!self.table_exists.entry(table_id).read(), errors::TABLE_EXISTS);
+            // Round 8: fixes the seat index space (0..max_seats-1) this
+            // table will accept — see this fn's interface doc comment and
+            // MAX_TABLE_SEATS.
+            assert(max_seats != 0 && max_seats <= MAX_TABLE_SEATS, errors::BAD_MAX_SEATS);
             self.table_exists.entry(table_id).write(true);
             self.table_token.entry(table_id).write(token);
             self.table_buy_in.entry(table_id).write(buy_in);
+            self.table_max_seats.entry(table_id).write(max_seats);
             // Security review Finding 2: the caller becomes this table's
             // dealer — the only address settle_table will later accept.
             self.table_dealer.entry(table_id).write(get_caller_address());
             // Security review (round 3, Finding 2): starts the clock for
             // reclaim_stalled_bet's timeout.
             self.table_created_at.entry(table_id).write(get_block_timestamp());
-            self.emit(TableCreated { table_id, token, buy_in });
+            self.emit(TableCreated { table_id, token, buy_in, max_seats });
         }
 
         fn join_table(ref self: ContractState, table_id: felt252, seat: felt252, hole_card_note_id: felt252) {
             assert(self.table_exists.entry(table_id).read(), errors::NO_TABLE);
+            // Round 8: seat must be a dense index within this table's
+            // max_seats — see create_table's doc comment. A seat that
+            // doesn't even parse as a u32 (negative-looking or too large a
+            // felt252) is rejected the same way as one that's in range but
+            // >= max_seats; both are BAD_SEAT.
+            let seat_u32: u32 = seat.try_into().expect(errors::BAD_SEAT);
+            let max_seats = self.table_max_seats.entry(table_id).read();
+            assert(seat_u32 < max_seats, errors::BAD_SEAT);
             let key = (table_id, seat);
             assert(!self.seat_taken.entry(key).read(), errors::SEAT_TAKEN);
             self.seat_taken.entry(key).write(true);
@@ -817,6 +974,57 @@ pub mod PokerGame {
             assert(seats.len() != 0, errors::NO_INPUT);
             assert(community_cards.len() == 5, errors::BAD_CARDS);
 
+            // Security review (round 7, Finding 1): neither this function
+            // nor poker_hand checked that submitted cards are real (< 52)
+            // or distinct — a dealer could fabricate an impossible hand
+            // (duplicate card values, or an out-of-range value silently
+            // folded by poker_hand's `% 13`) to steer the computed winner.
+            // Validate the full combined card set (community + every
+            // seat's hole cards) before any of it is allowed to influence
+            // the pot split.
+            let mut all_cards: Array<u8> = array![];
+            let mut ci: u32 = 0;
+            loop {
+                if ci == community_cards.len() {
+                    break;
+                }
+                all_cards.append(*community_cards.at(ci));
+                ci += 1;
+            };
+            let mut hi: u32 = 0;
+            loop {
+                if hi == hole_cards.len() {
+                    break;
+                }
+                let (h1, h2) = *hole_cards.at(hi);
+                all_cards.append(h1);
+                all_cards.append(h2);
+                hi += 1;
+            };
+            super::poker_hand::assert_valid_deck_cards(all_cards.span());
+
+            // Round 8: the actual provenance check — every submitted card
+            // must match the seed-derived shuffle at its canonical
+            // position, not merely be a plausible real card (the check
+            // above). Requires reveal_seed to have run, and uses
+            // table_max_seats (round 8) to know where community cards
+            // start in the shuffled deck — see this fn's interface doc
+            // comment for the exact position convention.
+            assert(self.seed_revealed.entry(table_id).read(), errors::SEED_NOT_REVEALED);
+            let max_seats = self.table_max_seats.entry(table_id).read();
+            let revealed_seed = self.revealed_seed.entry(table_id).read();
+            let deck = super::shuffle::shuffled_deck(revealed_seed);
+            let deck_span = deck.span();
+            let community_start = 2 * max_seats;
+            let mut cc: u32 = 0;
+            loop {
+                if cc == 5 {
+                    break;
+                }
+                assert(*community_cards.at(cc) == *deck_span.at(community_start + cc), errors::CARD_MISMATCH);
+                cc += 1;
+            };
+
             let n = seats.len();
 
             // Pass 1: verify each seat exactly as settle_table does (real
@@ -840,7 +1048,29 @@ pub mod PokerGame {
                 );
                 assert(!self.seat_folded.entry((table_id, seat)).read(), errors::FOLDED);
 
+                // Round 8: seat N's hole cards must be the shuffled deck's
+                // values at positions 2N/2N+1, in either order (hole-card
+                // order carries no meaning for hand evaluation). `seat`
+                // parsing to u32 can't fail here in practice (join_table
+                // already required it to build this seat's storage
+                // entries), but this call is caller-supplied input, not a
+                // storage read, so it's re-checked rather than assumed.
+                let seat_u32: u32 = seat.try_into().expect(errors::BAD_SEAT);
+                // Defensive: seat should already be < max_seats (it can
+                // only have a seat_note if it passed join_table's own
+                // bound check), but this guards the deck index below
+                // against a raw out-of-bounds panic rather than a clean
+                // revert, on any input shape this function doesn't
+                // otherwise reject first.
+                assert(seat_u32 < max_seats, errors::BAD_SEAT);
                 let (h1, h2) = *hole_cards.at(i);
+                let expected_h1 = *deck_span.at(2 * seat_u32);
+                let expected_h2 = *deck_span.at(2 * seat_u32 + 1);
+                assert(
+                    (h1 == expected_h1 && h2 == expected_h2) || (h1 == expected_h2 && h2 == expected_h1),
+                    errors::CARD_MISMATCH,
+                );
+
                 let mut seven: Array<u8> = array![h1, h2];
                 let mut k: u32 = 0;
                 loop {
@@ -1015,6 +1245,10 @@ pub mod PokerGame {
 
         fn get_table_street(self: @ContractState, table_id: felt252) -> u8 {
             self.table_street.entry(table_id).read()
+        }
+
+        fn get_table_max_seats(self: @ContractState, table_id: felt252) -> u32 {
+            self.table_max_seats.entry(table_id).read()
         }
     }
 }

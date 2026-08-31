@@ -10,8 +10,8 @@ use snforge_std::{
 use zkpoker::mocks::{IMockErc20AdminDispatcher, IMockErc20AdminDispatcherTrait};
 use zkpoker::{IErc20DispatcherTrait, IPokerGameDispatcherTrait, PokerGame};
 use super::helpers::{
-    ALICE, BOB, DEALER, MALLORY, NOTE_A, NOTE_B, POOL, SEAT_0, SEAT_1, TABLE_1, TABLE_2, deploy_pokergame,
-    deploy_mock_token, fund_and_approve, setup_table_with_bets, setup_table_with_two_seats,
+    ALICE, BOB, DEALER, MALLORY, NOTE_A, NOTE_B, POOL, SEAT_0, SEAT_1, TABLE_1, TABLE_2, TWO_SEATS,
+    deploy_pokergame, deploy_mock_token, fund_and_approve, setup_table_with_bets, setup_table_with_two_seats,
 };
 
 const FUND: u256 = 10_000;
@@ -111,8 +111,8 @@ fn test_settle_table_cross_table_token_relabel_rejected() {
     let (token_b_addr, _token_b, _admin_b) = deploy_mock_token();
 
     start_cheat_caller_address(game.contract_address, DEALER());
-    game.create_table(TABLE_1, token_a_addr, 0);
-    game.create_table(TABLE_2, token_b_addr, 0);
+    game.create_table(TABLE_1, token_a_addr, 0, TWO_SEATS);
+    game.create_table(TABLE_2, token_b_addr, 0, TWO_SEATS);
     stop_cheat_caller_address(game.contract_address);
 
     // ALICE plays (and wins) table 1 in token_a, registering NOTE_A there.
@@ -183,7 +183,7 @@ fn test_settle_table_reentrancy_blocked() {
     let (token_addr, token, admin) = deploy_mock_token();
 
     start_cheat_caller_address(game.contract_address, token_addr);
-    game.create_table(TABLE_1, token_addr, 0);
+    game.create_table(TABLE_1, token_addr, 0, TWO_SEATS);
     game.join_table(TABLE_1, SEAT_0, NOTE_A);
     stop_cheat_caller_address(game.contract_address);
 

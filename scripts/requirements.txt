@@ -1,0 +1,6 @@
+# Poseidon hash matching Starknet/Cairo's core::poseidon exactly (verified
+# in cairo/src/poseidon_vector_check.cairo and shuffle_vector_check.cairo —
+# see deal_verify.py's module docstring). Small prebuilt wheel, no native
+# toolchain needed — unlike heavier packages (e.g. starknet-py) that pull in
+# native-extension dependencies and were not used here for that reason.
+poseidon-py==0.2.0

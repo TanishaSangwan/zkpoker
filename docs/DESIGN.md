@@ -97,8 +97,9 @@ contract deployment needed to test pure functions), so Scarb's own bundled
 cd cairo && scarb test -- -t unit
 ```
 
-— 19 tests, every hand category plus tie-break edge cases (wheel straight,
-flush-beats-straight, kicker comparisons, full-house trip-rank ties), all
+— 24 tests, every hand category plus tie-break edge cases (wheel straight,
+flush-beats-straight, kicker comparisons, full-house trip-rank ties), plus
+(added round 7) `assert_valid_deck_cards`'s range/distinctness checks, all
 passing. Contrast with `cairo/tests/` (the contract-level integration
 tests), which needs `snforge` and has never run in this environment — see
 "Test suite" below.
@@ -106,13 +107,101 @@ tests), which needs `snforge` and has never run in this environment — see
 **What `settle_table_by_hand` does and doesn't guarantee.** It removes
 "trust the dealer's claimed winner" — the winner is a deterministic
 function of the submitted cards, checkable by anyone re-running
-`poker_hand::best_of_7` on the same inputs. It does **not** remove "trust
-that the submitted hole cards are the cards actually dealt to that seat" —
-nothing on-chain today ties a submitted hole card back to the seed
-commitment (`reveal_seed`) the way `deal_verify.py` does off-chain. Closing
-that gap needs the shuffle-from-seed algorithm to move on-chain too (see
-open items below) so `settle_table_by_hand` could assert a submitted card
-matches the seat's position in the committed-and-revealed deck.
+`poker_hand::best_of_7` on the same inputs. As of round 7 it also rejects
+cards that couldn't come from a real deck (out-of-range or duplicated —
+`assert_valid_deck_cards`, called before any scoring). **As of round 8, it
+also removes "trust that the submitted cards are the cards actually
+dealt"**: it requires `reveal_seed` to have run (`SEED_NOT_REVEALED`
+otherwise), recomputes `shuffle::shuffled_deck(revealed_seed)`, and checks
+every submitted card against its canonical position in it —
+`CARD_MISMATCH` on any disagreement (seat *N*'s hole cards must be the
+deck's values at positions `2N`/`2N+1`; community cards must match
+positions `2*max_seats..2*max_seats+5` in order). A submission now has to
+be the actual committed-and-revealed deal, not merely a plausible-looking
+one — this is the full provenance fix the RFP's "provably fair" claim
+needs, closing what round 7 left open.
+
+## Deck shuffle from seed (`cairo/src/shuffle.cairo`, round 8)
+
+The on-chain half of the "swap `deal_verify.py`'s PRNG" item: a Poseidon-based
+Fisher-Yates shuffle, pure function, same testing story as `poker_hand.cairo`
+(genuinely run via `scarb test -- -t unit`, no `snforge` needed) —
+
+- `shuffled_deck(seed: felt252) -> Array<u8>` — the full 52-card deck (values
+  0-51), deterministically shuffled from `seed`. Each Fisher-Yates draw is
+  `poseidon_hash([seed, step]) % bound` (`step` = the current shuffle
+  position, so consecutive draws in one shuffle never collide); not
+  rejection-sampled (a plain `%` has a small modulo bias), an accepted
+  simplification at 52 elements, consistent with V1's overall commit-reveal
+  model rather than a cryptographically airtight RNG.
+- Tested directly: `shuffled_deck` produces a genuine permutation (every
+  value 0-51 appears exactly once, not just "52 elements"), is deterministic
+  for a given seed, and differs across seeds — 4 tests, all passing.
+- **Cross-verified against Python, not just self-consistent.** `poseidon-py`
+  (a small prebuilt-wheel PyPI package, no native/Rust toolchain needed —
+  `starknet-py` was tried first and abandoned: its dependency resolution
+  hung for 20+ minutes on this Windows machine without ever starting a
+  download, a known pain point with its native-extension dependencies) gave
+  a pure-Python `poseidon_hash_many` to check against. Two Cairo regression
+  tests pin this: `poseidon_vector_check.cairo` (a raw `poseidon_hash_span`
+  call vs. a Python-computed vector) and `shuffle_vector_check.cairo` (a
+  full `shuffled_deck(42)` output, all 52 cards, vs. the same computation
+  ported to Python) — both passing, so this isn't "should match", it's
+  checked. `scripts/deal_verify.py`'s `seeded_shuffle` is now that same
+  Python port (previously `random.Random(seed)`, an explicit stand-in) —
+  see that file's own docstring.
+
+**Seat-count concept (also round 8, follow-up pass).** Wiring the shuffle
+into `settle_table_by_hand` needs a fixed seat -> deck-position convention
+(e.g. seat *N*'s hole cards at positions `2N`/`2N+1`, community cards after
+all seats' hole-card slots), which needs the contract to know how many
+seats a table has. It didn't (`seat` was an arbitrary `felt252`, not a
+dense 0..N-1 index) — now it does:
+
+- `create_table` takes a new `max_seats: u32` argument, stored per
+  `table_id` (`table_max_seats`, readable via `get_table_max_seats`).
+  Rejected (`BAD_MAX_SEATS`) if zero or over `MAX_TABLE_SEATS` (23 — the
+  largest seat count that still leaves room for 5 community cards after
+  every seat's 2 hole cards in a 52-card deck: `2*23+5 = 51 <= 52`).
+- `join_table` rejects (`BAD_SEAT`) any `seat` that doesn't parse as a
+  `u32`, or parses fine but is `>= max_seats`. This is what guarantees
+  every taken seat on a table is a genuine dense index — the actual
+  precondition the shuffle-position check will need.
+- This is a **breaking interface change**: every `create_table` call site,
+  including all of `cairo/tests/`, now passes `max_seats` — updated (with
+  new regression tests for `BAD_MAX_SEATS`/`BAD_SEAT`) but, like the rest
+  of that suite, unexecuted on this machine (see "Test suite" below).
+
+**Wired into `settle_table_by_hand` (round 8, same session, follow-up
+pass).** The module and the seat-index precondition above both now feed a
+real check: `settle_table_by_hand` requires `reveal_seed` to have run
+(`SEED_NOT_REVEALED` otherwise), recomputes
+`shuffle::shuffled_deck(revealed_seed)`, and asserts every submitted card
+matches its canonical position (`CARD_MISMATCH` otherwise) — see "Hand
+evaluation" above for the full writeup. The shuffle-from-seed item, across
+this round's whole arc (shuffle module, seat-count concept, this wiring),
+is now **closed** at the contract level.
+
+`cairo/tests/test_hand_eval.cairo`'s `settle_table_by_hand` tests were
+reworked to match: hand-picked cards would now fail `CARD_MISMATCH` before
+ever reaching scoring, so the clear-winner and tie tests now use real
+cards derived from an actual committed/revealed seed. Finding a seed that
+produces a clean win (and, separately, an exact tie) for a specific
+2-seat deal isn't something to guess by hand, so both were found by
+brute-force search over seeds in Python — reusing the same verified
+Poseidon shuffle as the cross-checks above, plus a Python port of
+`poker_hand.cairo`'s exact scoring algorithm that was itself cross-checked
+against `poker_hand.cairo`'s own test vectors (wheel straight, full-house
+tie-break, `best_of_7` category selection, etc.) before being trusted for
+the search. The resulting deck positions were then independently
+confirmed a second way — by calling `shuffle::shuffled_deck` directly in a
+genuinely-run `scarb test -- -t unit` scratch test — before being baked
+into the `snforge`-only test file (see that file's own header for the
+regenerate-if-needed Python snippet). Two new regression tests
+(`SEED_NOT_REVEALED`, `CARD_MISMATCH` on a wrong hole card and separately
+a wrong community card) cover the new checks directly. Like the rest of
+`cairo/tests/`, these are still unexecuted on this machine — the deck-math
+inputs are independently verified, the `snforge` test flow itself isn't.
 
 ## Buy-in, betting, payout flow (SDK / wallet side)
 
@@ -249,15 +338,30 @@ exploitable, not yet fixed):
 Five rounds in, the security surface has narrowed to one accepted
 low-severity gap.
 
-**Round 6 is feature work, not yet audited.** After round 5, three things
-were added without a follow-up `cairo-auditor` pass: the `reveal_seed`
-Poseidon fix (small, see below), multi-street betting (`advance_street`,
-plus a new `bet` guard), and `settle_table_by_hand` (a substantial new
-entrypoint reusing `settle_table`'s security patterns but genuinely new
-code — array-input handling, score comparison, a second pot-distribution
-path). Treat all of round 6 as unaudited. `settle_table_by_hand` in
-particular is the highest-value target for a round 7 sweep: it's the
-newest, largest, most structurally different addition since round 1.
+**Round 6** added three things after round 5: the `reveal_seed` Poseidon
+fix (see below), multi-street betting (`advance_street`, plus a new `bet`
+guard), and `settle_table_by_hand` (a substantial new entrypoint reusing
+`settle_table`'s security patterns but genuinely new code).
+
+**Round 7 re-audit** (targeted specifically at round 6's additions, not a
+full-repo scan) — full detail in `../security-review-20260831-120606.md`:
+confirmed `advance_street`/`settle_table_by_hand`'s dealer gating, zero
+external calls, `table_street` single-writer status, and the pot-splitting
+conservation identity all hold with no bypass. Found **1 Medium**:
+
+1. Neither `settle_table_by_hand` nor `poker_hand::evaluate_5` checked
+   submitted cards were real (`< 52`) or distinct — a dealer could
+   fabricate an impossible hand (duplicate card values, or an out-of-range
+   value silently folded by `% 13`) to steer the on-chain-computed winner.
+   Didn't grant new *power* (the dealer already controls `settle_table`'s
+   trusted winner list), but undermined `settle_table_by_hand`'s specific
+   "checkable by anyone" claim. **FIXED**: new
+   `poker_hand::assert_valid_deck_cards` (range + pairwise-distinct check
+   over the full community+hole card set), called before any scoring.
+
+Six/seven rounds in, the security surface has narrowed to one accepted
+low-severity gap (round 5's constructor zero-`pool` item) plus whatever a
+future audit finds in code written after round 7.
 
 ## Test suite
 
@@ -298,25 +402,30 @@ another party could exploit.
 
 ## Open items (in priority order for the hackathon)
 
-1. Round 7 `cairo-auditor` sweep covering round 6 (Poseidon fix,
-   multi-street betting, `settle_table_by_hand`) — the biggest unaudited
-   surface in the contract right now.
-2. Get `snforge` running (Linux/Mac/WSL — see `cairo/tests/README.md`) and
-   actually run the test suite (`cairo/tests/`, now including
-   `test_hand_eval.cairo`'s streets/settle_table_by_hand coverage); fix
-   whatever the first real compile/run surfaces. (`poker_hand`'s own unit
-   tests already run and pass today — see "Hand evaluation" above.)
-3. Move the shuffle-from-seed algorithm on-chain (Poseidon-based
-   Fisher-Yates, replacing `deal_verify.py`'s Python `random.Random` stand-
-   in) so `settle_table_by_hand` can eventually verify a submitted hole
-   card actually matches the committed-and-revealed deck, not just trust
-   the dealer's submission. Two birds: this is also the long-standing
-   "swap `deal_verify.py`'s PRNG" item.
-4. Bet-matching / turn-order enforcement for `advance_street` — currently
+1. Get `snforge` running (Linux/Mac/WSL — see `cairo/tests/README.md`) and
+   actually run the test suite (`cairo/tests/`, including
+   `test_hand_eval.cairo`'s streets/settle_table_by_hand/card-validation
+   coverage); fix whatever the first real compile/run surfaces.
+   (`poker_hand`'s own unit tests already run and pass today — 24 tests,
+   see "Hand evaluation" above.)
+2. ~~Shuffle-from-seed on-chain~~ — **DONE (round 8)**. The module, the
+   seat-count concept it needs, and the `settle_table_by_hand` wiring that
+   actually checks submitted cards against the seed-derived deck are all
+   in place — see "Deck shuffle from seed" above. This was the last piece
+   of the provenance gap (round 7 fixed card *validity/distinctness*, not
+   *provenance*); it's now closed at the contract level. What remains
+   is the same as everything in `cairo/tests/`: unexecuted on this
+   machine (item 1).
+3. Bet-matching / turn-order enforcement for `advance_street` — currently
    a dealer can advance streets without every active seat having called
    the current bet.
-5. Frontend: wire `PokerGame` actions into the starter-kit UI
+4. Frontend: wire `PokerGame` actions into the starter-kit UI
    (`src/app/components`), replacing the echo-helper demo flow.
-6. Generalization write-up for the pitch: the "card-as-encrypted-note +
+5. Generalization write-up for the pitch: the "card-as-encrypted-note +
    commit-reveal deal" pattern applies to Battleship, Mafia, and sealed-bid
    auctions, per the RFP's own framing — worth a slide, not more code.
+6. A round 8 *security* sweep is now ripe — round 8 added real
+   access-control-shaped surface (`create_table`'s `max_seats` bound,
+   `join_table`'s seat bound) AND a new value-moving check
+   (`settle_table_by_hand`'s card-position assertions), none of which has
+   been through `cairo-auditor` yet.
