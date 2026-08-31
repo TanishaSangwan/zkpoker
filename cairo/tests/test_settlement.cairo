@@ -8,7 +8,7 @@ use snforge_std::{
     EventSpyAssertionsTrait, spy_events, start_cheat_caller_address, stop_cheat_caller_address,
 };
 use zkpoker::mocks::{IMockErc20AdminDispatcher, IMockErc20AdminDispatcherTrait};
-use zkpoker::{IErc20DispatcherTrait, IPokerGameDispatcherTrait, PokerGame};
+use zkpoker::{IPokerGameDispatcherTrait, PokerGame};
 use super::helpers::{
     ALICE, BOB, DEALER, MALLORY, NOTE_A, NOTE_B, POOL, SEAT_0, SEAT_1, TABLE_1, TABLE_2, TWO_SEATS,
     deploy_pokergame, deploy_mock_token, fund_and_approve, setup_table_with_bets, setup_table_with_two_seats,

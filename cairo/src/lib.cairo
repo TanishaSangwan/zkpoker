@@ -24,10 +24,22 @@ pub trait IErc20<TState> {
 }
 
 // Test-only mock ERC20 (configurable failure/fee/reentrancy behavior) used
-// by cairo/tests/*.cairo. Compiled only for `scarb build --test` / `snforge
-// test`, never shipped in the production `starknet-contract` build.
+// by cairo/tests/*.cairo. Never shipped in the production
+// `starknet-contract` build.
 // pub: tests/ compiles as a separate crate and needs zkpoker::mocks::... .
-#[cfg(test)]
+//
+// Gated on the `testing` FEATURE, not `#[cfg(test)]`. `cfg(test)` was wrong
+// here and made the whole cairo/tests/ suite uncompilable: snforge builds
+// cairo/tests/ as a separate `zkpoker_tests` crate that links against
+// `zkpoker` compiled WITHOUT cfg(test), so `use zkpoker::mocks::...`
+// resolved to nothing (E0006) and cascaded into ~40 bogus `<missing>`-type
+// Drop/Copy errors across the suite. It would also have broken at runtime
+// even if it compiled: `declare("MockErc20")` needs a real compiled contract
+// class in the package's starknet-contract target, which a cfg(test) module
+// never produces.
+// Run the suite with: `snforge test --features testing`
+// A plain `scarb build` (no --features) still excludes this entirely.
+#[cfg(feature: "testing")]
 pub mod mocks;
 
 // Pure Texas Hold'em hand evaluation, used by
@@ -559,9 +571,16 @@ pub mod PokerGame {
         self.pool.write(pool);
     }
 
+    // pub on the enum, every event struct, and every field: cairo/tests/ is
+    // a separate crate and asserts on emitted events by constructing these
+    // (e.g. PokerGame::Event::Fold(PokerGame::Fold { table_id, seat })).
+    // Edition 2024_07 defaults items AND struct fields to private, so
+    // without this the suite fails with E2099/E2059 "not visible in this
+    // context". Events are public data on-chain regardless — this only
+    // affects Cairo-level name visibility, not what the contract exposes.
     #[event]
     #[derive(Drop, starknet::Event)]
-    enum Event {
+    pub enum Event {
         TableCreated: TableCreated,
         SeatJoined: SeatJoined,
         DealCommitted: DealCommitted,
@@ -576,85 +595,85 @@ pub mod PokerGame {
     }
 
     #[derive(Drop, starknet::Event)]
-    struct TableCreated {
+    pub struct TableCreated {
         #[key]
-        table_id: felt252,
-        token: ContractAddress,
-        buy_in: u128,
-        max_seats: u32,
+        pub table_id: felt252,
+        pub token: ContractAddress,
+        pub buy_in: u128,
+        pub max_seats: u32,
     }
 
     #[derive(Drop, starknet::Event)]
-    struct SeatJoined {
+    pub struct SeatJoined {
         #[key]
-        table_id: felt252,
-        seat: felt252,
-        hole_card_note_id: felt252,
+        pub table_id: felt252,
+        pub seat: felt252,
+        pub hole_card_note_id: felt252,
     }
 
     #[derive(Drop, starknet::Event)]
-    struct DealCommitted {
+    pub struct DealCommitted {
         #[key]
-        table_id: felt252,
-        seed_hash: felt252,
+        pub table_id: felt252,
+        pub seed_hash: felt252,
     }
 
     #[derive(Drop, starknet::Event)]
-    struct Dealt {
+    pub struct Dealt {
         #[key]
-        table_id: felt252,
+        pub table_id: felt252,
     }
 
     #[derive(Drop, starknet::Event)]
-    struct SeedRevealed {
+    pub struct SeedRevealed {
         #[key]
-        table_id: felt252,
-        seed: felt252,
+        pub table_id: felt252,
+        pub seed: felt252,
     }
 
     #[derive(Drop, starknet::Event)]
-    struct Bet {
+    pub struct Bet {
         #[key]
-        table_id: felt252,
-        seat: felt252,
-        amount: u128,
+        pub table_id: felt252,
+        pub seat: felt252,
+        pub amount: u128,
     }
 
     #[derive(Drop, starknet::Event)]
-    struct Fold {
+    pub struct Fold {
         #[key]
-        table_id: felt252,
-        seat: felt252,
+        pub table_id: felt252,
+        pub seat: felt252,
     }
 
     #[derive(Drop, starknet::Event)]
-    struct Settled {
+    pub struct Settled {
         #[key]
-        table_id: felt252,
-        winner_count: u32,
+        pub table_id: felt252,
+        pub winner_count: u32,
     }
 
     #[derive(Drop, starknet::Event)]
-    struct Invoked {
+    pub struct Invoked {
         #[key]
-        note_id: felt252,
-        amount: u128,
-        caller: ContractAddress,
+        pub note_id: felt252,
+        pub amount: u128,
+        pub caller: ContractAddress,
     }
 
     #[derive(Drop, starknet::Event)]
-    struct Reclaimed {
+    pub struct Reclaimed {
         #[key]
-        table_id: felt252,
-        seat: felt252,
-        amount: u128,
+        pub table_id: felt252,
+        pub seat: felt252,
+        pub amount: u128,
     }
 
     #[derive(Drop, starknet::Event)]
-    struct StreetAdvanced {
+    pub struct StreetAdvanced {
         #[key]
-        table_id: felt252,
-        street: u8,
+        pub table_id: felt252,
+        pub street: u8,
     }
 
     #[abi(embed_v0)]

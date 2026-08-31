@@ -1,13 +1,26 @@
-# Test suite — has NOT been run or compile-checked
+# Test suite — RUNS AND PASSES (98/98, first executed 2026-08-31)
 
-**Exception: `cairo/src/poker_hand.cairo` and `cairo/src/shuffle.cairo`'s
-own unit tests DO run and DO pass** — 30 tests total, via
-`cd cairo && scarb test -- -t unit`. Those modules have no
-storage/external-call/cheat-code dependency, so they need none of the
-`snforge` machinery this directory's suite needs. See their module doc
-comments and `docs/DESIGN.md` "Hand evaluation" / "Deck shuffle from seed"
-for why. Everything below is about *this* directory (`cairo/tests/`), which
-is a different, still-unrun story.
+**Status: green.** The entire suite compiles and passes on Linux with
+`snforge 0.63.0` / `scarb 2.18.0`:
+
+```bash
+cd cairo && snforge test --features testing
+# Collected 98 test(s) from zkpoker package
+#   Running 30 test(s) from src/     <- poker_hand, shuffle, vector checks
+#   Running 68 test(s) from tests/   <- this directory
+# Tests: 98 passed, 0 failed, 0 ignored, 0 filtered out
+```
+
+`--features testing` is **required** — it gates `../src/mocks.cairo` (see
+"How it was unblocked" below). Without it, `cairo/tests/` cannot compile.
+
+Note that **`snforge test` now runs the `src/` unit tests too** (the 30
+`poker_hand`/`shuffle`/vector-check tests). The previously-documented
+`scarb test -- -t unit` no longer collects them: with `snforge_std` present,
+its `#[test]` attribute macro owns test collection and `cairo_test` sees
+zero. One command covers everything now — prefer it. (`scarb test` on its
+own fails, since it doesn't pass `--features testing` to the integration
+crate.)
 
 This suite (`helpers.cairo`, `test_lifecycle.cairo`, `test_betting.cairo`,
 `test_settlement.cairo`, `test_hand_eval.cairo`, `../src/mocks.cairo`) was
@@ -15,21 +28,6 @@ written against the contract as of round 5 of the security review (plus
 round 6's streets/`settle_table_by_hand` addition for `test_hand_eval.cairo`
 specifically), following the `cairo-testing` skill's coverage rules and the
 "Required Tests" lists from all five `../../security-review-*.md` reports.
-**It has not been executed, and could not even be compile-checked**, on the
-machine it was written on:
-
-- Starknet Foundry (`snforge`) ships no Windows binary.
-- Building it from source needs a Rust/cargo toolchain, which wasn't
-  installed, and adding it wasn't judged worth the time (see the git
-  history / conversation this came from for the full reasoning).
-- `scarb build --test` can compile test code without the `snforge` binary
-  itself — but even that needs `snforge_std`'s companion compiler plugin
-  (`snforge_scarb_plugin`), which had no prebuilt Windows binary for the
-  version tried and fell back to `cargo fetch` — still blocked without
-  Rust. Adding `snforge_std` as a dev-dependency was tried and reverted
-  after it broke even the **plain** `scarb build` (Scarb resolves the full
-  dependency graph, dev-dependencies included, for any build) — see
-  `cairo/Scarb.toml`'s comment.
 
 **Every test was authored carefully against the actual contract, re-read
 multiple times, and one real bug was caught and fixed this way** (both
@@ -37,35 +35,42 @@ reentrancy regression tests initially had the malicious token impersonate
 a separate "MALLORY" identity, which would have hit the `NOT_SEAT_OWNER`/
 `NOT_DEALER` check before ever reaching the `reentrancy_lock` check the
 test was meant to isolate — fixed by having the token contract itself act
-as the seat owner/dealer, matching the audit's own attack narrative). That
-said, treat every test in this suite as **unverified** until it's actually
-run. Cairo/Starknet-specific syntax mistakes (dispatcher trait bounds,
-event-path resolution, u128/u256 conversions) are plausible even with
-careful review, and this notably has not caught any that might exist.
+as the seat owner/dealer, matching the audit's own attack narrative).
+**That careful authoring held up: on the first real execution, zero tests
+failed.** Only the two structural/environment problems below had to be
+fixed — no test's actual logic or assertions needed changing.
 
-## To run this suite
+## How it was unblocked (history — was "never run" through 2026-08-31)
 
-You need a machine with `snforge` — Linux, macOS, or WSL on Windows (not
-native Windows).
+Originally written on Windows, where `snforge` ships no binary and building
+it needed a Rust/cargo toolchain that wasn't installed, so the suite was
+never executed or even compile-checked. On a Linux machine with `snforge`
+already installed, two real bugs surfaced on the first run:
 
-1. Install Starknet Foundry: https://foundry-paradigm.xyz (or
-   `curl -L https://sh.starkli.sh | sh` doesn't apply — see the official
-   `snfoundryup` installer instead — check the docs for the current
-   command, this changes).
-2. Add to `cairo/Scarb.toml` (removed from the committed file for the
-   reason above — Scarb.toml itself documents this):
-   ```toml
-   [dev-dependencies]
-   snforge_std = "0.63.0"  # match your installed snforge CLI version — run `snforge --version`
+1. **`mocks` was `#[cfg(test)]`-gated** in `../src/lib.cairo`. snforge
+   compiles `cairo/tests/` as a separate `zkpoker_tests` crate linked
+   against `zkpoker` built **without** `cfg(test)`, so `use
+   zkpoker::mocks::...` resolved to nothing (E0006) and cascaded into ~40
+   spurious `<missing>`-type Drop/Copy errors across the suite. It would
+   also have failed at runtime regardless: `declare("MockErc20")` needs a
+   real compiled contract class in the package's `starknet-contract`
+   target, which a `cfg(test)` module never produces. **Fixed** by gating
+   it on a Scarb feature instead (`#[cfg(feature: "testing")]` +
+   `[features] testing = []`), which keeps the mock out of the production
+   build exactly as before — verified: `scarb build` emits only
+   `PokerGame`, no `MockErc20`.
+2. **Events weren't `pub`.** `PokerGame`'s `Event` enum, all 11 event
+   structs, and all 27 of their fields were private (edition 2024_07
+   defaults both items and struct fields to private), so every
+   `assert_emitted` in this suite failed with E2099/E2059 "not visible in
+   this context". **Fixed** by making them `pub` — a Cairo-level name
+   visibility change only; emitted events were always public on-chain data.
 
-   [tool.scarb]
-   allow-prebuilt-plugins = ["snforge_std"]
-   ```
-3. From `cairo/`: `snforge test`
-4. Fix whatever breaks. Start with `helpers.cairo` and one simple test
-   (`test_create_table_success` in `test_lifecycle.cairo`) before the more
-   involved reentrancy/regression tests — if the deploy/dispatcher pattern
-   itself needs adjustment, better to find that on the simplest test first.
+The old Windows-era warning that adding `snforge_std` as a dev-dependency
+breaks even a plain `scarb build` **does not reproduce here** (Linux has
+the prebuilt plugin, so there's no `cargo fetch` fallback) — it's now a
+normal dev-dependency in `cairo/Scarb.toml`, and `scarb build` was
+re-verified clean with it present.
 
 ## What's covered
 

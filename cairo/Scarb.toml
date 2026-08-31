@@ -7,24 +7,37 @@ edition = "2024_07"
 starknet = "2.18.0"
 
 [dev-dependencies]
-# Safe: cairo_test is Scarb's own bundled test runner (the deprecated-but-
-# working `scarb cairo-test` / `scarb test -- -t unit`), not a cargo-built
-# plugin — confirmed it does NOT break `scarb build` the way snforge_std
-# did (see the note below). This is what runs cairo/src/poker_hand.cairo's
-# unit tests; it can't run cairo/tests/ (that needs snforge_std's
-# cheatcodes/contract-deployment support), only pure-function unit tests
-# co-located in src/.
+# Scarb's own bundled test runner. Kept for compatibility, but it no longer
+# collects anything: with snforge_std present, snforge's `#[test]` attribute
+# macro owns test collection, so `scarb test -- -t unit` (the old documented
+# command for src/'s pure-function unit tests) now reports 0 tests. Those 30
+# tests still run — `snforge test --features testing` executes them along
+# with cairo/tests/, 98 total. Use that single command.
 cairo_test = "2.18.0"
+# Added: this machine has a real snforge (0.63.0) with a prebuilt plugin, so
+# the Windows/no-Rust blocker documented below and in cairo/tests/README.md
+# no longer applies here. Verified `scarb build` still succeeds clean with
+# this present (see the plain-build note below).
+snforge_std = "0.63.0"
 
 [[target.starknet-contract]]
 sierra = true
 casm = true
 
-# Test dependencies (snforge_std) are intentionally NOT declared here.
-# This machine has no Rust/cargo toolchain, and Scarb resolves the full
-# dependency graph — dev-dependencies included — even for a plain `scarb
-# build`, so adding snforge_std here breaks the production build the moment
-# its companion snforge_scarb_plugin needs `cargo fetch` to resolve (no
-# prebuilt Windows plugin was available for the version tried). See
-# cairo/tests/README.md for the exact block to add before running the test
-# suite on a machine with Rust installed (or under WSL).
+[tool.scarb]
+allow-prebuilt-plugins = ["snforge_std"]
+
+# `testing` gates src/mocks.cairo (the mock ERC20 that cairo/tests/ needs to
+# declare/deploy). NOT enabled by default, so a plain `scarb build` never
+# compiles the mock into the production starknet-contract artifacts.
+# The suite must be run as: snforge test --features testing
+[features]
+testing = []
+
+# Historical note (see cairo/tests/README.md for the original writeup): on
+# the Windows machine this project started on, snforge_std broke even a
+# plain `scarb build` because Scarb resolves the full dependency graph
+# (dev-dependencies included) and no prebuilt Windows plugin existed for the
+# version tried, so it fell back to `cargo fetch` with no Rust toolchain
+# installed. Not an issue on this machine (Linux, prebuilt plugin available)
+# — confirmed by re-running `scarb build` after adding this.

@@ -19,14 +19,14 @@ encrypted notes, commit-reveal dealing (V1 — not yet the RFP's "aspirational"
 V2 STARK-proven shuffle), paymaster-hidden player identity, private buy-ins
 and payouts.
 
-**Location:** `C:\Users\TANISHA\OneDrive\Desktop\zkpoker\` (moved here from
-an earlier `strk20-poker` folder mid-session — if you find any leftover
-references to that name anywhere, they're stale; the project's real name is
-`zkpoker`, matching `package.json` and `cairo/Scarb.toml`).
+**Location:** `~/Documents/zkpoker` on Linux (was
+`C:\Users\TANISHA\OneDrive\Desktop\zkpoker\` — if you find leftover
+references to that path or to an earlier `strk20-poker` folder name, they're
+stale; the project's real name is `zkpoker`, matching `package.json` and
+`cairo/Scarb.toml`).
 
-**Git:** initialized (`git init`), everything staged, **nothing committed
-yet**. The user has been asked and hasn't requested a commit — don't commit
-without asking first.
+**Git:** 5 commits on `main` as of 2026-08-31 (`8c0b57b` "first" through
+`8c1f68a` "test needed"). Don't commit without asking first.
 
 **⚠️ Important caveat on "what's been checked":** rounds 1-5 scanned only
 `cairo/src/lib.cairo` as it stood after round 5. Round 7 covered
@@ -42,7 +42,23 @@ review. See §5's "Round 7" entry for exactly what it covered and found.
 
 ## 2. Environment / toolchain state
 
-- **Scarb 2.18.0** is installed at
+**As of 2026-08-31 this project is on a Linux machine (Kali), not the
+original Windows one.** Everything below marked "Windows" is historical —
+kept because the constraints matter if it ever moves back, but none of it
+applies here. Current toolchain, all via **asdf**:
+
+- `scarb 2.18.0` (pinned in `cairo/.tool-versions`; asdf shipped 2.20.0 by
+  default, so 2.18.0 was installed explicitly with `asdf install scarb
+  2.18.0` — without it every `scarb` call fails with "No version is set").
+- `snforge 0.63.0` (asdf plugin `starknet-foundry`), plus `starknet-devnet
+  0.9.0`, `cairo-coverage`, `cairo-profiler` in `~/.tool-versions`.
+- `node v24.20.0` via **nvm at `~/.config/nvm`** (not the default `~/.nvm`).
+  Non-login shells don't source it — if `npm`/`npx` is "not found", run
+  `export NVM_DIR="$HOME/.config/nvm"; . "$NVM_DIR/nvm.sh"` first.
+
+Historical (Windows):
+
+- **Scarb 2.18.0** was installed at
   `%LOCALAPPDATA%\Programs\scarb\scarb-v2.18.0-x86_64-pc-windows-msvc\bin`,
   added to the **user** PATH (not system-wide). **Gotcha:** a shell that was
   already open when this was installed won't see it on PATH — open a new
@@ -160,47 +176,70 @@ security review before mainnet. The file's own
 header comment (top of `cairo/src/lib.cairo`) is kept up to date with a
 summary of this history — read it too.
 
-### 4a. Test suite: written, mostly NOT run — one real exception
+### 4a. Test suite: RUNS AND PASSES — 98/98 (updated 2026-08-31, Linux)
 
-**Exception, actually verified:** `cairo/src/poker_hand.cairo`'s own 24
-unit tests genuinely run and pass, right now, on this machine:
+**This section's old "written but never run" status is RESOLVED.** The full
+suite — `cairo/tests/` included — compiles and passes on this Linux machine
+(`snforge 0.63.0`, `scarb 2.18.0` via asdf):
 
 ```bash
-export PATH="$PATH:/c/Users/TANISHA/AppData/Local/Programs/scarb/scarb-v2.18.0-x86_64-pc-windows-msvc/bin"
-cd cairo && scarb test -- -t unit
+cd cairo && snforge test --features testing
+# Collected 98 test(s): 30 from src/, 68 from tests/
+# Tests: 98 passed, 0 failed, 0 ignored, 0 filtered out
 ```
 
-This works because `poker_hand`'s functions are pure (no storage, no
-external calls) — they need none of `snforge`'s cheat codes or contract
-deployment, so Scarb's own bundled (if deprecated) `cairo_test` runner
-handles them with zero extra tooling. `[dev-dependencies] cairo_test` in
-`cairo/Scarb.toml` is what enables this — confirmed safe (doesn't break
-`scarb build` the way `snforge_std` does, see below). `-t unit` matters:
-it skips `cairo/tests/` (the directory below), which still needs `snforge`
-and would otherwise fail the whole `scarb test` run.
+`--features testing` is mandatory (it gates `src/mocks.cairo`). Two real
+structural bugs had to be fixed to get here — **no test's logic or
+assertions needed changing, and nothing failed once it compiled**:
 
-Everything else — the full contract-level suite at `cairo/tests/` (+
-`cairo/src/mocks.cairo` for a configurable mock ERC20) — follows the
-`cairo-testing` skill's coverage rules, with a dedicated regression test
-per historical audit finding. **It has never been executed, and could not
-even be compile-checked**, on this machine: Starknet Foundry (`snforge`)
-ships no Windows binary, and building it from source needs a Rust/cargo
-toolchain that isn't installed. `scarb build --test` (which can compile
-test code without the `snforge` binary) was tried, but even that needs
+1. `mocks` was `#[cfg(test)]`-gated, but snforge builds `cairo/tests/` as a
+   separate crate linked against `zkpoker` compiled *without* `cfg(test)`,
+   so `zkpoker::mocks` didn't exist for it (and `declare("MockErc20")` would
+   have had no compiled class even if it had compiled). Now gated on a
+   Scarb feature (`#[cfg(feature: "testing")]` + `[features] testing = []`),
+   which still keeps it out of the production build — verified: `scarb
+   build` emits only `PokerGame`.
+2. `PokerGame`'s `Event` enum, its 11 event structs, and their 27 fields
+   weren't `pub` (edition 2024_07 defaults items *and* fields private), so
+   every `assert_emitted` failed to see them. Now `pub` — a Cairo name
+   visibility change only; events were always public on-chain.
+
+`snforge_std` is now a normal dev-dependency; the Windows-era warning that
+it breaks a plain `scarb build` does not reproduce on Linux (prebuilt
+plugin, no `cargo fetch` fallback) — re-verified clean.
+
+**Superseded:** `scarb test -- -t unit` (the old command below) no longer
+collects anything — snforge's `#[test]` macro owns collection once
+`snforge_std` is present, so `cairo_test` sees 0 tests. The 30 unit tests it
+used to run are now part of the 98 above. Historical form:
+
+```bash
+cd cairo && scarb test -- -t unit   # now reports 0 tests — use snforge
+```
+
+The contract-level suite at `cairo/tests/` (+ `cairo/src/mocks.cairo` for a
+configurable mock ERC20) follows the `cairo-testing` skill's coverage rules,
+with a dedicated regression test per historical audit finding. All 68 of its
+tests now pass alongside src/'s 30.
+
+**Historical (Windows), kept so the constraint is understood if this moves
+back to a machine without `snforge`:** the suite went unexecuted and not
+even compile-checked for its whole authoring life, because Starknet Foundry
+ships no Windows binary and building from source needs a Rust/cargo
+toolchain that wasn't installed. `scarb build --test` was tried but needs
 `snforge_std`'s companion compiler plugin, which had no prebuilt Windows
-binary at the version tried and fell back to `cargo fetch` — still
-blocked. **Adding `snforge_std` as a dev-dependency was tried and reverted
-after it broke the *plain* `scarb build`** (Scarb resolves the full
-dependency graph, dev-dependencies included, regardless of target) — don't
-repeat that mistake; read `cairo/Scarb.toml`'s comments before touching it
-(both the snforge_std warning and the cairo_test explanation).
+binary at the version tried and fell back to `cargo fetch` — blocked.
+Adding `snforge_std` as a dev-dependency broke even the *plain* `scarb
+build` there (Scarb resolves the full dependency graph regardless of
+target). **None of that applies on Linux** — the prebuilt plugin exists, so
+`snforge_std` is now a normal dev-dependency and `scarb build` stays clean.
 
-Full explanation, exact setup steps, and what's covered vs. not:
-`cairo/tests/README.md`. **First thing to do with this project on a
-machine that has `snforge`**: follow that README, run the suite, and fix
-whatever the first real compile/run surfaces — treat every test as
-unverified until then, even though each was authored carefully and
-re-read multiple times (one real bug was caught this way during writing:
+What's covered vs. not: `cairo/tests/README.md`. Note the coverage gaps it
+lists are still real (no fuzz tests, no `privacy_invoke`-specific reentrancy
+test, no multi-table stress) — "98 passing" means every test that exists
+passes, not that coverage is complete. Each test was authored carefully and
+re-read multiple times, which held up: nothing failed on first execution
+(one real bug had already been caught during writing:
 both reentrancy regression tests initially had the wrong identity
 impersonating the malicious token, which would have tripped the
 `NOT_SEAT_OWNER`/`NOT_DEALER` check before ever reaching the
@@ -606,13 +645,13 @@ always — this isn't a one-time clearance.
 In rough priority order — see `docs/DESIGN.md` "Open items" for the
 canonical, kept-up-to-date list:
 
-1. **Get the test suite actually running** — it's written (`cairo/tests/`,
-   see §4a) but never executed or compile-checked on this machine (no
-   `snforge` on Windows). `cairo/src/poker_hand.cairo`'s own unit tests DO
-   already run and pass (`scarb test -- -t unit`, §4a, now 24 tests) —
-   this item is about everything else. Get onto a machine with `snforge`
-   (Linux/Mac/WSL), follow `cairo/tests/README.md`, run it, fix whatever
-   the first real pass surfaces.
+1. ~~**Get the test suite actually running**~~ — **DONE** (2026-08-31, on
+   Linux). All 98 tests pass: `cd cairo && snforge test --features testing`.
+   See §4a for the two structural bugs that had to be fixed (cfg(test)-gated
+   mocks, non-`pub` events) — no test logic changed, nothing failed once it
+   compiled. **The remaining coverage gaps in `cairo/tests/README.md` are
+   still open** (no fuzz tests, no `privacy_invoke`-specific reentrancy
+   test, no multi-table stress) — worth closing before any real deployment.
 2. ~~Pin the real commitment hash in `reveal_seed`~~ — **DONE**, see round 6
    in §5.
 3. ~~Multi-street betting + hand evaluation~~ — **DONE** (round 6, §5):

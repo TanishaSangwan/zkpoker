@@ -4,7 +4,7 @@
 // Rust/cargo toolchain on the machine this was written on, so
 // snforge_scarb_plugin couldn't be fetched even to type-check).
 
-use starknet::{ContractAddress, contract_address_const};
+use starknet::ContractAddress;
 use core::poseidon::poseidon_hash_span;
 use snforge_std::{
     ContractClassTrait, DeclareResultTrait, declare, start_cheat_caller_address, stop_cheat_caller_address,
@@ -13,29 +13,29 @@ use zkpoker::{IErc20Dispatcher, IErc20DispatcherTrait, IPokerGameDispatcher, IPo
 use zkpoker::mocks::{IMockErc20AdminDispatcher, IMockErc20AdminDispatcherTrait};
 
 pub fn POOL() -> ContractAddress {
-    contract_address_const::<'POOL'>()
+    'POOL'.try_into().unwrap()
 }
 
 pub fn DEALER() -> ContractAddress {
-    contract_address_const::<'DEALER'>()
+    'DEALER'.try_into().unwrap()
 }
 
 pub fn ALICE() -> ContractAddress {
-    contract_address_const::<'ALICE'>()
+    'ALICE'.try_into().unwrap()
 }
 
 pub fn BOB() -> ContractAddress {
-    contract_address_const::<'BOB'>()
+    'BOB'.try_into().unwrap()
 }
 
 pub fn MALLORY() -> ContractAddress {
-    contract_address_const::<'MALLORY'>()
+    'MALLORY'.try_into().unwrap()
 }
 
 // Round 8: a third player, for coverage that needs max_seats > 2 (see
 // test_hand_eval.cairo's test_settle_table_by_hand_three_seat_table).
 pub fn CAROL() -> ContractAddress {
-    contract_address_const::<'CAROL'>()
+    'CAROL'.try_into().unwrap()
 }
 
 pub const TABLE_1: felt252 = 'TABLE_1';
