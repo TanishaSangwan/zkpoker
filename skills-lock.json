@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "skills": {
+    "strk20-anonymizer-contracts": {
+      "source": "welttowelt/strk20-skills",
+      "sourceType": "github",
+      "skillPath": "skills/strk20-anonymizer-contracts/SKILL.md",
+      "computedHash": "1ed8ad00a976efb1e146ee9673f8bad40083d2ef759e2ee454ec2d24ad2268f6"
+    },
+    "strk20-privacy": {
+      "source": "welttowelt/strk20-skills",
+      "sourceType": "github",
+      "skillPath": "skills/strk20-privacy/SKILL.md",
+      "computedHash": "0958d85496727fd4f2f7879bc50243d0a449ec62c5e567573885dc8b3dcadd47"
+    },
+    "strk20-privacy-sdk": {
+      "source": "welttowelt/strk20-skills",
+      "sourceType": "github",
+      "skillPath": "skills/strk20-privacy-sdk/SKILL.md",
+      "computedHash": "afda17a1f398710f020f595d2faddcf6e9d48cca1e7041c84fcaa360edd00d57"
+    },
+    "strk20-wallet-api": {
+      "source": "welttowelt/strk20-skills",
+      "sourceType": "github",
+      "skillPath": "skills/strk20-wallet-api/SKILL.md",
+      "computedHash": "1751f954a5c6003d960ecc7bbbe48d036e8c9099d7649b7d2fab48504c103ca9"
+    }
+  }
+}

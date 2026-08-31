@@ -68,21 +68,30 @@ Historical (Windows):
 - **Node v24.20.0**, npm installed (`npm install` done — 103 packages). One
   unaddressed `npm audit` finding: `sharp` has a high-severity libvips CVE,
   fix requires a breaking version bump — deliberately left alone so far.
-- **Skills installed** (project-local, symlinked into `.claude/skills/` for
-  Claude Code, and into `.agents/skills/` as the real install target — don't
-  delete `.agents/skills/`, `.claude/skills/` just points at it):
-  - `strk20-privacy`, `strk20-anonymizer-contracts`, `strk20-privacy-sdk`,
-    `strk20-wallet-api` — STRK20 concepts/SDK/wallet integration
-  - `starknet-skills` (Keep Starknet Strange) — bundles `cairo-auditor`,
+- **Skills** (project-local, real content in `.agents/skills/`, with
+  `.claude/skills/` holding relative symlinks into it for Claude Code —
+  don't delete `.agents/skills/`). **These are tracked in git as of
+  2026-08-31**, precisely because the untracked copies did not survive the
+  Windows -> Linux move (see the missing bundle below). Reinstall/refresh
+  with `npx skills add <source>`; `skills-lock.json` records source + hash.
+  - **Present:** `strk20-privacy`, `strk20-anonymizer-contracts`,
+    `strk20-privacy-sdk`, `strk20-wallet-api` — STRK20 concepts/SDK/wallet
+    integration, from `welttowelt/strk20-skills`.
+  - **⚠️ MISSING on this machine:** `starknet-skills` (Keep Starknet
+    Strange) — the bundle containing `cairo-auditor`,
     `cairo-contract-authoring`, `cairo-testing`, `cairo-optimization`,
-    `cairo-toolchain`, `account-abstraction`, `starknet-network-facts`
-  - None of these show up in a fresh session's "available skills" listing
-    (they were installed mid-conversation) — the `Skill` tool call will
-    fail with "Unknown skill". **Workaround used throughout this project:**
-    read the skill's `SKILL.md` / `workflows/*.md` / `agents/*.md` files
-    directly from `.agents/skills/starknet-skills/cairo-auditor/` and follow
-    them manually via `Agent` tool calls. See §5 for exactly how the audits
-    were run — repeat that pattern.
+    `cairo-toolchain`, `account-abstraction`, `starknet-network-facts`. It
+    was installed on the old Windows machine, was never committed, and is
+    gone. **§5's audit procedure reads files out of
+    `.agents/skills/starknet-skills/cairo-auditor/` and cannot run as
+    written until this is reinstalled** — do that before attempting the
+    round 9/10 audit that rounds 8 and 9 still need.
+  - Skills installed mid-conversation don't show up in that session's
+    "available skills" listing — the `Skill` tool call fails with "Unknown
+    skill" until a fresh session. **Workaround used throughout this
+    project:** read the skill's `SKILL.md` / `workflows/*.md` /
+    `agents/*.md` files directly and follow them manually via `Agent` tool
+    calls. See §5 for exactly how the audits were run — repeat that pattern.
 
 ---
 
