@@ -132,34 +132,132 @@ crediting `table_pot` (requires the caller to have approved this contract);
 `note_id_owner` map, and `settle_table` cross-checks it before honoring a
 payout.
 
-Also flagged, below the audit's confidence threshold, not yet fixed:
-- No recovery path if a dealer goes dark mid-table or `pool` needs rotating
-  — both are fixed forever at `create_table`/construction with no
-  grant/rotate ABI, so a stuck dealer or a redeployed pool permanently stalls
-  the affected table(s).
-- The constructor doesn't reject a zero `pool` address — a deploy mistake
-  would silently brick every `privacy_invoke` call.
+Also flagged, below the audit's confidence threshold at the time:
+- No recovery path if a dealer goes dark mid-table — later escalated, see
+  round 3 below.
+- The constructor doesn't reject a zero `pool` address — still not fixed
+  (below threshold; self-inflicted deploy-time misconfiguration only, not
+  attacker-reachable).
 
-**Still open** (tracked, not yet fixed):
-- `approve()`'s return value is unchecked in `privacy_invoke` (Low severity,
-  non-conforming-ERC20 edge case).
-- The two below-threshold items just above (dealer/pool recovery path, zero
-  `pool` guard).
-- Re-run `cairo-auditor` again after any further change to `lib.cairo`, and
-  once more before this goes anywhere near a real pool or real funds.
+**Round 3 re-audit:** confirmed rounds 1-2's identity/reentrancy fixes hold.
+Found **2 new Critical, 1 High, 1 Medium** — full detail in
+`../security-review-20260830-205751.md`:
+
+1. `note_id_owner` fixed *identity* reuse of a `note_id` but not *token*
+   reuse — `settle_table` unconditionally overwrote `payout_token[note_id]`,
+   so settling the same `note_id` at a second table in a different token
+   silently relabeled an accumulated (possibly fabricated) balance into
+   that token. **FIXED**: `settle_table` now asserts
+   `existing_pending == 0 || existing_token == token` before rewriting
+   `payout_token`.
+2. Round 2's `bet` fix meant real funds now sit in `table_pot` until
+   `settle_table` runs, which escalated the "no dealer recovery path" item
+   above from a hardening note to a Critical: an abandoned/malicious dealer
+   could permanently lock real bettor funds. **FIXED** (user chose
+   "timeout-based self-refund" among 3 options): new `reclaim_stalled_bet`
+   entrypoint lets a seat reclaim exactly what it personally contributed
+   (tracked via `seat_contributed`) once `SETTLE_TIMEOUT_SECS` (24h) has
+   passed since `create_table` and the table isn't `table_settled`.
+3. `bet()`'s `transfer_from` call had no reentrancy lock and credited
+   `table_pot` only after the call returned. **FIXED**: `bet` now takes the
+   shared `reentrancy_lock` for its full body.
+4. `bet()` trusted the nominal `amount` parameter instead of the actual
+   balance delta (fee-on-transfer token risk). **FIXED**: measures
+   `balance_of` before/after `transfer_from`, credits the real delta.
+
+**Round 4 re-audit** (targeted at round 3's new `reclaim_stalled_bet` code):
+confirmed rounds 1-3 hold — `reclaim_stalled_bet`'s identity/timeout/
+double-reclaim/reentrancy guards, and `table_pot == Σ seat_contributed`
+proven to hold by induction across every bet/reclaim interleaving. Found
+**2 more Critical** — full detail in `../security-review-20260831-090322.md`:
+
+1. Neither `bet()` nor `settle_table()` checked `table_settled` — a bet
+   could land after a table settled (permanently unreclaimable, since
+   `reclaim_stalled_bet` is itself blocked by `table_settled`), and
+   `settle_table` could be called a second time. **FIXED**: both now assert
+   `!table_settled` at entry.
+2. `settle_table` was excluded from the shared `reentrancy_lock` even
+   though it mutates the same state `bet`/`reclaim_stalled_bet`/
+   `privacy_invoke` guard — a dealer-controlled token could reenter it
+   mid-`bet()`, settling a stale pot before the in-flight bet's
+   contribution landed. **FIXED**: `settle_table` now asserts
+   `!reentrancy_lock` at entry (checks, doesn't need to hold, the lock —
+   it makes no external calls itself).
+
+**Round 5 re-audit** (genuinely fresh pass across all four partitions, not
+just re-verification): confirmed every round 1-4 fix holds with no bypass
+or regression — `reentrancy_lock` formally proven to never persist as
+`true` across a transaction boundary, and `settle_table`'s payout math
+proven correct even with duplicate seats/note_ids in one call. **First
+round to find no new Critical or High.** One long-standing below-threshold
+item finally crossed the confidence bar — full detail in
+`../security-review-20260831-091541.md`:
+
+1. `privacy_invoke`'s `approve()` return value was unchecked — a token
+   returning `false` instead of reverting could mark a payout as sent with
+   no real allowance granted, permanently unrecoverable. **FIXED**: now
+   asserts the return value, matching the pattern already used for
+   `transfer_from`/`transfer` elsewhere in the file.
+
+**Still open** (below round 5's confidence threshold, not attacker-
+exploitable, not yet fixed):
+- The constructor doesn't reject a zero `pool` address (Low severity,
+  self-inflicted misconfiguration only — would brick the whole contract's
+  payouts if deployed wrong, but no attacker can trigger it post-deploy).
+
+Five rounds in, the security surface has narrowed to one accepted
+low-severity gap.
+
+## Test suite
+
+Written (`cairo/tests/*.cairo`, `cairo/src/mocks.cairo`) following the
+`cairo-testing` skill's coverage rules and the "Required Tests" lists from
+all five security-review reports — full lifecycle, betting, and settlement
+coverage, including a dedicated regression test per historical finding
+(value fabrication, fee-on-transfer, cross-table note_id/token hijacking,
+reentrancy on both `bet` and `settle_table`, pool spoofing, unchecked
+approve, etc.).
+
+**Not yet run.** This machine has no `snforge` (no Windows binary; building
+from source needs a Rust toolchain that isn't installed either) — see
+`cairo/tests/README.md` for the full explanation and exact setup steps for
+whoever runs it next. The tests were authored carefully and re-read
+multiple times (one real bug was caught this way — see the README), but
+are unverified until an actual `snforge test` run.
+
+## `reveal_seed` commitment hash
+
+Fixed (post round 5): `reveal_seed` previously compared the revealed seed
+against its own commitment with a literal identity check
+(`computed_hash = seed`) — any seed "verified" against itself, so
+`commit_deal` carried no real cryptographic binding at all, despite reading
+as a normal commit-reveal scheme. Now uses
+`core::poseidon::poseidon_hash_span(array![seed].span())`. `commit_deal`'s
+interface doc comment in `cairo/src/lib.cairo` specifies the exact
+construction any off-chain dealer tooling must match when computing
+`seed_hash` to submit. `cairo/tests/test_lifecycle.cairo`'s commit/reveal
+tests were updated to commit the real hash instead of the raw seed.
+
+Deliberately unchanged: this hashes the seed alone, no `table_id` or other
+domain separator mixed in. A dealer reusing the identical seed value across
+two tables produces the same commitment for both — harmless, since
+`seed_hash` is stored per `table_id` and there's no cross-table lookup that
+could confuse the two; it would just be a dealer mistake, not something
+another party could exploit.
 
 ## Open items (in priority order for the hackathon)
 
-1. Decide whether to fix the dealer/pool recovery-path gap and the
-   zero-`pool` constructor guard now or accept them for the hackathon demo.
-2. Pin the actual commitment hash in `reveal_seed` (currently a placeholder
-   equality check) — Poseidon, to match what the pool itself hashes with.
-3. Swap `deal_verify.py`'s PRNG for a Poseidon-based Fisher-Yates so the same
-   computation is provable in-circuit later, not just reproducible off-chain.
-4. Multi-street betting rounds + hand ranking for `settle_table`'s winner
+1. Get `snforge` running (Linux/Mac/WSL — see `cairo/tests/README.md`) and
+   actually run the test suite; fix whatever the first real compile/run
+   surfaces.
+2. Swap `deal_verify.py`'s PRNG for a Poseidon-based Fisher-Yates so the same
+   computation is provable in-circuit later, not just reproducible off-chain
+   (a different thing from the `reveal_seed` commitment hash above — this
+   one is about the *deck-shuffle* algorithm, not the seed commitment).
+3. Multi-street betting rounds + hand ranking for `settle_table`'s winner
    input.
-5. Frontend: wire `PokerGame` actions into the starter-kit UI
+4. Frontend: wire `PokerGame` actions into the starter-kit UI
    (`src/app/components`), replacing the echo-helper demo flow.
-6. Generalization write-up for the pitch: the "card-as-encrypted-note +
+5. Generalization write-up for the pitch: the "card-as-encrypted-note +
    commit-reveal deal" pattern applies to Battleship, Mafia, and sealed-bid
    auctions, per the RFP's own framing — worth a slide, not more code.

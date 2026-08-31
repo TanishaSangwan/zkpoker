@@ -68,13 +68,21 @@ on them too.
 
 ```
 zkpoker/
-  cairo/src/lib.cairo          PokerGame contract — see §4/§5, NOT fully hardened yet
-  cairo/Scarb.toml              package "zkpoker", scarb build succeeds clean
+  cairo/src/lib.cairo          PokerGame contract — see §4/§5
+  cairo/src/mocks.cairo         test-only mock ERC20, #[cfg(test)]-gated,
+                                 never in the production build
+  cairo/Scarb.toml              package "zkpoker", scarb build succeeds
+                                 clean — has a comment explaining why
+                                 snforge_std is deliberately NOT declared
+                                 as a dependency here (see §4a)
+  cairo/tests/                  full test suite, WRITTEN BUT NOT RUN — see
+                                 §4a and cairo/tests/README.md before you
+                                 trust any of it
   scripts/deal_verify.py        fairness-check CLI, tested working, PRNG is a
                                  stand-in (see docs/DESIGN.md open items)
   docs/DESIGN.md                architecture, fairness model, security-review
                                  timeline (keep this updated as you go)
-  security-review-*.md          one file per audit round (3 so far), see §5
+  security-review-*.md          one file per audit round (5 so far), see §5
   HANDOFF.md                    this file
   src/, public/, package.json   still the ORIGINAL starter-kit demo UI
                                  (Akashneelesh/strk20-starter-kit) — nothing
@@ -89,23 +97,65 @@ export PATH="$PATH:/c/Users/TANISHA/AppData/Local/Programs/scarb/scarb-v2.18.0-x
 cd cairo && scarb build
 ```
 
-No test suite exists yet (`cairo-testing` skill is installed, unused).
-
 ---
 
 ## 4. The contract's actual current state — READ THIS CAREFULLY
 
 `PokerGame` in `cairo/src/lib.cairo` implements: table creation/joining,
 commit-reveal dealing (`commit_deal`/`mark_dealt`/`reveal_seed`), bet/fold
-pot accounting, `settle_table`, and the STRK20 `privacy_invoke` payout hook.
+pot accounting, `reclaim_stalled_bet` (timeout-based refund for an
+abandoned dealer), `settle_table`, and the STRK20 `privacy_invoke` payout
+hook.
 
-**It has been through three audit rounds and is not done.** Rounds 1 and 2
-each found Critical bugs that were fixed and rebuilt immediately. **Round 3
-found two more Critical bugs and one High that are NOT yet fixed** — the
-session was interrupted mid-decision on how to fix one of them (see §6).
-Do not treat this contract as safe. Do not deploy it anywhere with real
-value. The file's own header comment (top of `cairo/src/lib.cairo`) is kept
-up to date with a summary of this history — read it too.
+**It has been through five audit rounds.** Every Critical/High finding
+found so far has been fixed and rebuilt clean. Round 5 (the most recent)
+was a genuinely fresh full pass, not just re-verification, and found
+nothing above Low severity — the first round to do so. **One accepted
+low-severity gap remains** (constructor doesn't reject a zero `pool`
+address — self-inflicted deploy misconfiguration only, not attacker-
+reachable). This is a meaningfully better state than earlier in the
+project, but "5 clean-ish rounds" is not the same as "audited" — still
+don't deploy this anywhere with real value without at least getting the
+test suite actually running first (see §4a) and ideally a real,
+non-AI security review before mainnet. The file's own header comment (top
+of `cairo/src/lib.cairo`) is kept up to date with a summary of this
+history — read it too.
+
+### 4a. Test suite: written, NOT run — read this before trusting it
+
+A full test suite exists at `cairo/tests/` (+ `cairo/src/mocks.cairo` for
+a configurable mock ERC20) following the `cairo-testing` skill's coverage
+rules, with a dedicated regression test per historical audit finding.
+**It has never been executed, and could not even be compile-checked**, on
+this machine: Starknet Foundry (`snforge`) ships no Windows binary, and
+building it from source needs a Rust/cargo toolchain that isn't installed.
+`scarb build --test` (which can compile test code without the `snforge`
+binary) was tried, but even that needs `snforge_std`'s companion compiler
+plugin, which had no prebuilt Windows binary at the version tried and fell
+back to `cargo fetch` — still blocked. **Adding `snforge_std` as a
+dev-dependency was tried and reverted after it broke the *plain*
+`scarb build`** (Scarb resolves the full dependency graph, dev-dependencies
+included, regardless of target) — don't repeat that mistake; read
+`cairo/Scarb.toml`'s comment before touching it.
+
+Full explanation, exact setup steps, and what's covered vs. not:
+`cairo/tests/README.md`. **First thing to do with this project on a
+machine that has `snforge`**: follow that README, run the suite, and fix
+whatever the first real compile/run surfaces — treat every test as
+unverified until then, even though each was authored carefully and
+re-read multiple times (one real bug was caught this way during writing:
+both reentrancy regression tests initially had the wrong identity
+impersonating the malicious token, which would have tripped the
+`NOT_SEAT_OWNER`/`NOT_DEALER` check before ever reaching the
+`reentrancy_lock` check being tested — fixed by having the token contract
+itself act as the seat owner/dealer).
+
+**If you run `cairo-auditor` again**, note that its file-discovery
+(`find ... -name "*.cairo"`) will now also pick up `cairo/src/mocks.cairo`
+— it's `#[cfg(test)]`-gated and never in the production build, but the
+auditor doesn't know that distinction. Either mentally discount findings
+scoped to that file, or pass `cairo/src/lib.cairo` explicitly as the
+target instead of a full-repo scan.
 
 ---
 
@@ -181,79 +231,105 @@ Also flagged, below threshold, **not fixed**:
 - No recovery path for dealer/pool roles (conf 70 at the time).
 - Constructor doesn't reject a zero `pool` address (conf 60).
 
-### Round 3 (file: `security-review-20260830-205751.md`) — **CURRENT STATE, NOT YET ACTED ON**
-Confirmed rounds 1-2's identity/reentrancy fixes hold. Found:
-1. **[P0, conf 90, NOT FIXED]** `note_id_owner` fixes *identity* reuse of a
+### Round 3 (file: `security-review-20260830-205751.md`) — **FIXED**
+Confirmed rounds 1-2's identity/reentrancy fixes hold. Found and fixed:
+1. **[P0, conf 90, FIXED]** `note_id_owner` fixed *identity* reuse of a
    `note_id` but not *token* reuse: `settle_table` unconditionally
-   overwrites `payout_token[note_id]` every call. Register the same
-   `note_id` at two of your own tables using different tokens — settle a
-   fabricated big balance in a worthless token first, then settle a
-   zero-pot hand in a real token second, and the real token silently
-   becomes the denomination for the whole accumulated (fabricated) balance.
-   Agreed fix (not applied): before overwriting `payout_token`, assert
-   `existing_pending == 0 || existing_token == token`.
-2. **[P0, conf 88, NOT FIXED, DECISION PENDING]** Round 2's `bet()` fix
-   means real funds now sit in `table_pot` until `settle_table` runs — but
-   only the fixed `table_dealer` can ever call it, with no timeout or
-   override. An abandoned/malicious dealer permanently locks real bettor
-   funds. **This is where the session stopped** — see §6, three candidate
-   fixes were proposed and the user was about to be asked to pick one.
-3. **[P1, conf 80, NOT FIXED]** `bet()`'s new `transfer_from` call violates
-   checks-effects-interactions (`table_pot` credited *after* the external
-   call) and `bet()` takes no reentrancy lock — a malicious `token` (pinned
-   once at `create_table`, no allowlist) can reenter `bet`/`fold`/
-   `join_table`. Reentering `privacy_invoke` itself is confirmed *not*
-   possible (its caller check would see the token contract, not the real
-   pool). Agreed fix (not applied): reorder to CEI + take the existing
-   `reentrancy_lock` in `bet()` too.
-4. **[P2, conf 76, NOT FIXED]** `bet()` trusts the nominal `amount`
-   parameter instead of measuring the actual balance delta — a fee-on-
-   transfer token would let real balance drift below recorded `table_pot`.
-   Agreed fix (not applied): read `balance_of` before/after `transfer_from`,
-   credit the actual delta.
-5. Below threshold, unchanged: constructor zero-`pool` guard (conf 62),
-   `approve()` return unchecked (conf 50).
+   overwrote `payout_token[note_id]` every call, letting a settled fabricated
+   balance be silently relabeled into a real token via a second, even
+   zero-pot, table. **Fix applied**: before overwriting `payout_token`,
+   `settle_table` now asserts `existing_pending == 0 || existing_token == token`.
+2. **[P0, conf 88, FIXED]** Round 2's `bet()` fix meant real funds now sit
+   in `table_pot` until `settle_table` runs — but only the fixed
+   `table_dealer` could ever call it, with no timeout or override, so an
+   abandoned/malicious dealer could permanently lock real bettor funds.
+   **User chose "timeout-based self-refund"** (of 3 options offered — see
+   below). New storage `table_created_at`/`seat_contributed`/
+   `table_settled`, new entrypoint `reclaim_stalled_bet(table_id, seat)`,
+   new `IErc20::transfer`, `SETTLE_TIMEOUT_SECS = 86400` (24h, not
+   independently validated against real session lengths).
+3. **[P1, conf 80, FIXED]** `bet()`'s `transfer_from` call had no
+   reentrancy lock and credited `table_pot` only after the call returned —
+   a malicious `token` (pinned once at `create_table`, no allowlist) could
+   reenter `bet`/`fold`/`join_table`. **Fix applied**: `bet()` now takes the
+   shared `reentrancy_lock` for its whole body.
+4. **[P2, conf 76, FIXED]** `bet()` trusted the nominal `amount` parameter
+   instead of measuring the actual balance delta — a fee-on-transfer token
+   would let real balance drift below recorded `table_pot`. **Fix
+   applied**: `bet()` reads `balance_of` before/after `transfer_from` and
+   credits the measured delta.
+5. Below threshold, unchanged, **still not fixed**: constructor zero-`pool`
+   guard (conf 62), `approve()` return unchecked (conf 50).
+
+Rebuilt clean (`scarb build`, zero warnings) after all four fixes.
+
+### Round 4 (file: `security-review-20260831-090322.md`) — **FIXED**
+Targeted re-audit of round 3's new `reclaim_stalled_bet` code. Confirmed
+holding: `reclaim_stalled_bet`'s identity/timeout/double-reclaim/reentrancy
+guards, and — proven by induction across every `bet`/`reclaim_stalled_bet`
+interleaving — `table_pot == Σ seat_contributed`, so no seat can ever
+extract more than it contributed. Found and fixed **2 new Critical**:
+1. **[conf 92, FIXED]** Neither `bet()` nor `settle_table()` checked
+   `table_settled` — a bet could land after a table settled (and become
+   permanently unreclaimable, since `reclaim_stalled_bet` is itself gated
+   on `!table_settled`), and `settle_table` could be called a second time.
+   **Fix applied**: both now assert `!table_settled` at entry.
+2. **[conf 80, FIXED]** `settle_table` was excluded from the shared
+   `reentrancy_lock` despite mutating the same state the other three
+   functions guard — a dealer-controlled token could reenter it
+   mid-`bet()`. **Fix applied**: `settle_table` now asserts
+   `!reentrancy_lock` at entry (it makes no external calls itself, so
+   checking without holding the lock is sufficient).
+
+Rebuilt clean (`scarb build`, zero warnings) after both fixes.
+
+### Round 5 (file: `security-review-20260831-091541.md`) — **FIXED**
+Genuinely fresh full pass across all four partitions (not just
+re-verification) — **first round to find no new Critical or High**.
+Confirmed with formal reasoning, not just re-checking: `reentrancy_lock`
+can never persist as `true` across a transaction boundary (every writer
+traced; Cairo reverts undo the `write(true)` on any failure); `settle_table`'s
+payout math holds even with duplicate seats/note_ids in one call (the
+credited sum is an algebraic identity pinned to the collected pot);
+`table_buy_in`'s non-enforcement is a deliberate, documented layering
+choice, not a bug. One long-standing below-threshold item finally crossed
+the confidence bar:
+1. **[conf 78, FIXED]** `privacy_invoke`'s `approve()` return value was
+   unchecked — a token returning `false` instead of reverting could mark a
+   payout as sent with no real allowance granted, permanently
+   unrecoverable. **Fix applied**: now asserts the return value
+   (`TRANSFER_FAILED` on `false`), matching the existing pattern for
+   `transfer_from`/`transfer`.
+
+Rebuilt clean (`scarb build`, zero warnings).
 
 **Full technical detail, exact fix diffs, and required-tests lists for all
-of the above are in the three `security-review-*.md` files — this section
-is a summary, not a replacement for reading them before you fix anything.**
+of the above are in the five `security-review-*.md` files — this section
+is a summary, not a replacement for reading them before you touch this
+contract again.**
 
 ---
 
-## 6. Pending decision — START HERE if resuming this exact thread
+## 6. Resolved decision (kept for context)
 
-The user was asked how to fix round 3's finding 2 (dealer-abandoned table
-recovery) and asked for this handoff doc instead of answering yet. **Ask
-them directly, or make a call and document it**, among:
+Round 3 finding 2 needed a product decision on recovering an
+abandoned-dealer table. Three options were offered; **the user picked
+"timeout-based self-refund"** (implemented as `reclaim_stalled_bet`, see
+§5 above). The other two — a pool-level force-settle override, or
+accepting the risk and just documenting it for the demo — were not chosen
+but remain valid alternatives if this needs revisiting (e.g. if 24h turns
+out to be the wrong window, or if the self-refund model doesn't fit the
+actual game-session UX once the frontend exists).
 
-- **Timeout-based self-refund** (the recommended default): each seat can
-  reclaim exactly what it personally contributed via `bet()` if the table
-  hasn't been settled within a fixed window after creation. Needs new
-  storage (`table_created_at`, `seat_contributed`, `table_settled` — the
-  last one to block reclaiming after a hand *legitimately* resolved, since
-  a losing seat's contribution correctly became the winner's payout, not a
-  refund target), a new `reclaim_stalled_bet` entrypoint, `IErc20::transfer`
-  (only `approve`/`balance_of`/`transfer_from` exist today), and a timeout
-  constant (candidate: 24h — not decided).
-- **Pool-level force-settle override**: the pinned `pool` address can force
-  settlement/refund after a timeout instead of per-seat self-refund. Fewer
-  new fields, but gives `pool` new privileged power over every table.
-- **Accept and document for the hackathon demo**: reasonable if the
-  intended demo usage has the dealer role held by the app's own trusted
-  backend rather than an arbitrary player — but say so explicitly in
-  `docs/DESIGN.md` rather than silently leaving it.
-
-Whichever is chosen, findings 1, 3, and 4 from round 3 have agreed fix
-shapes already (see §5) and can be applied immediately without further
-input — they were not blocked on anything.
-
-**After applying round 3's fixes, run a round 4 audit** (same procedure as
-§5) before considering the contract's security work "done" — the pattern
-across this whole project has been that each fix round surfaces the next
-layer of issues once agents specifically re-check it, and round 3 is the
-first round where a *previously-dismissed* finding had to be escalated
-because an earlier fix changed its risk profile. Don't assume round 3's
-fixes are the last ones needed.
+**Rounds 4 and 5 both ran.** Round 4 found and fixed two Critical gaps in
+round 3's new code. Round 5 — a genuinely fresh pass, not just
+re-verification — found nothing above Low severity, and formally confirmed
+(not just spot-checked) that the reentrancy lock and payout-math invariants
+hold. **Only one accepted gap remains** (constructor zero-`pool`
+validation, Low, not attacker-reachable). Five rounds in, the contract's
+security surface has genuinely narrowed — this is a good point to shift
+effort to the test suite rather than open a round 6 speculatively; resume
+auditing only if the contract changes again first.
 
 ---
 
@@ -262,30 +338,39 @@ fixes are the last ones needed.
 In rough priority order — see `docs/DESIGN.md` "Open items" for the
 canonical, kept-up-to-date list:
 
-1. Resolve §6, apply round 3 fixes, re-audit (round 4).
-2. Pin the real commitment hash in `reveal_seed` — currently a literal
-   placeholder (`let computed_hash = seed;`), needs a real Poseidon hash
-   matching whatever the actual STRK20 pool uses.
-3. Build the test suite (`cairo-testing` skill, unused so far) — there is a
-   backlog of "Required Tests" across all three audit reports, plus basic
-   happy-path coverage for the full table lifecycle.
-4. Multi-street betting + hand evaluation — `settle_table` still trusts an
+1. **Get the test suite actually running** — it's written (`cairo/tests/`,
+   see §4a) but never executed or compile-checked on this machine (no
+   `snforge` on Windows). Highest-value next step: get onto a machine with
+   `snforge` (Linux/Mac/WSL), follow `cairo/tests/README.md`, run it, and
+   fix whatever the first real pass surfaces.
+2. ~~Pin the real commitment hash in `reveal_seed`~~ — **DONE**, post
+   round 5: now uses `core::poseidon::poseidon_hash_span(array![seed].span())`,
+   see `docs/DESIGN.md` "`reveal_seed` commitment hash" and the doc comment
+   on `commit_deal` in `lib.cairo` for the exact off-chain construction any
+   dealer tooling must match. `test_lifecycle.cairo`'s commit/reveal tests
+   were updated to match (they previously committed the raw seed, matching
+   the old placeholder behavior — would now fail `SEED_MISMATCH` if unfixed
+   test files were run against the new code). **Not re-audited yet** — this
+   was applied after round 5, so a round 6 sweep should at least glance at
+   `reveal_seed`/`commit_deal` even if nothing else changed.
+3. Multi-street betting + hand evaluation — `settle_table` still trusts an
    externally-supplied winner list; no pre-flop/flop/turn/river structure,
    no on-chain or proven hand ranking exists at all yet. Biggest remaining
    game-logic gap.
-5. Swap `scripts/deal_verify.py`'s PRNG (currently Python's `random.Random`,
+4. Swap `scripts/deal_verify.py`'s PRNG (currently Python's `random.Random`,
    explicitly a stand-in) for a Poseidon-based Fisher-Yates, so the same
-   computation could eventually be proven in-circuit.
-6. Wire the frontend — `src/` still runs the starter kit's original demo UI
+   computation could eventually be proven in-circuit. (Different from item 2
+   above — this is the *deck-shuffle* algorithm, not the seed commitment.)
+5. Wire the frontend — `src/` still runs the starter kit's original demo UI
    (wallet connect + shield/unshield/echo). Nothing calls `PokerGame` yet.
-7. Deploy to Sepolia once tests pass — needs the real STRK20 pool address as
+6. Deploy to Sepolia once tests pass — needs the real STRK20 pool address as
    the constructor arg; record the deployed address in `cairo/address.md`
    and wire it into `src/utils/constants.ts`.
-8. Housekeeping: first git commit (ask the user first), `npm audit fix`
+7. Housekeeping: first git commit (ask the user first), `npm audit fix`
    decision on `sharp`, pitch/demo narrative (the "card-as-encrypted-note +
    commit-reveal" pattern generalizes to Battleship/Mafia/sealed-bid
    auctions per the RFP's own framing — good pitch material).
-9. Re-check https://strk20.starknet.io/hackathon closer to submission — it
+8. Re-check https://strk20.starknet.io/hackathon closer to submission — it
    was a near-empty client-rendered shell (just an AVNU banner link) when
    last checked; actual rules/deadline/submission format may populate
    later. `WebFetch` can't render it (SPA); the Chrome extension

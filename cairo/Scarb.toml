@@ -9,3 +9,12 @@ starknet = "2.18.0"
 [[target.starknet-contract]]
 sierra = true
 casm = true
+
+# Test dependencies (snforge_std) are intentionally NOT declared here.
+# This machine has no Rust/cargo toolchain, and Scarb resolves the full
+# dependency graph — dev-dependencies included — even for a plain `scarb
+# build`, so adding snforge_std here breaks the production build the moment
+# its companion snforge_scarb_plugin needs `cargo fetch` to resolve (no
+# prebuilt Windows plugin was available for the version tried). See
+# cairo/tests/README.md for the exact block to add before running the test
+# suite on a machine with Rust installed (or under WSL).

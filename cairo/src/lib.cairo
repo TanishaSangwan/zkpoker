@@ -18,7 +18,17 @@ pub trait IErc20<TState> {
     // funds instead of only incrementing table_pot, or a table's pot is
     // fabricable with no backing.
     fn transfer_from(ref self: TState, sender: ContractAddress, recipient: ContractAddress, amount: u256) -> bool;
+    // Security review (round 3, Finding 2 fix): reclaim_stalled_bet refunds
+    // a seat's own contribution directly, not via transfer_from.
+    fn transfer(ref self: TState, recipient: ContractAddress, amount: u256) -> bool;
 }
+
+// Test-only mock ERC20 (configurable failure/fee/reentrancy behavior) used
+// by cairo/tests/*.cairo. Compiled only for `scarb build --test` / `snforge
+// test`, never shipped in the production `starknet-contract` build.
+// pub: tests/ compiles as a separate crate and needs zkpoker::mocks::... .
+#[cfg(test)]
+pub mod mocks;
 
 // ─────────────────────────────────────────────────────────────────────────
 // PokerGame: the STRK20 anonymizer for provably-fair on-chain poker.
@@ -57,23 +67,77 @@ pub trait IErc20<TState> {
 // seat's owner; `commit_deal`/`mark_dealt`/`reveal_seed` require the caller
 // to be the table's `table_dealer`.
 //
-// Re-audit (2026-08-30) of that follow-up found the identity checks held,
-// but 2 new Critical findings: (1) `bet` gated *identity* but not *value* —
-// a self-dealt table could still fabricate a pot with no real transfer,
+// Re-audit round 2 of that follow-up found the identity checks held, but 2
+// new Critical findings: (1) `bet` gated *identity* but not *value* — a
+// self-dealt table could still fabricate a pot with no real transfer,
 // drainable via privacy_invoke against the contract's shared per-token
 // balance; fixed by having `bet` pull funds via `transfer_from` before
 // crediting `table_pot`. (2) `pending_payout`/`payout_token` are keyed by
 // bare `note_id` with no `table_id`, so an attacker could register a
 // victim's real `note_id` on their own throwaway table and hijack that
 // note's payout; fixed with a `note_id_owner` map, bound once at
-// `join_table` and cross-checked in `settle_table`. Also flagged
-// (below-threshold, not yet fixed): no recovery path if a dealer goes dark
-// or `pool` needs rotating, and the constructor doesn't reject a zero
-// `pool` address.
+// `join_table` and cross-checked in `settle_table`.
 //
-// Still open: the unchecked `approve()` return value (Low-confidence).
-// Everything here remains unaudited beyond that pass — re-run cairo-auditor
-// after any further change before this touches a real pool.
+// Re-audit round 3 found: (1) `note_id_owner` fixed *identity* reuse but not
+// *token* reuse — settling the same note_id at a second table in a
+// different token silently relabeled an accumulated balance; fixed with a
+// same-token check in `settle_table` before `payout_token` is (re)written.
+// (2) round 2's `bet` fix meant real funds now sit in `table_pot` until
+// `settle_table` runs, but only the fixed `table_dealer` could ever call
+// it — an abandoned dealer permanently locked real funds; fixed with
+// `reclaim_stalled_bet`, letting any seat reclaim its own contribution
+// (tracked via `seat_contributed`) once `SETTLE_TIMEOUT_SECS` has passed
+// since `create_table` and the table hasn't been settled (`table_settled`).
+// (3) `bet`'s `transfer_from` call had no reentrancy lock and trusted the
+// nominal `amount` over the real balance delta; fixed by taking
+// `reentrancy_lock` in `bet` too and crediting only the measured delta.
+//
+// Re-audit round 4 (auditing round 3's new reclaim_stalled_bet code)
+// confirmed rounds 1-3 hold, but found: (1) `bet`/`settle_table` never
+// checked `table_settled` — a bet placed after settlement, or a second
+// `settle_table` call, was possible, and post-settlement bets became
+// permanently unreclaimable since `reclaim_stalled_bet` is itself gated on
+// `!table_settled`; fixed by asserting `!table_settled` in both. (2)
+// `settle_table` mutates the same state `bet`/`reclaim_stalled_bet`/
+// `privacy_invoke` guard with `reentrancy_lock` around their external
+// calls, but never checked the lock itself, so a dealer-controlled token
+// could reenter it mid-`bet()`; fixed by asserting `!reentrancy_lock` at
+// entry (no external calls happen inside `settle_table`, so checking,
+// without also holding, the lock is sufficient).
+//
+// Re-audit round 5: full fresh pass across all four partitions, not just
+// re-verification — confirmed every round 1-4 fix holds with no bypass and
+// no regression (reentrancy_lock formally shown to never persist as true
+// across a transaction boundary; the settle_table payout-sum identity
+// proven to hold even with duplicate seats/note_ids in one call). One
+// long-standing below-threshold item finally crossed the confidence bar:
+// `privacy_invoke`'s `approve()` return value was unchecked, so a token
+// returning `false` instead of reverting could zero `pending_payout` with
+// no allowance actually granted and no recovery path; fixed by asserting
+// the return value, matching the pattern already used for `transfer_from`
+// (`bet`) and `transfer` (`reclaim_stalled_bet`).
+//
+// Still open (below round 5's confidence threshold, not attacker-
+// exploitable, not yet fixed): the constructor doesn't reject a zero `pool`
+// address.
+//
+// A test suite exists (cairo/tests/, cairo/src/mocks.cairo) but has not
+// been run or even compile-checked — no snforge on this machine (no
+// Windows binary, no Rust toolchain to build one). See
+// cairo/tests/README.md before trusting any of it.
+//
+// Post round-5 hardening (not itself a cairo-auditor finding, but a known
+// gap closed proactively): `reveal_seed` checked seed against its own
+// commitment with a literal identity comparison through round 5
+// (`computed_hash = seed`) — any seed value "verified" against itself, so
+// `commit_deal` carried no real binding. Now uses
+// `poseidon_hash_span(array![seed].span())`, matching what `commit_deal`'s
+// doc comment specifies as the required off-chain construction. Existing
+// tests referencing the old placeholder behavior were updated to match.
+//
+// Everything here remains unaudited beyond round 5 — re-run cairo-auditor
+// after any further change (including this one) and before this touches a
+// real pool.
 // ─────────────────────────────────────────────────────────────────────────
 
 #[starknet::interface]
@@ -89,7 +153,18 @@ pub trait IPokerGame<TState> {
 
     // ── Fairness: commit / deal / reveal ───────────────────────────────
     // Dealer commits hash(seed) before any cards are dealt. `seed` itself
-    // must stay secret until reveal_seed.
+    // must stay secret until reveal_seed. `seed_hash` MUST equal
+    // `core::poseidon::poseidon_hash_span(array![seed].span())` — reveal_seed
+    // recomputes exactly that and reverts on any mismatch (Security review,
+    // round 6: this was a literal identity-check placeholder through round 5,
+    // documented as a known TODO; now a real commitment). Any off-chain
+    // tooling that commits on the dealer's behalf (a future dealer service,
+    // scripts/deal_verify.py if it grows a commit-side check) must hash the
+    // same way — a single-element span containing the raw seed felt252, no
+    // table_id or other domain separator mixed in. Reusing a literal seed
+    // value across two different tables is a dealer mistake, not an
+    // exploit: seed_hash is stored per table_id, so it doesn't create any
+    // cross-table collision either party could act on.
     fn commit_deal(ref self: TState, table_id: felt252, seed_hash: felt252);
 
     // Dealer records that seats are dealt (hole-card notes already created
@@ -112,6 +187,16 @@ pub trait IPokerGame<TState> {
     fn bet(ref self: TState, table_id: felt252, seat: felt252, amount: u128);
 
     fn fold(ref self: TState, table_id: felt252, seat: felt252);
+
+    // Security review (round 3, Finding 2): the only way to move real funds
+    // out of a table used to be settle_table, dealer-only with no timeout —
+    // an absent/malicious dealer permanently locked real bettor funds. Any
+    // seat can reclaim exactly what it personally contributed via bet(),
+    // once the table has sat unsettled past SETTLE_TIMEOUT_SECS since
+    // creation. No-op (reverts) once the table has been settled — a losing
+    // seat's contribution legitimately became the winner's payout by then,
+    // not a refund target.
+    fn reclaim_stalled_bet(ref self: TState, table_id: felt252, seat: felt252);
 
     // ── Settlement ──────────────────────────────────────────────────────
     // TODO(hand-eval): winners is trusted input for this skeleton. Replace
@@ -143,15 +228,21 @@ pub trait IPokerGame<TState> {
     fn get_table_dealer(self: @TState, table_id: felt252) -> ContractAddress;
     fn get_seat_owner(self: @TState, table_id: felt252, seat: felt252) -> ContractAddress;
     fn get_note_id_owner(self: @TState, note_id: felt252) -> ContractAddress;
+    fn get_table_created_at(self: @TState, table_id: felt252) -> u64;
+    fn get_seat_contributed(self: @TState, table_id: felt252, seat: felt252) -> u128;
+    fn get_table_settled(self: @TState, table_id: felt252) -> bool;
 }
 
+// pub: tests/ compiles as a separate crate and needs zkpoker::PokerGame::
+// Event::... for event assertions (spy_events + assert_emitted).
 #[starknet::contract]
-mod PokerGame {
+pub mod PokerGame {
     use starknet::storage::{
         Map, StoragePathEntry, StoragePointerReadAccess, StoragePointerWriteAccess,
     };
     use core::num::traits::Zero;
-    use starknet::{ContractAddress, get_caller_address, get_contract_address};
+    use core::poseidon::poseidon_hash_span;
+    use starknet::{ContractAddress, get_block_timestamp, get_caller_address, get_contract_address};
     use super::{IErc20Dispatcher, IErc20DispatcherTrait, OpenNoteDeposit};
 
     mod errors {
@@ -174,7 +265,15 @@ mod PokerGame {
         pub const NOT_SEAT_OWNER: felt252 = 'NOT_SEAT_OWNER';
         pub const NOTE_ID_TAKEN: felt252 = 'NOTE_ID_TAKEN';
         pub const TRANSFER_FAILED: felt252 = 'TRANSFER_FAILED';
+        pub const TOO_EARLY: felt252 = 'TOO_EARLY';
+        pub const ALREADY_SETTLED: felt252 = 'ALREADY_SETTLED';
     }
+
+    // Security review (round 3, Finding 2): how long a table may sit
+    // unsettled before its players can reclaim their own contributions via
+    // reclaim_stalled_bet. 24h — a starting point, not a value validated
+    // against real game-session lengths yet.
+    const SETTLE_TIMEOUT_SECS: u64 = 86400;
 
     #[storage]
     struct Storage {
@@ -211,8 +310,18 @@ mod PokerGame {
         pending_payout: Map<felt252, u128>,
         // note_id -> the token that payout is denominated in (Finding 1).
         payout_token: Map<felt252, ContractAddress>,
-        // Guards privacy_invoke's external balance_of call (Finding 3).
+        // Guards privacy_invoke's (and, as of round 3, bet's) external calls.
         reentrancy_lock: bool,
+        // table_id -> block timestamp at create_table, for the
+        // reclaim_stalled_bet timeout (round 3, Finding 2).
+        table_created_at: Map<felt252, u64>,
+        // (table_id, seat) -> total this seat has personally contributed via
+        // bet(), refundable through reclaim_stalled_bet if the table stalls.
+        seat_contributed: Map<(felt252, felt252), u128>,
+        // table_id -> true once settle_table has run for it. Blocks
+        // reclaim_stalled_bet after a hand legitimately resolved — a
+        // losing seat's contribution became the winner's payout by then.
+        table_settled: Map<felt252, bool>,
     }
 
     #[constructor]
@@ -232,6 +341,7 @@ mod PokerGame {
         Fold: Fold,
         Settled: Settled,
         Invoked: Invoked,
+        Reclaimed: Reclaimed,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -300,6 +410,14 @@ mod PokerGame {
         caller: ContractAddress,
     }
 
+    #[derive(Drop, starknet::Event)]
+    struct Reclaimed {
+        #[key]
+        table_id: felt252,
+        seat: felt252,
+        amount: u128,
+    }
+
     #[abi(embed_v0)]
     impl PokerGameImpl of super::IPokerGame<ContractState> {
         fn create_table(ref self: ContractState, table_id: felt252, token: ContractAddress, buy_in: u128) {
@@ -310,6 +428,9 @@ mod PokerGame {
             // Security review Finding 2: the caller becomes this table's
             // dealer — the only address settle_table will later accept.
             self.table_dealer.entry(table_id).write(get_caller_address());
+            // Security review (round 3, Finding 2): starts the clock for
+            // reclaim_stalled_bet's timeout.
+            self.table_created_at.entry(table_id).write(get_block_timestamp());
             self.emit(TableCreated { table_id, token, buy_in });
         }
 
@@ -371,11 +492,16 @@ mod PokerGame {
             assert(get_caller_address() == self.table_dealer.entry(table_id).read(), errors::NOT_DEALER);
             assert(self.seed_committed.entry(table_id).read(), errors::NOT_COMMITTED);
             assert(!self.seed_revealed.entry(table_id).read(), errors::ALREADY_REVEALED);
-            // TODO(hash-choice): pick and pin the actual commitment hash (e.g.
-            // Poseidon, to match the pool's own hashing) before this leaves
-            // skeleton stage. Placeholder equality check below documents the
-            // intended shape; wire in the real hash before relying on it.
-            let computed_hash = seed; // TODO: replace with poseidon_hash_span or similar
+            // Security review (round 6): this was a literal identity check
+            // (`computed_hash = seed`) through round 5 — any seed value
+            // would "verify" against itself, so `commit_deal` carried no
+            // real binding at all. Now a genuine Poseidon commitment: the
+            // dealer must have committed
+            // `poseidon_hash_span(array![seed].span())` as `seed_hash` in
+            // `commit_deal`; a mismatched `seed` reverts here instead of
+            // silently passing. See the `commit_deal` doc comment for the
+            // exact off-chain construction any dealer tooling must match.
+            let computed_hash = poseidon_hash_span(array![seed].span());
             assert(computed_hash == self.seed_hash.entry(table_id).read(), errors::SEED_MISMATCH);
             self.revealed_seed.entry(table_id).write(seed);
             self.seed_revealed.entry(table_id).write(true);
@@ -384,26 +510,88 @@ mod PokerGame {
 
         fn bet(ref self: ContractState, table_id: felt252, seat: felt252, amount: u128) {
             assert(self.table_exists.entry(table_id).read(), errors::NO_TABLE);
+            // Security review (round 4, Finding 1): a bet placed after
+            // settle_table has already run would accumulate in table_pot/
+            // seat_contributed with no way out — reclaim_stalled_bet is
+            // itself gated on !table_settled, so a post-settlement bet was
+            // permanently unrecoverable. Block it at the source instead.
+            assert(!self.table_settled.entry(table_id).read(), errors::ALREADY_SETTLED);
             // Security review follow-up: only the address that joined this
             // seat may bet on it — previously any caller could inflate any
             // table's pot for any seat with no real funds behind it.
             let caller = get_caller_address();
             assert(caller == self.seat_owner.entry((table_id, seat)).read(), errors::NOT_SEAT_OWNER);
             assert(!self.seat_folded.entry((table_id, seat)).read(), errors::FOLDED);
-            // Security review (2026-08-30 re-audit, Finding 2): the
-            // seat-ownership check above only gates *identity* — it says
-            // nothing about *value*. Without pulling real funds here,
-            // table_pot was fabricable by anyone acting as their own
-            // dealer/seat-owner, then drainable via privacy_invoke against
-            // the contract's shared balance for that token. The caller must
-            // approve this contract for at least `amount` beforehand.
+            // Security review (round 3, Finding 3): table_token is pinned
+            // once by whoever called create_table, with no allowlist, so
+            // this call is to a caller-controlled contract in general.
+            // Block it from reentering bet/privacy_invoke mid-call — the
+            // prior version credited table_pot only *after* this call with
+            // no lock at all.
+            assert(!self.reentrancy_lock.read(), errors::REENTRANCY);
+            self.reentrancy_lock.write(true);
+
+            // Security review (round 3, Finding 4): a malicious or
+            // fee-on-transfer token could report success while moving less
+            // than `amount` (or nothing at all) — measure the real balance
+            // delta instead of trusting the nominal parameter.
             let token = self.table_token.entry(table_id).read();
             let erc20 = IErc20Dispatcher { contract_address: token };
+            let balance_before: u256 = erc20.balance_of(get_contract_address());
             let transferred = erc20.transfer_from(caller, get_contract_address(), amount.into());
             assert(transferred, errors::TRANSFER_FAILED);
+            let balance_after: u256 = erc20.balance_of(get_contract_address());
+            let received: u128 = (balance_after - balance_before).try_into().expect(errors::AMOUNT_OVERFLOW);
+
             let pot_entry = self.table_pot.entry(table_id);
-            pot_entry.write(pot_entry.read() + amount);
-            self.emit(Bet { table_id, seat, amount });
+            pot_entry.write(pot_entry.read() + received);
+            // Security review (round 3, Finding 2): tracks what this seat
+            // can reclaim via reclaim_stalled_bet if the table never settles.
+            let contributed_entry = self.seat_contributed.entry((table_id, seat));
+            contributed_entry.write(contributed_entry.read() + received);
+            self.emit(Bet { table_id, seat, amount: received });
+
+            self.reentrancy_lock.write(false);
+        }
+
+        fn reclaim_stalled_bet(ref self: ContractState, table_id: felt252, seat: felt252) {
+            assert(self.table_exists.entry(table_id).read(), errors::NO_TABLE);
+            assert(!self.table_settled.entry(table_id).read(), errors::ALREADY_SETTLED);
+            let caller = get_caller_address();
+            assert(caller == self.seat_owner.entry((table_id, seat)).read(), errors::NOT_SEAT_OWNER);
+            let created_at = self.table_created_at.entry(table_id).read();
+            assert(get_block_timestamp() >= created_at + SETTLE_TIMEOUT_SECS, errors::TOO_EARLY);
+
+            let key = (table_id, seat);
+            let owed = self.seat_contributed.entry(key).read();
+            assert(owed != 0, errors::NO_PAYOUT);
+
+            assert(!self.reentrancy_lock.read(), errors::REENTRANCY);
+            self.reentrancy_lock.write(true);
+
+            // Effects before the external transfer call below — unlike
+            // bet(), the amount owed is already known, so there's no need
+            // to wait on a post-call balance read the way bet() does.
+            self.seat_contributed.entry(key).write(0);
+            let pot_entry = self.table_pot.entry(table_id);
+            let current_pot = pot_entry.read();
+            // Saturating: a settled table can't reach here (blocked above),
+            // so current_pot should always be >= owed, but don't underflow
+            // if some future path changes that invariant.
+            let new_pot = if current_pot >= owed {
+                current_pot - owed
+            } else {
+                0
+            };
+            pot_entry.write(new_pot);
+
+            let token = self.table_token.entry(table_id).read();
+            let erc20 = IErc20Dispatcher { contract_address: token };
+            let sent = erc20.transfer(caller, owed.into());
+            assert(sent, errors::TRANSFER_FAILED);
+
+            self.emit(Reclaimed { table_id, seat, amount: owed });
+            self.reentrancy_lock.write(false);
         }
 
         fn fold(ref self: ContractState, table_id: felt252, seat: felt252) {
@@ -419,6 +607,21 @@ mod PokerGame {
             ref self: ContractState, table_id: felt252, winners: Span<felt252>, payout_note_ids: Span<felt252>,
         ) {
             assert(self.table_exists.entry(table_id).read(), errors::NO_TABLE);
+            // Security review (round 4, Finding 1): a table could otherwise
+            // be settled more than once — a second call after new bets
+            // landed could redirect that fresh pot independent of the
+            // earlier legitimate settlement.
+            assert(!self.table_settled.entry(table_id).read(), errors::ALREADY_SETTLED);
+            // Security review (round 4, Finding 2): settle_table mutates
+            // the same table_pot/pending_payout state that bet()/
+            // reclaim_stalled_bet()/privacy_invoke() guard with
+            // reentrancy_lock around their external calls, but never
+            // checked the lock itself — a dealer-controlled token could
+            // reenter here mid-bet() and settle a stale pot before the
+            // in-flight call's own contribution landed. No external calls
+            // happen in this function, so checking (not also holding) the
+            // lock is enough.
+            assert(!self.reentrancy_lock.read(), errors::REENTRANCY);
             // Security review Finding 2: only the table's own dealer may
             // settle it — otherwise any caller could redirect the pot to a
             // note it controls.
@@ -456,6 +659,15 @@ mod PokerGame {
                     self.note_id_owner.entry(note_id).read() == self.seat_owner.entry((table_id, seat)).read(),
                     errors::NOTE_ID_TAKEN,
                 );
+                // Security review (round 3, Finding 1): note_id_owner above
+                // only checked that the same *address* re-registered this
+                // note_id — it says nothing about the *token*. Without this
+                // guard, settling a second (even zero-pot) table for the
+                // same note_id in a different token silently relabels an
+                // already-accumulated balance into that new token.
+                let existing_pending = self.pending_payout.entry(note_id).read();
+                let existing_token = self.payout_token.entry(note_id).read();
+                assert(existing_pending == 0 || existing_token == token, errors::BAD_TOKEN);
                 // Security review Finding 1: bind this payout to the
                 // table's token so privacy_invoke can refuse a mismatched
                 // token supplied by an untrusted caller.
@@ -466,6 +678,11 @@ mod PokerGame {
                 i += 1;
             };
             self.table_pot.entry(table_id).write(0);
+            // Security review (round 3, Finding 2): blocks
+            // reclaim_stalled_bet from running against a table that
+            // legitimately resolved — losing seats' contributions are now
+            // the winners' payout, not a refund target.
+            self.table_settled.entry(table_id).write(true);
             self.emit(Settled { table_id, winner_count: winners.len() });
         }
 
@@ -506,7 +723,13 @@ mod PokerGame {
             // Only approve/clear what this note is actually owed — this
             // contract may be holding other tables' funds concurrently.
             self.pending_payout.entry(note_id).write(0);
-            erc20.approve(self.pool.read(), owed.into());
+            // Security review (round 5, Finding 1): a token whose approve()
+            // returns false instead of reverting would otherwise let this
+            // proceed as if the payout succeeded, with pending_payout
+            // already zeroed and no recovery path — same pattern already
+            // guarded for transfer_from (bet) and transfer (reclaim_stalled_bet).
+            let approved = erc20.approve(self.pool.read(), owed.into());
+            assert(approved, errors::TRANSFER_FAILED);
 
             self.emit(Invoked { note_id, amount: owed, caller });
 
@@ -548,6 +771,18 @@ mod PokerGame {
 
         fn get_note_id_owner(self: @ContractState, note_id: felt252) -> ContractAddress {
             self.note_id_owner.entry(note_id).read()
+        }
+
+        fn get_table_created_at(self: @ContractState, table_id: felt252) -> u64 {
+            self.table_created_at.entry(table_id).read()
+        }
+
+        fn get_seat_contributed(self: @ContractState, table_id: felt252, seat: felt252) -> u128 {
+            self.seat_contributed.entry((table_id, seat)).read()
+        }
+
+        fn get_table_settled(self: @ContractState, table_id: felt252) -> bool {
+            self.table_settled.entry(table_id).read()
         }
     }
 }
