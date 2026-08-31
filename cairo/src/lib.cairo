@@ -30,6 +30,13 @@ pub trait IErc20<TState> {
 #[cfg(test)]
 pub mod mocks;
 
+// Pure Texas Hold'em hand evaluation, used by
+// PokerGame::settle_table_by_hand. Part of the production build (not
+// cfg(test)-gated) — its own #[cfg(test)] unit tests are genuinely run via
+// `scarb test -- -t unit` (see the module doc comment in poker_hand.cairo
+// for why that works here but not for cairo/tests/).
+pub mod poker_hand;
+
 // ─────────────────────────────────────────────────────────────────────────
 // PokerGame: the STRK20 anonymizer for provably-fair on-chain poker.
 //
@@ -42,10 +49,13 @@ pub mod mocks;
 //     content); at showdown the dealer reveals `seed` and anyone can
 //     recompute the deal with scripts/deal_verify.py and check it against
 //     the seat/note commitments recorded here.
-//   - Bet/fold accounting and pot bookkeeping per table. Multi-street betting
-//     (pre-flop/flop/turn/river) and hand ranking are NOT implemented here —
-//     `settle_table` currently trusts an externally-supplied winner list.
-//     That's the next real chunk of work, not a privacy-layer concern.
+//   - Bet/fold accounting and pot bookkeeping per table, structured into
+//     real PreFlop/Flop/Turn/River/Showdown streets (`advance_street`).
+//     `settle_table` still trusts an externally-supplied winner list;
+//     `settle_table_by_hand` is the alternative that computes the winner
+//     on-chain from revealed cards via the `poker_hand` module instead
+//     (round 6 — see that module and the header note below for what it
+//     does and doesn't yet guarantee).
 //   - `privacy_invoke` is the pool's phase-7 (InvokeExternal) hook: it pays
 //     a table's pot into the winner's *already-created* open note. Unlike
 //     the starter kit's echo helper (which grabs "whatever balance we hold"
@@ -135,9 +145,29 @@ pub mod mocks;
 // doc comment specifies as the required off-chain construction. Existing
 // tests referencing the old placeholder behavior were updated to match.
 //
-// Everything here remains unaudited beyond round 5 — re-run cairo-auditor
-// after any further change (including this one) and before this touches a
-// real pool.
+// Round 6 (feature work, not a security finding — NOT yet audited):
+// multi-street betting (`advance_street`: PreFlop/Flop/Turn/River/Showdown,
+// dealer-only, `bet` closes once Showdown is reached) and
+// `settle_table_by_hand`, an on-chain-showdown alternative to
+// `settle_table` that computes each seat's best 5-of-7 hand via the new
+// `poker_hand` module and splits the pot among the actual strongest
+// hand(s) instead of trusting a dealer-supplied winner list. `poker_hand`
+// is genuinely unit-tested (19 tests, all passing — run with
+// `scarb test -- -t unit`, no snforge needed for that module). The new
+// contract entrypoints reuse settle_table's exact security patterns
+// (dealer-only, reentrancy check, table_settled, note_id_owner/
+// payout_token binding) but are new code and have NOT been through
+// cairo-auditor. Known simplifications, documented in full on
+// `advance_street`'s and `settle_table_by_hand`'s doc comments: no
+// bet-matching/turn-order enforcement when advancing streets, and no
+// on-chain link yet between the submitted hole cards and the seed
+// commitment (that needs the shuffle-from-seed check to move on-chain
+// too — see docs/DESIGN.md open items).
+//
+// Everything here remains unaudited beyond round 5 — round 6's new code
+// (poseidon commitment fix, multi-street betting, settle_table_by_hand)
+// has not been through cairo-auditor at all. Re-run it after any further
+// change and before this touches a real pool.
 // ─────────────────────────────────────────────────────────────────────────
 
 #[starknet::interface]
@@ -183,10 +213,55 @@ pub trait IPokerGame<TState> {
     // ── Betting ─────────────────────────────────────────────────────────
     // Bet/call/raise. Amounts are intentionally public (poker needs public
     // pot math per the RFP's visibility table) — only identity and hole
-    // cards are private.
+    // cards are private. Reverts once the table has reached Showdown
+    // (street 4) — see `advance_street`.
     fn bet(ref self: TState, table_id: felt252, seat: felt252, amount: u128);
 
     fn fold(ref self: TState, table_id: felt252, seat: felt252);
+
+    // Security review (round 6): the pre-round-6 contract had exactly one
+    // flat betting phase for a whole hand — no pre-flop/flop/turn/river
+    // structure. This is a real (if minimal) multi-street model: 0=PreFlop,
+    // 1=Flop, 2=Turn, 3=River, 4=Showdown. Dealer-only, one street forward
+    // per call, no skipping. `bet` refuses once street reaches Showdown;
+    // `settle_table_by_hand` requires it. What this does NOT do: enforce
+    // that every active seat has matched the current street's bet before
+    // advancing (no "all called or folded" check), and it doesn't gate any
+    // actual on-chain community-card disclosure to a street boundary —
+    // community cards, like hole cards, are only ever cryptographically
+    // revealed once, at showdown, via the existing single `reveal_seed`
+    // (see docs/DESIGN.md — progressive per-street reveal without a
+    // trusted dealer is the RFP's own "aspirational" V2 problem, not
+    // solved here). Streets are a real betting-round structure a frontend
+    // can build on; they are not yet a fully-enforced betting engine.
+    fn advance_street(ref self: TState, table_id: felt252);
+
+    // Security review (round 6): on-chain showdown alternative to
+    // `settle_table` — instead of trusting a dealer-supplied winner list,
+    // the dealer (or anyone reconstructing the same public inputs) submits
+    // the revealed hole cards for each non-folded seat plus the 5 revealed
+    // community cards, and this function computes each seat's best 5-of-7
+    // hand via `poker_hand::best_of_7` and splits the pot evenly among the
+    // seat(s) with the strongest hand (remainder to the first tied
+    // winner, same rule as `settle_table`). This removes "trust the
+    // dealer's claimed winner" — the winner is now a deterministic
+    // function of the submitted cards, checkable by anyone. It does NOT
+    // remove "trust that the submitted cards are the cards actually dealt"
+    // — that needs the shuffle-from-seed check to move on-chain too (see
+    // docs/DESIGN.md open items; scripts/deal_verify.py does this
+    // off-chain today). `seats`/`hole_cards`/`payout_note_ids` must be the
+    // same length and in the same order; each seat must not be folded, and
+    // requires `table_street == 4` (Showdown) — call `advance_street` four
+    // times first. Shares every other guard `settle_table` has (dealer,
+    // reentrancy, `table_settled`, `note_id_owner`/`payout_token` binding).
+    fn settle_table_by_hand(
+        ref self: TState,
+        table_id: felt252,
+        seats: Span<felt252>,
+        hole_cards: Span<(u8, u8)>,
+        community_cards: Span<u8>,
+        payout_note_ids: Span<felt252>,
+    );
 
     // Security review (round 3, Finding 2): the only way to move real funds
     // out of a table used to be settle_table, dealer-only with no timeout —
@@ -231,6 +306,7 @@ pub trait IPokerGame<TState> {
     fn get_table_created_at(self: @TState, table_id: felt252) -> u64;
     fn get_seat_contributed(self: @TState, table_id: felt252, seat: felt252) -> u128;
     fn get_table_settled(self: @TState, table_id: felt252) -> bool;
+    fn get_table_street(self: @TState, table_id: felt252) -> u8;
 }
 
 // pub: tests/ compiles as a separate crate and needs zkpoker::PokerGame::
@@ -267,6 +343,9 @@ pub mod PokerGame {
         pub const TRANSFER_FAILED: felt252 = 'TRANSFER_FAILED';
         pub const TOO_EARLY: felt252 = 'TOO_EARLY';
         pub const ALREADY_SETTLED: felt252 = 'ALREADY_SETTLED';
+        pub const BETTING_CLOSED: felt252 = 'BETTING_CLOSED';
+        pub const NOT_SHOWDOWN: felt252 = 'NOT_SHOWDOWN';
+        pub const BAD_CARDS: felt252 = 'BAD_CARDS';
     }
 
     // Security review (round 3, Finding 2): how long a table may sit
@@ -274,6 +353,13 @@ pub mod PokerGame {
     // reclaim_stalled_bet. 24h — a starting point, not a value validated
     // against real game-session lengths yet.
     const SETTLE_TIMEOUT_SECS: u64 = 86400;
+
+    // Street ordinals (round 6): 0=PreFlop, 1=Flop, 2=Turn, 3=River,
+    // 4=Showdown. `table_street` defaults to 0 for any table that never
+    // calls `advance_street` — `bet` stays open the whole time in that
+    // case, so this is backward compatible with a table that just wants
+    // one flat betting phase, matching every pre-round-6 test/usage.
+    const SHOWDOWN_STREET: u8 = 4;
 
     #[storage]
     struct Storage {
@@ -322,6 +408,9 @@ pub mod PokerGame {
         // reclaim_stalled_bet after a hand legitimately resolved — a
         // losing seat's contribution became the winner's payout by then.
         table_settled: Map<felt252, bool>,
+        // table_id -> current betting street (round 6). 0=PreFlop by
+        // default; see SHOWDOWN_STREET and `advance_street`.
+        table_street: Map<felt252, u8>,
     }
 
     #[constructor]
@@ -342,6 +431,7 @@ pub mod PokerGame {
         Settled: Settled,
         Invoked: Invoked,
         Reclaimed: Reclaimed,
+        StreetAdvanced: StreetAdvanced,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -416,6 +506,13 @@ pub mod PokerGame {
         table_id: felt252,
         seat: felt252,
         amount: u128,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    struct StreetAdvanced {
+        #[key]
+        table_id: felt252,
+        street: u8,
     }
 
     #[abi(embed_v0)]
@@ -516,6 +613,10 @@ pub mod PokerGame {
             // itself gated on !table_settled, so a post-settlement bet was
             // permanently unrecoverable. Block it at the source instead.
             assert(!self.table_settled.entry(table_id).read(), errors::ALREADY_SETTLED);
+            // Security review (round 6): once a table reaches Showdown,
+            // betting is over — only settle_table/settle_table_by_hand
+            // should move the pot from here on.
+            assert(self.table_street.entry(table_id).read() != SHOWDOWN_STREET, errors::BETTING_CLOSED);
             // Security review follow-up: only the address that joined this
             // seat may bet on it — previously any caller could inflate any
             // table's pot for any seat with no real funds behind it.
@@ -603,6 +704,18 @@ pub mod PokerGame {
             self.emit(Fold { table_id, seat });
         }
 
+        fn advance_street(ref self: ContractState, table_id: felt252) {
+            assert(self.table_exists.entry(table_id).read(), errors::NO_TABLE);
+            assert(!self.table_settled.entry(table_id).read(), errors::ALREADY_SETTLED);
+            assert(get_caller_address() == self.table_dealer.entry(table_id).read(), errors::NOT_DEALER);
+            let street_entry = self.table_street.entry(table_id);
+            let current = street_entry.read();
+            assert(current != SHOWDOWN_STREET, errors::BETTING_CLOSED);
+            let next = current + 1;
+            street_entry.write(next);
+            self.emit(StreetAdvanced { table_id, street: next });
+        }
+
         fn settle_table(
             ref self: ContractState, table_id: felt252, winners: Span<felt252>, payout_note_ids: Span<felt252>,
         ) {
@@ -684,6 +797,121 @@ pub mod PokerGame {
             // the winners' payout, not a refund target.
             self.table_settled.entry(table_id).write(true);
             self.emit(Settled { table_id, winner_count: winners.len() });
+        }
+
+        fn settle_table_by_hand(
+            ref self: ContractState,
+            table_id: felt252,
+            seats: Span<felt252>,
+            hole_cards: Span<(u8, u8)>,
+            community_cards: Span<u8>,
+            payout_note_ids: Span<felt252>,
+        ) {
+            assert(self.table_exists.entry(table_id).read(), errors::NO_TABLE);
+            assert(!self.table_settled.entry(table_id).read(), errors::ALREADY_SETTLED);
+            assert(!self.reentrancy_lock.read(), errors::REENTRANCY);
+            assert(get_caller_address() == self.table_dealer.entry(table_id).read(), errors::NOT_DEALER);
+            assert(self.table_street.entry(table_id).read() == SHOWDOWN_STREET, errors::NOT_SHOWDOWN);
+            assert(seats.len() == hole_cards.len(), errors::LEN_MISMATCH);
+            assert(seats.len() == payout_note_ids.len(), errors::LEN_MISMATCH);
+            assert(seats.len() != 0, errors::NO_INPUT);
+            assert(community_cards.len() == 5, errors::BAD_CARDS);
+
+            let n = seats.len();
+
+            // Pass 1: verify each seat exactly as settle_table does (real
+            // seat/note ownership, not folded), then score its best 5-of-7
+            // hand from its submitted hole cards + the shared community
+            // cards. Verifying and scoring in the same pass keeps this at
+            // one loop instead of two, but the checks below are otherwise
+            // identical to settle_table's per-winner checks.
+            let mut scores: Array<u64> = array![];
+            let mut i: u32 = 0;
+            loop {
+                if i == n {
+                    break;
+                }
+                let seat = *seats.at(i);
+                let note_id = *payout_note_ids.at(i);
+                assert(self.seat_note.entry((table_id, seat)).read() == note_id, errors::NO_TABLE);
+                assert(
+                    self.note_id_owner.entry(note_id).read() == self.seat_owner.entry((table_id, seat)).read(),
+                    errors::NOTE_ID_TAKEN,
+                );
+                assert(!self.seat_folded.entry((table_id, seat)).read(), errors::FOLDED);
+
+                let (h1, h2) = *hole_cards.at(i);
+                let mut seven: Array<u8> = array![h1, h2];
+                let mut k: u32 = 0;
+                loop {
+                    if k == 5 {
+                        break;
+                    }
+                    seven.append(*community_cards.at(k));
+                    k += 1;
+                };
+                scores.append(super::poker_hand::best_of_7(seven.span()));
+                i += 1;
+            };
+            let scores_span = scores.span();
+
+            // Pass 2: find the max score, then collect every seat index
+            // that reached it (ties split the pot — see below).
+            let mut max_score: u64 = 0;
+            let mut j: u32 = 0;
+            loop {
+                if j == n {
+                    break;
+                }
+                let s = *scores_span.at(j);
+                if s > max_score {
+                    max_score = s;
+                }
+                j += 1;
+            };
+            let mut winner_idxs: Array<u32> = array![];
+            let mut m: u32 = 0;
+            loop {
+                if m == n {
+                    break;
+                }
+                if *scores_span.at(m) == max_score {
+                    winner_idxs.append(m);
+                }
+                m += 1;
+            };
+            let widx = winner_idxs.span();
+
+            // Pass 3: distribute the pot among the winner(s) — identical
+            // token-binding and remainder rules to settle_table.
+            let token = self.table_token.entry(table_id).read();
+            let pot = self.table_pot.entry(table_id).read();
+            let num_winners: u128 = widx.len().into();
+            let share: u128 = pot / num_winners;
+            let remainder: u128 = pot - share * num_winners;
+            let mut w: u32 = 0;
+            loop {
+                if w == widx.len() {
+                    break;
+                }
+                let idx = *widx.at(w);
+                let note_id = *payout_note_ids.at(idx);
+                let existing_pending = self.pending_payout.entry(note_id).read();
+                let existing_token = self.payout_token.entry(note_id).read();
+                assert(existing_pending == 0 || existing_token == token, errors::BAD_TOKEN);
+                self.payout_token.entry(note_id).write(token);
+                let bump = if w == 0 {
+                    share + remainder
+                } else {
+                    share
+                };
+                let entry = self.pending_payout.entry(note_id);
+                entry.write(entry.read() + bump);
+                w += 1;
+            };
+            self.table_pot.entry(table_id).write(0);
+            self.table_settled.entry(table_id).write(true);
+            self.emit(Settled { table_id, winner_count: widx.len() });
         }
 
         fn privacy_invoke(
@@ -783,6 +1011,10 @@ pub mod PokerGame {
 
         fn get_table_settled(self: @ContractState, table_id: felt252) -> bool {
             self.table_settled.entry(table_id).read()
+        }
+
+        fn get_table_street(self: @ContractState, table_id: felt252) -> u8 {
+            self.table_street.entry(table_id).read()
         }
     }
 }

@@ -6,6 +6,16 @@ edition = "2024_07"
 [dependencies]
 starknet = "2.18.0"
 
+[dev-dependencies]
+# Safe: cairo_test is Scarb's own bundled test runner (the deprecated-but-
+# working `scarb cairo-test` / `scarb test -- -t unit`), not a cargo-built
+# plugin — confirmed it does NOT break `scarb build` the way snforge_std
+# did (see the note below). This is what runs cairo/src/poker_hand.cairo's
+# unit tests; it can't run cairo/tests/ (that needs snforge_std's
+# cheatcodes/contract-deployment support), only pure-function unit tests
+# co-located in src/.
+cairo_test = "2.18.0"
+
 [[target.starknet-contract]]
 sierra = true
 casm = true

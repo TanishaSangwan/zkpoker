@@ -28,11 +28,16 @@ references to that name anywhere, they're stale; the project's real name is
 yet**. The user has been asked and hasn't requested a commit — don't commit
 without asking first.
 
-**⚠️ Important caveat on "what's been checked":** every audit round in this
-project scanned only `cairo/src/lib.cairo` (the one Cairo file that exists).
-Nothing else — the frontend, scripts, or docs — has had any security review.
-If you add more Cairo files, they are unaudited until you run `cairo-auditor`
-on them too.
+**⚠️ Important caveat on "what's been checked":** every audit round (1-5) in
+this project scanned only `cairo/src/lib.cairo` as it stood after round 5.
+Two more Cairo files exist now — `cairo/src/mocks.cairo` (test-only,
+`#[cfg(test)]`-gated, never in the production build, low stakes) and
+`cairo/src/poker_hand.cairo` (production code, genuinely unit-tested for
+*correctness* but never security-audited) — plus `lib.cairo` itself grew a
+real chunk of new code (multi-street betting, `settle_table_by_hand`) after
+round 5 that no audit round has seen at all. Nothing outside `cairo/` —
+frontend, scripts, docs — has ever had a security review. See §5's "Round 6"
+note for exactly what's unaudited right now.
 
 ---
 
@@ -69,20 +74,27 @@ on them too.
 ```
 zkpoker/
   cairo/src/lib.cairo          PokerGame contract — see §4/§5
+  cairo/src/poker_hand.cairo    Texas Hold'em hand evaluation, pure functions.
+                                 Genuinely unit-tested (19 tests, passing) via
+                                 `scarb test -- -t unit` — see §4a. Part of
+                                 the production build. NOT security-audited.
   cairo/src/mocks.cairo         test-only mock ERC20, #[cfg(test)]-gated,
                                  never in the production build
   cairo/Scarb.toml              package "zkpoker", scarb build succeeds
-                                 clean — has a comment explaining why
-                                 snforge_std is deliberately NOT declared
-                                 as a dependency here (see §4a)
-  cairo/tests/                  full test suite, WRITTEN BUT NOT RUN — see
-                                 §4a and cairo/tests/README.md before you
-                                 trust any of it
+                                 clean — has comments explaining why
+                                 snforge_std is deliberately NOT a
+                                 dependency, and why cairo_test IS one and
+                                 is safe (see §4a)
+  cairo/tests/                  full contract-level test suite (incl.
+                                 streets/settle_table_by_hand), WRITTEN BUT
+                                 NOT RUN — see §4a and cairo/tests/README.md
+                                 before you trust any of it
   scripts/deal_verify.py        fairness-check CLI, tested working, PRNG is a
                                  stand-in (see docs/DESIGN.md open items)
   docs/DESIGN.md                architecture, fairness model, security-review
                                  timeline (keep this updated as you go)
-  security-review-*.md          one file per audit round (5 so far), see §5
+  security-review-*.md          one file per audit round (5 so far — round 6
+                                 hasn't been audited yet), see §5
   HANDOFF.md                    this file
   src/, public/, package.json   still the ORIGINAL starter-kit demo UI
                                  (Akashneelesh/strk20-starter-kit) — nothing
@@ -103,40 +115,64 @@ cd cairo && scarb build
 
 `PokerGame` in `cairo/src/lib.cairo` implements: table creation/joining,
 commit-reveal dealing (`commit_deal`/`mark_dealt`/`reveal_seed`), bet/fold
-pot accounting, `reclaim_stalled_bet` (timeout-based refund for an
-abandoned dealer), `settle_table`, and the STRK20 `privacy_invoke` payout
+pot accounting structured into PreFlop/Flop/Turn/River/Showdown streets
+(`advance_street`, round 6), `reclaim_stalled_bet` (timeout-based refund for
+an abandoned dealer), `settle_table` (trusted winner list) plus
+`settle_table_by_hand` (round 6 — computes the winner on-chain via
+`poker_hand::best_of_7` instead), and the STRK20 `privacy_invoke` payout
 hook.
 
-**It has been through five audit rounds.** Every Critical/High finding
-found so far has been fixed and rebuilt clean. Round 5 (the most recent)
-was a genuinely fresh full pass, not just re-verification, and found
-nothing above Low severity — the first round to do so. **One accepted
-low-severity gap remains** (constructor doesn't reject a zero `pool`
-address — self-inflicted deploy misconfiguration only, not attacker-
-reachable). This is a meaningfully better state than earlier in the
-project, but "5 clean-ish rounds" is not the same as "audited" — still
-don't deploy this anywhere with real value without at least getting the
-test suite actually running first (see §4a) and ideally a real,
-non-AI security review before mainnet. The file's own header comment (top
-of `cairo/src/lib.cairo`) is kept up to date with a summary of this
-history — read it too.
+**It has been through five audit rounds, and round 6 (this multi-street +
+hand-eval addition) has NOT been audited at all.** Every Critical/High
+finding rounds 1-5 found has been fixed and rebuilt clean; round 5 was a
+genuinely fresh full pass and found nothing above Low severity. **One
+accepted low-severity gap remains from round 5** (constructor doesn't
+reject a zero `pool` address). That's real progress on the round-1-through-5
+surface, but round 6 added a substantial new entrypoint
+(`settle_table_by_hand`) that reuses `settle_table`'s security patterns
+by hand, not by construction — it has not been independently checked the
+way everything else has. **Do not treat round 6 as equally trustworthy to
+rounds 1-5.** A round 7 audit sweep targeting it specifically is the
+top item in §7. And regardless of audit status: don't deploy any of this
+anywhere with real value without also getting the test suite running (see
+§4a) and ideally a real, non-AI security review before mainnet. The file's
+own header comment (top of `cairo/src/lib.cairo`) is kept up to date with a
+summary of this history — read it too.
 
-### 4a. Test suite: written, NOT run — read this before trusting it
+### 4a. Test suite: written, mostly NOT run — one real exception
 
-A full test suite exists at `cairo/tests/` (+ `cairo/src/mocks.cairo` for
-a configurable mock ERC20) following the `cairo-testing` skill's coverage
-rules, with a dedicated regression test per historical audit finding.
-**It has never been executed, and could not even be compile-checked**, on
-this machine: Starknet Foundry (`snforge`) ships no Windows binary, and
-building it from source needs a Rust/cargo toolchain that isn't installed.
-`scarb build --test` (which can compile test code without the `snforge`
-binary) was tried, but even that needs `snforge_std`'s companion compiler
-plugin, which had no prebuilt Windows binary at the version tried and fell
-back to `cargo fetch` — still blocked. **Adding `snforge_std` as a
-dev-dependency was tried and reverted after it broke the *plain*
-`scarb build`** (Scarb resolves the full dependency graph, dev-dependencies
-included, regardless of target) — don't repeat that mistake; read
-`cairo/Scarb.toml`'s comment before touching it.
+**Exception, actually verified:** `cairo/src/poker_hand.cairo`'s own 19
+unit tests genuinely run and pass, right now, on this machine:
+
+```bash
+export PATH="$PATH:/c/Users/TANISHA/AppData/Local/Programs/scarb/scarb-v2.18.0-x86_64-pc-windows-msvc/bin"
+cd cairo && scarb test -- -t unit
+```
+
+This works because `poker_hand`'s functions are pure (no storage, no
+external calls) — they need none of `snforge`'s cheat codes or contract
+deployment, so Scarb's own bundled (if deprecated) `cairo_test` runner
+handles them with zero extra tooling. `[dev-dependencies] cairo_test` in
+`cairo/Scarb.toml` is what enables this — confirmed safe (doesn't break
+`scarb build` the way `snforge_std` does, see below). `-t unit` matters:
+it skips `cairo/tests/` (the directory below), which still needs `snforge`
+and would otherwise fail the whole `scarb test` run.
+
+Everything else — the full contract-level suite at `cairo/tests/` (+
+`cairo/src/mocks.cairo` for a configurable mock ERC20) — follows the
+`cairo-testing` skill's coverage rules, with a dedicated regression test
+per historical audit finding. **It has never been executed, and could not
+even be compile-checked**, on this machine: Starknet Foundry (`snforge`)
+ships no Windows binary, and building it from source needs a Rust/cargo
+toolchain that isn't installed. `scarb build --test` (which can compile
+test code without the `snforge` binary) was tried, but even that needs
+`snforge_std`'s companion compiler plugin, which had no prebuilt Windows
+binary at the version tried and fell back to `cargo fetch` — still
+blocked. **Adding `snforge_std` as a dev-dependency was tried and reverted
+after it broke the *plain* `scarb build`** (Scarb resolves the full
+dependency graph, dev-dependencies included, regardless of target) — don't
+repeat that mistake; read `cairo/Scarb.toml`'s comments before touching it
+(both the snforge_std warning and the cairo_test explanation).
 
 Full explanation, exact setup steps, and what's covered vs. not:
 `cairo/tests/README.md`. **First thing to do with this project on a
@@ -308,6 +344,51 @@ of the above are in the five `security-review-*.md` files — this section
 is a summary, not a replacement for reading them before you touch this
 contract again.**
 
+### Round 6 — feature work, NOT audited (no security-review file for it)
+
+After round 5, three things were added with no `cairo-auditor` follow-up:
+
+1. **`reveal_seed` Poseidon fix** (small): the seed-commitment check was a
+   literal identity comparison (`computed_hash = seed`) through round 5 —
+   any seed "verified" against itself, so `commit_deal` carried no real
+   binding despite reading as a normal commit-reveal scheme. Now uses
+   `core::poseidon::poseidon_hash_span(array![seed].span())`. `commit_deal`'s
+   doc comment specifies the exact construction off-chain dealer tooling
+   must match. `test_lifecycle.cairo`'s commit/reveal tests were updated to
+   match (they'd have failed `SEED_MISMATCH` against the old raw-seed
+   commits otherwise).
+2. **Multi-street betting**: new `advance_street` (dealer-only,
+   PreFlop→Flop→Turn→River→Showdown, one step at a time), and `bet` now
+   refuses once a table reaches Showdown. Explicitly does NOT enforce
+   bet-matching/turn-order before advancing, and does NOT gate any
+   on-chain card disclosure to a street boundary (community cards, like
+   hole cards, are still only ever revealed once at showdown via the
+   existing `reveal_seed` — see the interface doc comment on
+   `advance_street` for the full reasoning).
+3. **`settle_table_by_hand`** — new entrypoint, on-chain-showdown
+   alternative to `settle_table`. Dealer submits each non-folded seat's
+   hole cards + the 5 community cards; the function computes every seat's
+   best 5-of-7 hand via the new `poker_hand` module and pays the pot to
+   the actual strongest hand(s) (splitting ties), instead of trusting a
+   dealer-supplied winner list. Reuses `settle_table`'s exact security
+   patterns (dealer-only, reentrancy check, `table_settled`,
+   `note_id_owner`/`payout_token` binding) — same shape, genuinely new
+   code (array-input handling across 3 passes: verify+score, find max,
+   distribute). **This is the single largest unaudited chunk of code in
+   the contract right now.**
+
+`poker_hand.cairo` itself (`evaluate_5`/`best_of_7`) is genuinely
+unit-tested — 19 tests, all passing, via `scarb test -- -t unit` (see
+§4a) — but "unit-tested for correctness" and "security-audited" are
+different things; nothing has checked it (or `settle_table_by_hand`) for
+the kind of caller-identity/reentrancy/value-fabrication issues rounds 1-5
+found repeatedly elsewhere in this file. **No `security-review-*.md` file
+exists for round 6** — the next one created should cover it.
+
+Rebuilt clean (`scarb build`, zero warnings) after each of the three
+changes above; unit tests re-run and still 19/19 passing after the
+contract integration.
+
 ---
 
 ## 6. Resolved decision (kept for context)
@@ -325,11 +406,15 @@ actual game-session UX once the frontend exists).
 round 3's new code. Round 5 — a genuinely fresh pass, not just
 re-verification — found nothing above Low severity, and formally confirmed
 (not just spot-checked) that the reentrancy lock and payout-math invariants
-hold. **Only one accepted gap remains** (constructor zero-`pool`
-validation, Low, not attacker-reachable). Five rounds in, the contract's
-security surface has genuinely narrowed — this is a good point to shift
-effort to the test suite rather than open a round 6 speculatively; resume
-auditing only if the contract changes again first.
+hold. **Only one accepted gap remained after round 5** (constructor
+zero-`pool` validation, Low, not attacker-reachable).
+
+**Then round 6 happened** (multi-street betting + `settle_table_by_hand` —
+see §5) — real feature work, genuinely valuable, but it's new code that
+has NOT been through the audit process rounds 1-5 went through. Don't read
+"five clean-ish rounds" as covering the current state of the contract; it
+covers the state as of round 5. A round 7 sweep targeting round 6's
+additions specifically (see §7) is the natural next security step.
 
 ---
 
@@ -338,39 +423,41 @@ auditing only if the contract changes again first.
 In rough priority order — see `docs/DESIGN.md` "Open items" for the
 canonical, kept-up-to-date list:
 
-1. **Get the test suite actually running** — it's written (`cairo/tests/`,
+1. **Round 7 `cairo-auditor` sweep targeting round 6** — `settle_table_by_hand`
+   especially (biggest unaudited surface in the contract), plus the streets
+   changes and the `reveal_seed` Poseidon fix. See §5's "Round 6" entry for
+   exactly what to point it at.
+2. **Get the test suite actually running** — it's written (`cairo/tests/`,
    see §4a) but never executed or compile-checked on this machine (no
-   `snforge` on Windows). Highest-value next step: get onto a machine with
-   `snforge` (Linux/Mac/WSL), follow `cairo/tests/README.md`, run it, and
-   fix whatever the first real pass surfaces.
-2. ~~Pin the real commitment hash in `reveal_seed`~~ — **DONE**, post
-   round 5: now uses `core::poseidon::poseidon_hash_span(array![seed].span())`,
-   see `docs/DESIGN.md` "`reveal_seed` commitment hash" and the doc comment
-   on `commit_deal` in `lib.cairo` for the exact off-chain construction any
-   dealer tooling must match. `test_lifecycle.cairo`'s commit/reveal tests
-   were updated to match (they previously committed the raw seed, matching
-   the old placeholder behavior — would now fail `SEED_MISMATCH` if unfixed
-   test files were run against the new code). **Not re-audited yet** — this
-   was applied after round 5, so a round 6 sweep should at least glance at
-   `reveal_seed`/`commit_deal` even if nothing else changed.
-3. Multi-street betting + hand evaluation — `settle_table` still trusts an
-   externally-supplied winner list; no pre-flop/flop/turn/river structure,
-   no on-chain or proven hand ranking exists at all yet. Biggest remaining
-   game-logic gap.
-4. Swap `scripts/deal_verify.py`'s PRNG (currently Python's `random.Random`,
-   explicitly a stand-in) for a Poseidon-based Fisher-Yates, so the same
-   computation could eventually be proven in-circuit. (Different from item 2
-   above — this is the *deck-shuffle* algorithm, not the seed commitment.)
-5. Wire the frontend — `src/` still runs the starter kit's original demo UI
+   `snforge` on Windows). `cairo/src/poker_hand.cairo`'s own unit tests DO
+   already run and pass (`scarb test -- -t unit`, §4a) — this item is
+   about everything else. Get onto a machine with `snforge`
+   (Linux/Mac/WSL), follow `cairo/tests/README.md`, run it, fix whatever
+   the first real pass surfaces.
+3. ~~Pin the real commitment hash in `reveal_seed`~~ — **DONE**, see round 6
+   in §5.
+4. ~~Multi-street betting + hand evaluation~~ — **DONE** (round 6, §5):
+   `advance_street` + `settle_table_by_hand`. Two real follow-ups remain
+   though: bet-matching/turn-order enforcement isn't implemented (see
+   `advance_street`'s doc comment), and `settle_table_by_hand` doesn't
+   verify submitted hole cards against the seed commitment (needs item 5
+   below first).
+5. Move the shuffle-from-seed algorithm on-chain (Poseidon-based
+   Fisher-Yates, replacing `scripts/deal_verify.py`'s Python
+   `random.Random` stand-in). Two birds: this is also what
+   `settle_table_by_hand` needs to eventually verify a submitted hole card
+   actually matches the committed-and-revealed deck, not just trust the
+   dealer's submission.
+6. Wire the frontend — `src/` still runs the starter kit's original demo UI
    (wallet connect + shield/unshield/echo). Nothing calls `PokerGame` yet.
-6. Deploy to Sepolia once tests pass — needs the real STRK20 pool address as
+7. Deploy to Sepolia once tests pass — needs the real STRK20 pool address as
    the constructor arg; record the deployed address in `cairo/address.md`
    and wire it into `src/utils/constants.ts`.
-7. Housekeeping: first git commit (ask the user first), `npm audit fix`
+8. Housekeeping: first git commit (ask the user first), `npm audit fix`
    decision on `sharp`, pitch/demo narrative (the "card-as-encrypted-note +
    commit-reveal" pattern generalizes to Battleship/Mafia/sealed-bid
    auctions per the RFP's own framing — good pitch material).
-8. Re-check https://strk20.starknet.io/hackathon closer to submission — it
+9. Re-check https://strk20.starknet.io/hackathon closer to submission — it
    was a near-empty client-rendered shell (just an AVNU banner link) when
    last checked; actual rules/deadline/submission format may populate
    later. `WebFetch` can't render it (SPA); the Chrome extension
@@ -415,3 +502,26 @@ canonical, kept-up-to-date list:
   content. If you need the actual rules, either try the Chrome extension
   tools again (wasn't connected last time this was tried) or ask the user
   to paste the content.
+- **`scarb build --test` needing `snforge` for EVERYTHING is a red
+  herring** — it only needs `snforge_std`'s plugin because `cairo/tests/`
+  imports it. A pure-function module with no storage/external-call/
+  cheat-code dependency can be unit-tested with zero extra tooling: add
+  `[dev-dependencies] cairo_test = "2.18.0"` (safe — confirmed it doesn't
+  break `scarb build` the way `snforge_std` did) and co-locate
+  `#[cfg(test)] mod tests { #[test] fn ... }` in the same file. Run with
+  `scarb test -- -t unit` (`-t unit` is essential — it's what skips
+  `cairo/tests/`, which still needs `snforge` and would otherwise fail the
+  whole run). This is how `cairo/src/poker_hand.cairo`'s 19 tests actually
+  run and pass in this environment — see §4a. Worth remembering for any
+  future pure-logic Cairo work here.
+- **Cairo `felt252` short-string literals cap at 31 characters** — a
+  `#[should_panic(expected: '...')]` or `assert(cond, '...')` string longer
+  than that fails with `E3009: The value does not fit within the range of
+  type core::felt252` at compile time. Hit this writing `poker_hand`'s
+  tests; keep assert/panic messages short.
+- **`Array<T>` in Cairo has no in-place mutation** (no `arr[i] = x`,
+  no removal from the middle) — sorting/filtering utilities need a
+  rebuild-a-new-array style (see `sort_desc`/`kickers_excluding` in
+  `poker_hand.cairo` for a working pattern: repeated max-extraction into a
+  new array, or filter-and-append into a new array). Don't reach for
+  in-place index assignment, it doesn't exist for `Array`.

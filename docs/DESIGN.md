@@ -53,14 +53,23 @@ table/betting bookkeeping:
   note_id recording.
 - `commit_deal` / `mark_dealt` / `reveal_seed` — the commit-reveal fairness
   flow above.
-- `bet` / `fold` — pot accounting. **Multi-street betting and hand ranking
-  are not implemented** — `settle_table` currently takes a trusted winner
-  list as input. That's ordinary game logic to build next, not a privacy
-  concern, and is intentionally left out of this skeleton.
+- `bet` / `fold` — pot accounting, gated by `advance_street`'s
+  PreFlop/Flop/Turn/River/Showdown structure (round 6). `advance_street`
+  doesn't enforce that every active seat matched the current bet before
+  moving on — a real betting-round structure, not yet a fully-enforced
+  betting engine.
 - `settle_table` — splits a table's pot across winners' *open notes* (a note
   that skips amount encryption, so a payout amount produced by contract logic
   after proving can be filled in — see the `strk20-privacy` skill's notes on
-  open notes) and records what's owed per `note_id`.
+  open notes) and records what's owed per `note_id`. Still takes a trusted
+  winner list as input.
+- `settle_table_by_hand` (round 6) — the on-chain-showdown alternative: given
+  each non-folded seat's revealed hole cards and the 5 revealed community
+  cards, computes every seat's best 5-of-7 hand via the `poker_hand` module
+  and pays the pot to the actual strongest hand(s), splitting ties. Removes
+  "trust the dealer's claimed winner"; does NOT yet remove "trust that the
+  submitted cards are the cards actually dealt" — see "Hand evaluation"
+  below and the open items list.
 - `privacy_invoke` — the pool's phase-7 (`InvokeExternal`) hook. Pays out
   exactly what `pending_payout[note_id]` says is owed, then clears it. This
   differs from the starter kit's echo-helper demo (which just grabs "whatever
@@ -72,6 +81,38 @@ Everything in the contract is unaudited scaffolding. Run the
 `cairo-auditor` skill (from `starknet-skills`) on it before it ever touches
 a real pool or real funds, and use `cairo-contract-authoring` /
 `cairo-testing` while filling in the TODOs.
+
+## Hand evaluation (`cairo/src/poker_hand.cairo`, round 6)
+
+Standard Texas Hold'em hand ranking as pure functions — `evaluate_5` (score
+one 5-card hand) and `best_of_7` (best 5-of-7, trying all 21 combinations).
+Higher score wins; ties compare exactly (category, then up to 5 tie-break
+ranks). This is the one piece of Cairo logic in this whole project that is
+**genuinely unit-tested and verified**, not just carefully written: it has
+zero dependency on storage, external calls, or `snforge` (no cheat codes or
+contract deployment needed to test pure functions), so Scarb's own bundled
+`cairo_test` runner exercises it for real —
+
+```bash
+cd cairo && scarb test -- -t unit
+```
+
+— 19 tests, every hand category plus tie-break edge cases (wheel straight,
+flush-beats-straight, kicker comparisons, full-house trip-rank ties), all
+passing. Contrast with `cairo/tests/` (the contract-level integration
+tests), which needs `snforge` and has never run in this environment — see
+"Test suite" below.
+
+**What `settle_table_by_hand` does and doesn't guarantee.** It removes
+"trust the dealer's claimed winner" — the winner is a deterministic
+function of the submitted cards, checkable by anyone re-running
+`poker_hand::best_of_7` on the same inputs. It does **not** remove "trust
+that the submitted hole cards are the cards actually dealt to that seat" —
+nothing on-chain today ties a submitted hole card back to the seed
+commitment (`reveal_seed`) the way `deal_verify.py` does off-chain. Closing
+that gap needs the shuffle-from-seed algorithm to move on-chain too (see
+open items below) so `settle_table_by_hand` could assert a submitted card
+matches the seat's position in the committed-and-revealed deck.
 
 ## Buy-in, betting, payout flow (SDK / wallet side)
 
@@ -208,6 +249,16 @@ exploitable, not yet fixed):
 Five rounds in, the security surface has narrowed to one accepted
 low-severity gap.
 
+**Round 6 is feature work, not yet audited.** After round 5, three things
+were added without a follow-up `cairo-auditor` pass: the `reveal_seed`
+Poseidon fix (small, see below), multi-street betting (`advance_street`,
+plus a new `bet` guard), and `settle_table_by_hand` (a substantial new
+entrypoint reusing `settle_table`'s security patterns but genuinely new
+code — array-input handling, score comparison, a second pot-distribution
+path). Treat all of round 6 as unaudited. `settle_table_by_hand` in
+particular is the highest-value target for a round 7 sweep: it's the
+newest, largest, most structurally different addition since round 1.
+
 ## Test suite
 
 Written (`cairo/tests/*.cairo`, `cairo/src/mocks.cairo`) following the
@@ -247,17 +298,25 @@ another party could exploit.
 
 ## Open items (in priority order for the hackathon)
 
-1. Get `snforge` running (Linux/Mac/WSL — see `cairo/tests/README.md`) and
-   actually run the test suite; fix whatever the first real compile/run
-   surfaces.
-2. Swap `deal_verify.py`'s PRNG for a Poseidon-based Fisher-Yates so the same
-   computation is provable in-circuit later, not just reproducible off-chain
-   (a different thing from the `reveal_seed` commitment hash above — this
-   one is about the *deck-shuffle* algorithm, not the seed commitment).
-3. Multi-street betting rounds + hand ranking for `settle_table`'s winner
-   input.
-4. Frontend: wire `PokerGame` actions into the starter-kit UI
+1. Round 7 `cairo-auditor` sweep covering round 6 (Poseidon fix,
+   multi-street betting, `settle_table_by_hand`) — the biggest unaudited
+   surface in the contract right now.
+2. Get `snforge` running (Linux/Mac/WSL — see `cairo/tests/README.md`) and
+   actually run the test suite (`cairo/tests/`, now including
+   `test_hand_eval.cairo`'s streets/settle_table_by_hand coverage); fix
+   whatever the first real compile/run surfaces. (`poker_hand`'s own unit
+   tests already run and pass today — see "Hand evaluation" above.)
+3. Move the shuffle-from-seed algorithm on-chain (Poseidon-based
+   Fisher-Yates, replacing `deal_verify.py`'s Python `random.Random` stand-
+   in) so `settle_table_by_hand` can eventually verify a submitted hole
+   card actually matches the committed-and-revealed deck, not just trust
+   the dealer's submission. Two birds: this is also the long-standing
+   "swap `deal_verify.py`'s PRNG" item.
+4. Bet-matching / turn-order enforcement for `advance_street` — currently
+   a dealer can advance streets without every active seat having called
+   the current bet.
+5. Frontend: wire `PokerGame` actions into the starter-kit UI
    (`src/app/components`), replacing the echo-helper demo flow.
-5. Generalization write-up for the pitch: the "card-as-encrypted-note +
+6. Generalization write-up for the pitch: the "card-as-encrypted-note +
    commit-reveal deal" pattern applies to Battleship, Mafia, and sealed-bid
    auctions, per the RFP's own framing — worth a slide, not more code.

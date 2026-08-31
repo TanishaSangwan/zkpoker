@@ -1,11 +1,21 @@
 # Test suite — has NOT been run or compile-checked
 
+**Exception: `cairo/src/poker_hand.cairo`'s own unit tests DO run and DO
+pass** — 19 tests, via `cd cairo && scarb test -- -t unit`. That module has
+no storage/external-call/cheat-code dependency, so it needs none of the
+`snforge` machinery this directory's suite needs. See its module doc
+comment and `docs/DESIGN.md` "Hand evaluation" for why. Everything below is
+about *this* directory (`cairo/tests/`), which is a different, still-unrun
+story.
+
 This suite (`helpers.cairo`, `test_lifecycle.cairo`, `test_betting.cairo`,
-`test_settlement.cairo`, `../src/mocks.cairo`) was written against the
-contract as of round 5 of the security review, following the
-`cairo-testing` skill's coverage rules and the "Required Tests" lists from
-all five `../../security-review-*.md` reports. **It has not been executed,
-and could not even be compile-checked**, on the machine it was written on:
+`test_settlement.cairo`, `test_hand_eval.cairo`, `../src/mocks.cairo`) was
+written against the contract as of round 5 of the security review (plus
+round 6's streets/`settle_table_by_hand` addition for `test_hand_eval.cairo`
+specifically), following the `cairo-testing` skill's coverage rules and the
+"Required Tests" lists from all five `../../security-review-*.md` reports.
+**It has not been executed, and could not even be compile-checked**, on the
+machine it was written on:
 
 - Starknet Foundry (`snforge`) ships no Windows binary.
 - Building it from source needs a Rust/cargo toolchain, which wasn't
@@ -77,6 +87,14 @@ native Windows).
   - `test_privacy_invoke_wrong_caller_rejected` /
     `test_privacy_invoke_wrong_token_rejected` (round 1)
   - `test_privacy_invoke_approve_failure_rejected` (round 5)
+- **Streets and hand evaluation** (`test_hand_eval.cairo`, round 6):
+  `advance_street` success/access-control/past-Showdown, `bet` closing once
+  Showdown is reached, and `settle_table_by_hand` — a clear-winner case and
+  a genuine tie-split case (both hand-verified by hand against
+  `poker_hand`'s actual scoring rules, not just written and hoped), plus
+  its own access-control/state-machine/input-shape negative paths.
+  `poker_hand::best_of_7`/`evaluate_5` themselves are separately, genuinely
+  tested — see the note at the top of this file.
 
 ## What's NOT covered (known gaps, deliberately left for time)
 
@@ -91,3 +109,8 @@ native Windows).
   framing if added).
 - Multi-table / multi-seat stress scenarios beyond the two-seat fixtures
   `helpers.cairo` sets up.
+- `advance_street` bet-matching/turn-order enforcement — there isn't any to
+  test yet (see `docs/DESIGN.md` open items).
+- Any test that submitted hole cards to `settle_table_by_hand` actually
+  match the committed-and-revealed seed — there's no on-chain check for
+  that yet either (same open item as the shuffle-from-seed work).
