@@ -182,6 +182,7 @@ pub mod MockShuffleVerifier {
     #[storage]
     struct Storage {
         reject: bool,
+        reject_key: bool,
     }
 
     #[abi(embed_v0)]
@@ -193,6 +194,12 @@ pub mod MockShuffleVerifier {
             // calls set_reject(true) to exercise rejection.
             !self.reject.read()
         }
+
+        fn verify_key_ownership(
+            self: @ContractState, proof: Span<felt252>, public_inputs: Span<felt252>,
+        ) -> bool {
+            !self.reject_key.read()
+        }
     }
 
     #[abi(embed_v0)]
@@ -200,10 +207,15 @@ pub mod MockShuffleVerifier {
         fn set_reject(ref self: ContractState, reject: bool) {
             self.reject.write(reject);
         }
+
+        fn set_reject_key(ref self: ContractState, reject: bool) {
+            self.reject_key.write(reject);
+        }
     }
 }
 
 #[starknet::interface]
 pub trait IMockVerifierAdminTrait<TState> {
     fn set_reject(ref self: TState, reject: bool);
+    fn set_reject_key(ref self: TState, reject: bool);
 }

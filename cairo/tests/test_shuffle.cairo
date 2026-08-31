@@ -21,19 +21,28 @@ use super::helpers::{
 // felts — it never does elliptic-curve arithmetic itself (see
 // docs/V2-SPIKE-RESULTS.md §3a on why the joint key is supplied rather
 // than computed on-chain).
-const PK_A_X: felt252 = 'PKAX';
-const PK_A_Y: felt252 = 'PKAY';
-const PK_B_X: felt252 = 'PKBX';
-const PK_B_Y: felt252 = 'PKBY';
-const JOINT_X: felt252 = 'JOINTX';
-const JOINT_Y: felt252 = 'JOINTY';
-const DECK_0: felt252 = 'DECK0';
-const DECK_1: felt252 = 'DECK1';
-const DECK_2: felt252 = 'DECK2';
+// u256 throughout: Grumpkin coordinates and Noir Field outputs live in
+// BN254's scalar field, ~6x the STARK prime, so they are NOT felt252 —
+// see the storage comment in lib.cairo. The `high` limbs here are
+// deliberately non-zero, so these fixtures exercise values a felt252
+// could never have held.
+const PK_A_X: u256 = u256 { low: 'PKAX', high: 1 };
+const PK_A_Y: u256 = u256 { low: 'PKAY', high: 2 };
+const PK_B_X: u256 = u256 { low: 'PKBX', high: 3 };
+const PK_B_Y: u256 = u256 { low: 'PKBY', high: 4 };
+const JOINT_X: u256 = u256 { low: 'JOINTX', high: 5 };
+const JOINT_Y: u256 = u256 { low: 'JOINTY', high: 6 };
+const DECK_0: u256 = u256 { low: 'DECK0', high: 7 };
+const DECK_1: u256 = u256 { low: 'DECK1', high: 8 };
+const DECK_2: u256 = u256 { low: 'DECK2', high: 9 };
 const SHUFFLE_TURN_SECS: u64 = 600;
 
 fn proof() -> Span<felt252> {
     array!['PROOF'].span()
+}
+
+fn key_proof() -> Span<felt252> {
+    array!['KEYPROOF'].span()
 }
 
 // Two-seat table with both keys registered and the shuffle open.
@@ -49,12 +58,12 @@ fn setup_shuffle_ready() -> (
 
     start_cheat_caller_address(game.contract_address, ALICE());
     game.join_table(TABLE_1, SEAT_0, NOTE_A);
-    game.register_shuffle_key(TABLE_1, SEAT_0, PK_A_X, PK_A_Y);
+    game.register_shuffle_key(TABLE_1, SEAT_0, PK_A_X, PK_A_Y, key_proof());
     stop_cheat_caller_address(game.contract_address);
 
     start_cheat_caller_address(game.contract_address, BOB());
     game.join_table(TABLE_1, SEAT_1, NOTE_B);
-    game.register_shuffle_key(TABLE_1, SEAT_1, PK_B_X, PK_B_Y);
+    game.register_shuffle_key(TABLE_1, SEAT_1, PK_B_X, PK_B_Y, key_proof());
     stop_cheat_caller_address(game.contract_address);
 
     (game, verifier)
@@ -79,7 +88,7 @@ fn test_register_shuffle_key_success() {
     start_cheat_caller_address(game.contract_address, ALICE());
     game.join_table(TABLE_1, SEAT_0, NOTE_A);
     let mut spy = spy_events();
-    game.register_shuffle_key(TABLE_1, SEAT_0, PK_A_X, PK_A_Y);
+    game.register_shuffle_key(TABLE_1, SEAT_0, PK_A_X, PK_A_Y, key_proof());
     stop_cheat_caller_address(game.contract_address);
 
     spy
@@ -112,7 +121,7 @@ fn test_register_shuffle_key_by_non_seat_owner_rejected() {
     // MALLORY tries to publish a key for ALICE's seat — which would put a
     // key MALLORY controls into the joint key.
     start_cheat_caller_address(game.contract_address, MALLORY());
-    game.register_shuffle_key(TABLE_1, SEAT_0, PK_B_X, PK_B_Y);
+    game.register_shuffle_key(TABLE_1, SEAT_0, PK_B_X, PK_B_Y, key_proof());
 }
 
 #[test]
@@ -120,7 +129,7 @@ fn test_register_shuffle_key_by_non_seat_owner_rejected() {
 fn test_register_shuffle_key_twice_rejected() {
     let (game, _v) = setup_shuffle_ready();
     start_cheat_caller_address(game.contract_address, ALICE());
-    game.register_shuffle_key(TABLE_1, SEAT_0, PK_A_X, PK_A_Y);
+    game.register_shuffle_key(TABLE_1, SEAT_0, PK_A_X, PK_A_Y, key_proof());
 }
 
 #[test]
@@ -135,7 +144,7 @@ fn test_register_zero_shuffle_key_rejected() {
     game.join_table(TABLE_1, SEAT_0, NOTE_A);
     // A zero share contributes nothing to the joint key — it is how a
     // player would appear to participate while actually opting out.
-    game.register_shuffle_key(TABLE_1, SEAT_0, 0, 0);
+    game.register_shuffle_key(TABLE_1, SEAT_0, 0, 0, key_proof());
 }
 
 #[test]
@@ -145,7 +154,7 @@ fn test_register_shuffle_key_after_begin_rejected() {
     begin(game);
     // CAROL can't slip a key in after the participant list is frozen.
     start_cheat_caller_address(game.contract_address, ALICE());
-    game.register_shuffle_key(TABLE_1, SEAT_1, PK_B_X, PK_B_Y);
+    game.register_shuffle_key(TABLE_1, SEAT_1, PK_B_X, PK_B_Y, key_proof());
 }
 
 // ─── begin_shuffle ──────────────────────────────────────────────────────
@@ -217,7 +226,7 @@ fn test_begin_shuffle_skips_seats_without_keys() {
 
     start_cheat_caller_address(game.contract_address, ALICE());
     game.join_table(TABLE_1, SEAT_0, NOTE_A);
-    game.register_shuffle_key(TABLE_1, SEAT_0, PK_A_X, PK_A_Y);
+    game.register_shuffle_key(TABLE_1, SEAT_0, PK_A_X, PK_A_Y, key_proof());
     stop_cheat_caller_address(game.contract_address);
 
     // BOB joins seat 1 but never registers a key.
@@ -227,7 +236,7 @@ fn test_begin_shuffle_skips_seats_without_keys() {
 
     start_cheat_caller_address(game.contract_address, CAROL());
     game.join_table(TABLE_1, SEAT_2, NOTE_C);
-    game.register_shuffle_key(TABLE_1, SEAT_2, PK_B_X, PK_B_Y);
+    game.register_shuffle_key(TABLE_1, SEAT_2, PK_B_X, PK_B_Y, key_proof());
     stop_cheat_caller_address(game.contract_address);
 
     begin(game);
@@ -360,7 +369,7 @@ fn test_shuffle_after_complete_rejected() {
     start_cheat_caller_address(game.contract_address, BOB());
     game.submit_shuffle(TABLE_1, DECK_2, proof());
     // chain is complete; a third submission must not reopen it
-    game.submit_shuffle(TABLE_1, 'DECK3', proof());
+    game.submit_shuffle(TABLE_1, u256 { low: 'DECK3', high: 10 }, proof());
 }
 
 // ─── deadlines and the all-of-n forfeit ─────────────────────────────────
@@ -458,4 +467,81 @@ fn test_claim_timeout_twice_rejected() {
     start_cheat_caller_address(game.contract_address, MALLORY());
     game.claim_shuffle_timeout(TABLE_1);
     game.claim_shuffle_timeout(TABLE_1);
+}
+
+// ─── rogue-key defence ──────────────────────────────────────────────────
+
+// The attack this blocks: whoever registers LAST can otherwise choose
+// pk_last = X - sum(everyone else's shares) for an X whose secret they
+// know, making the joint key theirs alone. Every shuffle proof in the
+// chain still verifies, and they quietly decrypt every hole card at the
+// table. Requiring proof of knowledge of the discrete log makes that
+// choice unprovable, because a key built by subtraction has no known
+// secret.
+#[test]
+#[should_panic(expected: 'KEY_PROOF_REJECTED')]
+fn test_register_shuffle_key_without_valid_ownership_proof_rejected() {
+    let (game, verifier) = deploy_pokergame_with_verifier(POOL());
+    let (token_addr, _t, _a) = deploy_mock_token();
+    start_cheat_caller_address(game.contract_address, DEALER());
+    game.create_table(TABLE_1, token_addr, 0, TWO_SEATS);
+    stop_cheat_caller_address(game.contract_address);
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.join_table(TABLE_1, SEAT_0, NOTE_A);
+
+    verifier.set_reject_key(true);
+    game.register_shuffle_key(TABLE_1, SEAT_0, PK_A_X, PK_A_Y, key_proof());
+}
+
+// A failed ownership proof must leave the seat unregistered, so the
+// attacker cannot retry into a half-written state or end up counted as a
+// participant with an unproven key.
+#[test]
+#[feature("safe_dispatcher")]
+fn test_rejected_key_proof_leaves_seat_unregistered() {
+    let (game, verifier) = deploy_pokergame_with_verifier(POOL());
+    let (token_addr, _t, _a) = deploy_mock_token();
+    start_cheat_caller_address(game.contract_address, DEALER());
+    game.create_table(TABLE_1, token_addr, 0, TWO_SEATS);
+    stop_cheat_caller_address(game.contract_address);
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.join_table(TABLE_1, SEAT_0, NOTE_A);
+    stop_cheat_caller_address(game.contract_address);
+
+    let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
+    verifier.set_reject_key(true);
+    start_cheat_caller_address(game.contract_address, ALICE());
+    let outcome = safe.register_shuffle_key(TABLE_1, SEAT_0, PK_A_X, PK_A_Y, key_proof());
+    stop_cheat_caller_address(game.contract_address);
+    assert(outcome.is_err(), 'registration should fail');
+
+    // The seat is not a participant: begin_shuffle finds nobody.
+    verifier.set_reject_key(false);
+    start_cheat_caller_address(game.contract_address, DEALER());
+    let begun = safe.begin_shuffle(TABLE_1, JOINT_X, JOINT_Y, DECK_0);
+    stop_cheat_caller_address(game.contract_address);
+    assert(begun.is_err(), 'no participants expected');
+
+    // ..and once a real proof is supplied the same seat registers fine.
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.register_shuffle_key(TABLE_1, SEAT_0, PK_A_X, PK_A_Y, key_proof());
+    stop_cheat_caller_address(game.contract_address);
+    begin(game);
+    assert(game.get_shuffle_order_len(TABLE_1) == 1, 'seat should now count');
+}
+
+// Keys and commitments must survive a round-trip with a non-zero high
+// limb — the whole point of moving off felt252. A felt252 field would
+// have wrapped these mod the STARK prime.
+#[test]
+fn test_large_key_and_commitment_values_round_trip() {
+    let (game, _v) = setup_shuffle_ready();
+    begin(game);
+    assert(game.get_shuffle_commitment(TABLE_1) == DECK_0, 'commitment must round-trip');
+    assert(DECK_0.high != 0, 'fixture should exceed felt252');
+
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.submit_shuffle(TABLE_1, DECK_1, proof());
+    stop_cheat_caller_address(game.contract_address);
+    assert(game.get_shuffle_commitment(TABLE_1) == DECK_1, 'head must round-trip');
 }

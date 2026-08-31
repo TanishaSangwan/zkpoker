@@ -100,14 +100,39 @@ unrelated to every input, while still decrypting to the same card. **Permute
 
 ### 4.1 Key setup
 
+**Implemented** (`register_shuffle_key`), with one caveat below.
+
 Each player submits `PK_i` **plus a Schnorr proof of knowledge of `sk_i`**.
+The contract refuses registration unless the proof verifies, so a share
+whose secret the registrant does not know cannot enter the joint key.
 
 The proof is mandatory, not decorative. Without it a player who moves last
 can mount a **rogue-key attack**: choose `PK_last = X − Σ(other PK_i)` for
 an `X` they control, making the joint key entirely theirs and letting them
 decrypt every card alone. Proof of knowledge of the discrete log kills this.
 
-Contract computes and pins `PK = Σ PK_i` for the hand.
+Contract pins the joint key for the hand.
+
+**Caveat, and it is not small:** the contract enforces that a proof was
+supplied and accepted, but the *verifier itself* is still the mock in
+tests — the real Schnorr verifier (Garaga EC ops over Grumpkin, or an
+equivalent circuit) does not exist yet. The defence is wired end to end
+and will be real the moment a real verifier is deployed; until then a
+deployment pointing at a permissive verifier is exactly as vulnerable as
+having no check at all.
+
+Note also that the contract does **not** recompute `PK = Σ PK_i` — Cairo
+has no cheap Grumpkin arithmetic, so the joint key is supplied at
+`begin_shuffle` and players check the sum off-chain against the
+per-seat shares the contract stores and emits.
+
+**Key and commitment representation.** Every one of these values is a
+`u256`, never a `felt252`. Grumpkin's base field is BN254's scalar field
+(~2.19e76), about 6x the STARK prime (~3.62e75), so **83.5% of valid
+coordinates do not fit in a felt252** and would silently wrap — making
+most honest keys unrepresentable and letting distinct keys collide. The
+same applies to every deck commitment, since Noir's `Field` is that same
+BN254 scalar field.
 
 ### 4.2 Initial deck
 

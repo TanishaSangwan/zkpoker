@@ -34,8 +34,20 @@ pub trait IErc20<TState> {
 // chain's ordering, chaining or forfeit logic depends on which one wins.
 #[starknet::interface]
 pub trait IShuffleVerifier<TState> {
+    // Every value below is a BN254/Grumpkin field element serialized as a
+    // u256 pair (low, high) — see the note on u256 in PokerGame's storage
+    // for why these cannot be felt252.
+    //
     // public_inputs = [joint_pk_x, joint_pk_y, commitment_in, commitment_out]
     fn verify_shuffle(self: @TState, proof: Span<felt252>, public_inputs: Span<felt252>) -> bool;
+
+    // Proof of knowledge of the secret key behind a published key share —
+    // a Schnorr proof, or any equivalent. Without this the joint key is
+    // forgeable by whoever registers last (the rogue-key attack, see
+    // register_shuffle_key), so registration REQUIRES it.
+    //
+    // public_inputs = [pk_x, pk_y]
+    fn verify_key_ownership(self: @TState, proof: Span<felt252>, public_inputs: Span<felt252>) -> bool;
 }
 
 // Test-only mock ERC20 (configurable failure/fee/reentrancy behavior) used
@@ -493,7 +505,17 @@ pub trait IPokerGame<TState> {
 
     // Publishes this seat's ElGamal public key share. Every share must be
     // registered before begin_shuffle; the joint key is their sum.
-    fn register_shuffle_key(ref self: TState, table_id: felt252, seat: felt252, pk_x: felt252, pk_y: felt252);
+    // `key_proof` proves knowledge of the secret behind (pk_x, pk_y).
+    // Mandatory: without it the last registrant can choose a share that
+    // makes the joint key theirs alone and decrypt every card.
+    fn register_shuffle_key(
+        ref self: TState,
+        table_id: felt252,
+        seat: felt252,
+        pk_x: u256,
+        pk_y: u256,
+        key_proof: Span<felt252>,
+    );
 
     // Dealer opens the shuffle phase. `joint_pk_*` is the sum of the
     // registered key shares and `initial_commitment` commits to the
@@ -505,9 +527,9 @@ pub trait IPokerGame<TState> {
     fn begin_shuffle(
         ref self: TState,
         table_id: felt252,
-        joint_pk_x: felt252,
-        joint_pk_y: felt252,
-        initial_commitment: felt252,
+        joint_pk_x: u256,
+        joint_pk_y: u256,
+        initial_commitment: u256,
     );
 
     // One player's shuffle step. Caller must be the seat whose turn it is.
@@ -515,7 +537,7 @@ pub trait IPokerGame<TState> {
     // [joint_pk_x, joint_pk_y, current_commitment, new_commitment] — so a
     // proof is only accepted if it chains onto the deck the previous
     // player published. Reverts if the deadline has passed.
-    fn submit_shuffle(ref self: TState, table_id: felt252, new_commitment: felt252, proof: Span<felt252>);
+    fn submit_shuffle(ref self: TState, table_id: felt252, new_commitment: u256, proof: Span<felt252>);
 
     // All-of-n forfeit (docs/V2-MENTAL-POKER.md §6). Callable by anyone
     // once the current player has missed their deadline. Their share is
@@ -525,7 +547,7 @@ pub trait IPokerGame<TState> {
     fn claim_shuffle_timeout(ref self: TState, table_id: felt252);
 
     // ── Views ───────────────────────────────────────────────────────────
-    fn get_shuffle_commitment(self: @TState, table_id: felt252) -> felt252;
+    fn get_shuffle_commitment(self: @TState, table_id: felt252) -> u256;
     fn get_shuffle_turn(self: @TState, table_id: felt252) -> u32;
     fn get_shuffle_order_len(self: @TState, table_id: felt252) -> u32;
     fn get_shuffle_seat_at(self: @TState, table_id: felt252, position: u32) -> felt252;
@@ -617,6 +639,7 @@ pub mod PokerGame {
         pub const DEADLINE_PASSED: felt252 = 'SHUFFLE_DEADLINE_PASSED';
         pub const DEADLINE_NOT_PASSED: felt252 = 'DEADLINE_NOT_PASSED';
         pub const TABLE_VOIDED: felt252 = 'TABLE_VOIDED';
+        pub const BAD_KEY_PROOF: felt252 = 'KEY_PROOF_REJECTED';
     }
 
     // Security review (round 3, Finding 2): how long a table may sit
@@ -708,17 +731,26 @@ pub mod PokerGame {
         // The shuffle-proof verifier, pinned at deploy time like `pool`.
         shuffle_verifier: ContractAddress,
         // (table_id, seat) -> that seat's ElGamal public key share.
-        seat_pk_x: Map<(felt252, felt252), felt252>,
-        seat_pk_y: Map<(felt252, felt252), felt252>,
+        //
+        // u256, NOT felt252. Grumpkin's base field modulus is BN254's
+        // scalar field (~2.19e76), about 6x the STARK prime (~3.62e75), so
+        // 83.5% of valid Grumpkin coordinates do not fit in a felt252 —
+        // they would silently wrap mod the STARK prime, making most honest
+        // keys unrepresentable and letting two distinct keys collide. The
+        // same applies to every deck commitment below: Noir's Field is that
+        // same BN254 scalar field, so a circuit output is not a felt252
+        // either.
+        seat_pk_x: Map<(felt252, felt252), u256>,
+        seat_pk_y: Map<(felt252, felt252), u256>,
         seat_key_registered: Map<(felt252, felt252), bool>,
         // table_id -> the joint key the shuffle proofs are checked against.
-        joint_pk_x: Map<felt252, felt252>,
-        joint_pk_y: Map<felt252, felt252>,
+        joint_pk_x: Map<felt252, u256>,
+        joint_pk_y: Map<felt252, u256>,
         // table_id -> head of the deck-commitment chain. Each shuffle
         // proof must consume this value and replace it, which is what
         // forces the shuffles to compose instead of running in parallel on
         // the same starting deck.
-        deck_commitment: Map<felt252, felt252>,
+        deck_commitment: Map<felt252, u256>,
         // table_id -> participant list, frozen at begin_shuffle.
         shuffle_order: Map<(felt252, u32), felt252>, // position -> seat
         shuffle_order_len: Map<felt252, u32>,
@@ -871,8 +903,8 @@ pub mod PokerGame {
         #[key]
         pub table_id: felt252,
         pub seat: felt252,
-        pub pk_x: felt252,
-        pub pk_y: felt252,
+        pub pk_x: u256,
+        pub pk_y: u256,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -880,7 +912,7 @@ pub mod PokerGame {
         #[key]
         pub table_id: felt252,
         pub participants: u32,
-        pub initial_commitment: felt252,
+        pub initial_commitment: u256,
     }
 
     // Emitted per shuffle step. The full 52-ciphertext deck travels in
@@ -893,14 +925,14 @@ pub mod PokerGame {
         pub table_id: felt252,
         pub position: u32,
         pub seat: felt252,
-        pub commitment: felt252,
+        pub commitment: u256,
     }
 
     #[derive(Drop, starknet::Event)]
     pub struct ShuffleComplete {
         #[key]
         pub table_id: felt252,
-        pub final_commitment: felt252,
+        pub final_commitment: u256,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -1493,7 +1525,12 @@ pub mod PokerGame {
         // ── V2: collaborative shuffle ───────────────────────────────────
 
         fn register_shuffle_key(
-            ref self: ContractState, table_id: felt252, seat: felt252, pk_x: felt252, pk_y: felt252,
+            ref self: ContractState,
+            table_id: felt252,
+            seat: felt252,
+            pk_x: u256,
+            pk_y: u256,
+            key_proof: Span<felt252>,
         ) {
             assert(self.table_exists.entry(table_id).read(), errors::NO_TABLE);
             assert(!self.shuffle_started.entry(table_id).read(), errors::SHUFFLE_STARTED);
@@ -1509,6 +1546,19 @@ pub mod PokerGame {
             // still appearing to participate.
             assert(pk_x != 0 || pk_y != 0, errors::NO_KEY);
 
+            // THE ROGUE-KEY DEFENCE. Without a proof of knowledge of the
+            // secret behind this share, the player who registers LAST can
+            // pick pk_last = X - sum(other shares) for an X whose secret
+            // they know: the joint key becomes theirs alone, and they can
+            // decrypt every hole card at the table while every proof in
+            // the chain still verifies. Requiring knowledge of the
+            // discrete log makes that choice impossible to prove, because
+            // the attacker does not know the secret of a key they
+            // constructed by subtraction.
+            let verifier = IShuffleVerifierDispatcher { contract_address: self.shuffle_verifier.read() };
+            let key_inputs = array![pk_x.low.into(), pk_x.high.into(), pk_y.low.into(), pk_y.high.into()];
+            assert(verifier.verify_key_ownership(key_proof, key_inputs.span()), errors::BAD_KEY_PROOF);
+
             self.seat_pk_x.entry(key).write(pk_x);
             self.seat_pk_y.entry(key).write(pk_y);
             self.seat_key_registered.entry(key).write(true);
@@ -1518,9 +1568,9 @@ pub mod PokerGame {
         fn begin_shuffle(
             ref self: ContractState,
             table_id: felt252,
-            joint_pk_x: felt252,
-            joint_pk_y: felt252,
-            initial_commitment: felt252,
+            joint_pk_x: u256,
+            joint_pk_y: u256,
+            initial_commitment: u256,
         ) {
             assert(self.table_exists.entry(table_id).read(), errors::NO_TABLE);
             assert(!self.table_settled.entry(table_id).read(), errors::ALREADY_SETTLED);
@@ -1559,7 +1609,7 @@ pub mod PokerGame {
         }
 
         fn submit_shuffle(
-            ref self: ContractState, table_id: felt252, new_commitment: felt252, proof: Span<felt252>,
+            ref self: ContractState, table_id: felt252, new_commitment: u256, proof: Span<felt252>,
         ) {
             assert(self.table_exists.entry(table_id).read(), errors::NO_TABLE);
             assert(!self.table_voided.entry(table_id).read(), errors::TABLE_VOIDED);
@@ -1582,11 +1632,17 @@ pub mod PokerGame {
             // supplies — so a valid proof for some other starting deck is
             // useless here.
             let verifier = IShuffleVerifierDispatcher { contract_address: self.shuffle_verifier.read() };
+            let jx = self.joint_pk_x.entry(table_id).read();
+            let jy = self.joint_pk_y.entry(table_id).read();
             let public_inputs = array![
-                self.joint_pk_x.entry(table_id).read(),
-                self.joint_pk_y.entry(table_id).read(),
-                current,
-                new_commitment,
+                jx.low.into(),
+                jx.high.into(),
+                jy.low.into(),
+                jy.high.into(),
+                current.low.into(),
+                current.high.into(),
+                new_commitment.low.into(),
+                new_commitment.high.into(),
             ];
             assert(verifier.verify_shuffle(proof, public_inputs.span()), errors::BAD_PROOF);
 
@@ -1625,7 +1681,7 @@ pub mod PokerGame {
             self.emit(TableVoided { table_id, stalled_seat });
         }
 
-        fn get_shuffle_commitment(self: @ContractState, table_id: felt252) -> felt252 {
+        fn get_shuffle_commitment(self: @ContractState, table_id: felt252) -> u256 {
             self.deck_commitment.entry(table_id).read()
         }
 
