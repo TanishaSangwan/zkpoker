@@ -20,24 +20,36 @@ concrete test vectors — re-run those tests if you touch either side.
 Needs: `pip install -r requirements.txt` (just `poseidon-py`, a small
 prebuilt-wheel package — no native/Rust toolchain required).
 
-NOTE on scope: this script reproduces the *deck* from a revealed seed. The
-Cairo contract does not yet check a submitted hole/community card against a
-specific position in that deck at settlement (`settle_table_by_hand` only
-checks cards are in-range and distinct — see docs/DESIGN.md open items).
-Doing that on-chain needs a fixed seat->deck-position convention, which
-needs a `max_seats`-like concept the contract doesn't have yet. Until then,
-this script's per-seat dealing order (round-robin, matching how Hold'em is
-actually dealt) is this tool's own convention for *presenting* a recomputed
-deal — not something the contract enforces.
+DEAL CONVENTION: this mirrors what `settle_table_by_hand` enforces on-chain
+(round 8), so a deal this script calls fair is exactly a deal the contract
+accepts:
+
+    seat N's hole cards  = deck[2N], deck[2N+1]
+    community card k     = deck[2 * max_seats + k]     for k in 0..4
+
+Note `max_seats` is the table's CAPACITY (fixed at `create_table`), not the
+number of seats actually occupied — the contract reserves two deck slots per
+seat whether or not anyone sits there, so community cards start after all of
+them. Pass `--max-seats` when the table has empty seats; it defaults to
+`--seats`.
+
+Hole-card ORDER within a seat is not significant: the contract accepts
+(h1,h2) or (h2,h1), so this script compares a seat's cards as a set.
+
+Until round 8 this script dealt round-robin (seat 0 gets deck[0] and
+deck[seats], the way a human deals) while the contract required contiguous
+pairs. The two disagreed for every seat at every table size, so an honest
+dealer was reported as a cheat and vice versa. Fixed 2026-08-31.
 
 Usage:
 
-    python3 deal_verify.py --seed 0x1234... --seats 6 --cards-per-seat 2 \\
+    python3 deal_verify.py --seed 0x1234... --seats 6
+    python3 deal_verify.py --seed 0x1234... --seats 2 --max-seats 6 \\
         --claimed claimed_deal.json
 
-`claimed_deal.json` shape:
+`claimed_deal.json` shape (the "community" key is optional):
 
-    {"0": [51, 12], "1": [3, 40], ...}   # seat -> card indices (0-51)
+    {"0": [51, 12], "1": [3, 40], "community": [7, 8, 9, 10, 11]}
 
 Exit codes:
 
@@ -55,6 +67,14 @@ import sys
 from poseidon_py.poseidon_hash import poseidon_hash_many
 
 DECK_SIZE = 52
+
+# Fixed by the contract's deck-position convention — see the module
+# docstring. HOLE_CARDS_PER_SEAT is what makes seat N's slots 2N/2N+1, so it
+# is not a tunable parameter here.
+HOLE_CARDS_PER_SEAT = 2
+COMMUNITY_CARDS = 5
+# PokerGame::MAX_TABLE_SEATS. Chosen so 2*23 + 5 = 51 <= 52.
+MAX_TABLE_SEATS = 23
 
 RANKS = "23456789TJQKA"
 SUITS = "cdhs"
@@ -90,17 +110,23 @@ def seeded_shuffle(seed: int) -> list[int]:
     return deck
 
 
-def deal(seed: int, seats: int, cards_per_seat: int) -> dict[int, list[int]]:
+def deal(seed: int, seats: int, max_seats: int) -> tuple[dict[int, list[int]], list[int]]:
+    """Recompute the hole cards and community cards a seed implies.
+
+    Uses the contract's deck-position convention (see the module docstring):
+    seat N takes deck[2N]/deck[2N+1], community cards start after every
+    seat's reserved pair at 2*max_seats. Returns (hands, community).
+    """
+    if not 1 <= max_seats <= MAX_TABLE_SEATS:
+        raise ValueError(f"max_seats must be 1..{MAX_TABLE_SEATS} (PokerGame::MAX_TABLE_SEATS), got {max_seats}")
+    if not 1 <= seats <= max_seats:
+        raise ValueError(f"seats must be 1..max_seats ({max_seats}), got {seats}")
+
     deck = seeded_shuffle(seed)
-    if seats * cards_per_seat > DECK_SIZE:
-        raise ValueError("seats * cards_per_seat exceeds deck size")
-    hands: dict[int, list[int]] = {seat: [] for seat in range(seats)}
-    pos = 0
-    for _round in range(cards_per_seat):
-        for seat in range(seats):
-            hands[seat].append(deck[pos])
-            pos += 1
-    return hands
+    hands = {seat: [deck[2 * seat], deck[2 * seat + 1]] for seat in range(seats)}
+    community_start = HOLE_CARDS_PER_SEAT * max_seats
+    community = [deck[community_start + k] for k in range(COMMUNITY_CARDS)]
+    return hands, community
 
 
 def parse_seed(raw: str) -> int:
@@ -110,10 +136,33 @@ def parse_seed(raw: str) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--seed", required=True, help="revealed seed, decimal or 0x-hex")
-    parser.add_argument("--seats", type=int, required=True, help="number of seats dealt")
-    parser.add_argument("--cards-per-seat", type=int, default=2, help="hole cards per seat (default: 2, Texas Hold'em)")
+    parser.add_argument("--seats", type=int, required=True, help="number of seats actually dealt")
+    parser.add_argument(
+        "--max-seats",
+        type=int,
+        help="the table's max_seats (capacity, from create_table). Determines where community "
+        "cards start (2*max_seats). Defaults to --seats; pass it explicitly if the table has "
+        "empty seats, or the community cards will be read from the wrong positions.",
+    )
+    parser.add_argument(
+        "--cards-per-seat",
+        type=int,
+        default=HOLE_CARDS_PER_SEAT,
+        help=argparse.SUPPRESS,  # kept only so old invocations don't hard-fail; must be 2
+    )
     parser.add_argument("--claimed", help="path to a JSON file of seat -> [card indices] to check against")
     args = parser.parse_args()
+
+    if args.cards_per_seat != HOLE_CARDS_PER_SEAT:
+        print(
+            f"--cards-per-seat must be {HOLE_CARDS_PER_SEAT}: the contract's deck-position "
+            f"convention (seat N -> 2N/2N+1) is what makes this tool's output checkable, and it "
+            f"hard-codes two hole cards per seat.",
+            file=sys.stderr,
+        )
+        return 2
+
+    max_seats = args.max_seats if args.max_seats is not None else args.seats
 
     try:
         seed = parse_seed(args.seed)
@@ -122,14 +171,15 @@ def main() -> int:
         return 2
 
     try:
-        recomputed = deal(seed, args.seats, args.cards_per_seat)
+        recomputed, community = deal(seed, args.seats, max_seats)
     except ValueError as error:
         print(f"Bad deal parameters: {error}", file=sys.stderr)
         return 2
 
-    print(f"Recomputed deal for seed={hex(seed)}, seats={args.seats}, cards_per_seat={args.cards_per_seat}:\n")
+    print(f"Recomputed deal for seed={hex(seed)}, seats={args.seats}, max_seats={max_seats}:\n")
     for seat, cards in recomputed.items():
         print(f"  seat {seat}: {[card_name(c) for c in cards]}  (indices {cards})")
+    print(f"  community: {[card_name(c) for c in community]}  (indices {community})")
 
     if not args.claimed:
         print("\nNo --claimed file given: nothing to check against, printed the recomputed deal only.")
@@ -138,6 +188,7 @@ def main() -> int:
     try:
         with open(args.claimed, encoding="utf-8") as handle:
             claimed_raw = json.load(handle)
+        claimed_community = claimed_raw.pop("community", None)
         claimed = {int(seat): cards for seat, cards in claimed_raw.items()}
     except (OSError, ValueError, json.JSONDecodeError) as error:
         print(f"Could not read/parse --claimed {args.claimed!r}: {error}", file=sys.stderr)
@@ -146,17 +197,26 @@ def main() -> int:
     mismatches = []
     for seat, cards in recomputed.items():
         claimed_cards = claimed.get(seat)
-        if claimed_cards != cards:
-            mismatches.append((seat, cards, claimed_cards))
+        # Hole-card order within a seat is not significant — the contract
+        # accepts (h1,h2) or (h2,h1) — so compare as multisets.
+        if claimed_cards is None or sorted(claimed_cards) != sorted(cards):
+            mismatches.append((f"seat {seat}", cards, claimed_cards))
+
+    # Community order IS significant: card k must sit at 2*max_seats + k.
+    if claimed_community is not None and list(claimed_community) != community:
+        mismatches.append(("community", community, claimed_community))
 
     print()
     if mismatches:
         print("DEAL DOES NOT MATCH THE REVEALED SEED:")
-        for seat, expected, got in mismatches:
-            print(f"  seat {seat}: seed implies {expected}, claim says {got}")
+        for label, expected, got in mismatches:
+            print(f"  {label}: seed implies {expected}, claim says {got}")
         return 1
 
-    print("Deal matches the revealed seed for every seat. Fair deal confirmed.")
+    checked = "every seat" if claimed_community is None else "every seat and the community cards"
+    print(f"Deal matches the revealed seed for {checked}. Fair deal confirmed.")
+    if claimed_community is None:
+        print("(No \"community\" key in the claim file — community cards were not checked.)")
     return 0
 
 

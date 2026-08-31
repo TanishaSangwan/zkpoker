@@ -59,8 +59,12 @@ remain unfixed.
 ### Fairness verification tool
 
 ```bash
-python3 scripts/deal_verify.py --seed 0xdeadbeef --seats 6 --cards-per-seat 2
+python3 scripts/deal_verify.py --seed 0xdeadbeef --seats 6
 python3 scripts/deal_verify.py --seed 0xdeadbeef --seats 6 --claimed claimed_deal.json
+
+# 2 players sat down at a 6-seat table: pass the table's capacity, or the
+# community cards get read from the wrong deck positions.
+python3 scripts/deal_verify.py --seed 0xdeadbeef --seats 2 --max-seats 6
 ```
 
 ## Skills used

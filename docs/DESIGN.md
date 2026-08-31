@@ -26,6 +26,14 @@ No shuffle-correctness STARK circuit. Instead: **commit-reveal**.
    dealer dealt something other than what the seed implies, this tool proves
    it, after the fact.
 
+   The tool uses the same deck-position convention `settle_table_by_hand`
+   enforces on-chain — seat *N* at `deck[2N]`/`deck[2N+1]`, community card
+   *k* at `deck[2*max_seats + k]` — so a deal it calls fair is exactly a
+   deal the contract accepts. (Until 2026-08-31 it dealt round-robin while
+   the contract required contiguous pairs; the two disagreed for every seat
+   at every table size, which made this whole claim false. Fixed, and
+   pinned against `shuffle_vector_check.cairo`'s seed-42 vector.)
+
 This is weaker than a STARK-proven shuffle (it requires the seed to be
 revealed at all, and trusts the dealer not to have a way to bias the
 commit/reveal gap), but it ships in a hackathon window and every claim it
