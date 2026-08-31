@@ -14,6 +14,7 @@ import {
   cardToName,
   erc20ApproveCall,
   executeAndWait,
+  packHoleCards,
   parseCardList,
   pgCall,
   pokerGameReader,
@@ -221,6 +222,71 @@ export default function PokerPanel() {
       const { txHash } = await executeAndWait(myWalletAccount!, provider, [call]);
       return { txHash };
     }, () => { if (loadedTableId) loadTable(); });
+  }
+
+  // ── Deal hole cards (round 10 — see pokerActions.ts's packHoleCards doc
+  // comment for the encoding: THIS PROJECT'S OWN convention for carrying
+  // two card values in a note's amount, not a documented STRK20 pattern —
+  // none exists in any installed skill reference to source one from. ────
+  const [dealResult, setDealResult] = useState<ActionResult | null>(null);
+  const [dealToken, setDealToken] = useState(constants.defaultPokerToken);
+  const [dealRecipient, setDealRecipient] = useState("");
+  const [dealCards, setDealCards] = useState("");
+  async function handleDealHoleCards() {
+    setDealResult(null);
+    if (!myWalletAccount || !connectedAddress) {
+      setDealResult({ status: "error", title: "Connect a wallet first." });
+      return;
+    }
+    if (!isStrk20Network) {
+      setDealResult({ status: "error", title: "This needs the STRK20 pool (Mainnet or Sepolia)." });
+      return;
+    }
+    let packed: bigint;
+    let recipient: string;
+    let token: string;
+    try {
+      const cards = parseCardList(dealCards);
+      if (cards.length !== 2) throw new Error(`Enter exactly 2 cards, got ${cards.length}.`);
+      packed = packHoleCards(cards[0], cards[1]);
+      recipient = toFelt(dealRecipient);
+      token = toFelt(dealToken);
+    } catch (e) {
+      setDealResult(errorResult(e));
+      return;
+    }
+    // Deposit brings `packed` units of the real table token into the
+    // dealer's own private temp balance (phase 3, "+amount"), immediately
+    // spent by the transfer that creates the recipient's encrypted note
+    // (phase 5, "-amount") — nets to zero within this one transaction,
+    // satisfying STRK20's per-token balance invariant. Requires the dealer
+    // to actually hold `packed` units (at most 2703, in the token's
+    // smallest unit — dust) of this token in their own regular balance.
+    const actions: WALLET_API.STRK20_ACTION[] = [
+      { type: "deposit", token, amount: num.toHex(packed) },
+      { type: "transfer", token, amount: num.toHex(packed), recipient },
+    ];
+    setDealResult({ status: "pending", title: "Confirm in your wallet…" });
+    try {
+      const r = await myWalletAccount.strk20InvokeTransaction(actions);
+      const txH = r.transaction_hash;
+      setDealResult({ status: "pending", title: "Waiting for confirmation…", rows: [{ label: "Transaction", value: txH }] });
+      await provider.waitForTransaction(txH, { retries: 400, retryInterval: 3000 });
+      setDealResult({
+        status: "ok",
+        title: "Hole cards dealt",
+        rows: [
+          { label: "Transaction", value: txH },
+          { label: "Packed amount", value: packed.toString() },
+        ],
+        note:
+          "The recipient should check their own wallet's activity/notes view for the note_id this landed at " +
+          "(same limitation as payout notes above — this dApp can't compute or list it from here), then call " +
+          "join_table below with (seat, that note_id) to record it on-chain.",
+      });
+    } catch (e) {
+      setDealResult(errorResult(e));
+    }
   }
 
   // ── Join table ────────────────────────────────────────────────────────
@@ -594,14 +660,52 @@ export default function PokerPanel() {
         {createResult ? <ResultCard r={createResult} explorerTxUrl={explorerTxUrl} /> : null}
       </div>
 
+      {/* ── Deal hole cards (round 10) ── */}
+      <div className={styles.section}>
+        <div className={styles.sectionTitle}>Deal hole cards</div>
+        <p className={styles.sectionHint}>
+          Dealer action, before the recipient joins. Packs two cards into a note&apos;s amount (see
+          pokerActions.ts&apos;s packHoleCards — this project&apos;s own convention, not a documented STRK20
+          pattern) and sends it as a real (dust-sized) private transfer in the table&apos;s own token: a Deposit
+          brings that many units into your temp balance, then a Transfer spends them into the recipient&apos;s
+          encrypted note — nets to zero, satisfying the balance invariant. You need to actually hold that many
+          units (at most 2703, smallest unit) of the token.
+        </p>
+        <div className={styles.grid3}>
+          <div className={styles.field}>
+            <span className={styles.label}>Token</span>
+            <input className={styles.input} value={dealToken} onChange={(e) => setDealToken(e.target.value)} />
+          </div>
+          <div className={styles.field}>
+            <span className={styles.label}>Recipient address</span>
+            <input className={styles.input} value={dealRecipient} onChange={(e) => setDealRecipient(e.target.value)} placeholder="0x..." />
+          </div>
+          <div className={styles.field}>
+            <span className={styles.label}>Two hole cards</span>
+            <input className={styles.input} value={dealCards} onChange={(e) => setDealCards(e.target.value)} placeholder="As,Kh" />
+          </div>
+        </div>
+        <div className={styles.actionsRow}>
+          <button className={`${uni.btn} ${uni.btnGreen}`} onClick={handleDealHoleCards} disabled={!isConnected || !isStrk20Network}>
+            Deal
+          </button>
+        </div>
+        <div className={styles.caution}>
+          Not independently verified: whether a real wallet&apos;s UI actually lets the recipient look up the
+          note_id this landed at (same class of assumption as &quot;Reserve a payout note&quot; below). Also
+          unverified: whether the pool accepts a Deposit+Transfer pair for a dust amount without issue — nothing
+          here has touched a live pool.
+        </div>
+        {dealResult ? <ResultCard r={dealResult} explorerTxUrl={explorerTxUrl} /> : null}
+      </div>
+
       {/* ── Join table ── */}
       <div className={styles.section}>
         <div className={styles.sectionTitle}>Join table</div>
         <p className={styles.sectionHint}>
-          hole_card_note_id is the STRK20 encrypted note this seat&apos;s hole cards will be dealt into — normally
-          produced by the privacy SDK&apos;s CreateEncNote action (phase 5) before this call. That step isn&apos;t
-          wired into this UI (needs the pool live + the dealer coordinating the actual card encryption off-chain) —
-          enter whatever note_id your own tooling already generated.
+          hole_card_note_id is the note recorded above, once dealt — the recipient reads its actual note_id from
+          their own wallet (this dApp can&apos;t compute or list it) and joins with it here. Seat reservation and
+          note recording happen together, after dealing, not before — see the section above.
         </p>
         <div className={styles.grid2}>
           <div className={styles.field}>

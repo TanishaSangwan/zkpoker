@@ -282,7 +282,7 @@ inputs are independently verified, the `snforge` test flow itself isn't.
   wallet-side discoverability — plausible from the deterministic note_id
   derivation, but not tested against a real wallet in this environment).
 
-## Frontend (`src/app/poker/`, round 9)
+## Frontend (`src/app/poker/`, round 9, extended round 10)
 
 Drives `PokerGame` directly — every contract entrypoint has a form, plus a
 "Load table" panel reading all `get_*` views at once. Deliberately an
@@ -306,9 +306,10 @@ built. Cards accept rank+suit notation (`"As"`, `"Th"`, `"2c"`) or a plain
   two-element cases both cross-checked in Cairo tests), and does the
   felt/card-notation parsing.
 - `src/app/poker/PokerPanel.tsx` — the actual UI: table lookup/state,
-  create/join, bet+approve (one multicall)/fold, dealer actions
-  (commit/mark-dealt/reveal/advance-street), both settle paths, reclaim,
-  reserve-a-payout-note + register (round 9), and claim.
+  create table, deal-hole-cards (round 10) + join, bet+approve (one
+  multicall)/fold, dealer actions (commit/mark-dealt/reveal/advance-street),
+  both settle paths, reclaim, reserve-a-payout-note + register (round 9),
+  and claim.
 - Every ABI type was runtime-verified against `starknet.js`'s `CallData`
   (including the unusual `Span<(u8,u8)>` `settle_table_by_hand` needs) —
   see HANDOFF.md for the exact checks run.
@@ -317,11 +318,31 @@ built. Cards accept rank+suit notation (`"As"`, `"Th"`, `"2c"`) or a plain
   (`NEXT_PUBLIC_POKERGAME_MAINNET`/`_SEPOLIA`, both default `0x0`) rather
   than failing silently, same pattern as the starter kit's own echo-helper
   gating.
-- **Not wired**: hole-card encryption (the STRK20 `CreateEncNote` action,
-  "phase 5") — `join_table`'s `hole_card_note_id` is entered manually, with
-  an in-UI explanation of what would normally produce it. Needs the pool
-  live plus real `strk20-privacy-sdk` integration; out of scope for this
-  pass.
+- **Hole-card encryption (round 10):** a "Deal hole cards" section now
+  wires the STRK20 `CreateEncNote` action ("phase 5") — but there's a real
+  gap this closes and a real one it can't. No installed skill reference
+  (`strk20-privacy`, `strk20-privacy-sdk`, `strk20-wallet-api`,
+  `strk20-anonymizer-contracts`) shows how to encode non-monetary data
+  into a note — a note only carries `(token, amount)`. This project's own
+  answer, invented here for lack of a documented one:
+  `packHoleCards(card1, card2) = card1*52 + card2` (range `0..2703`,
+  `pokerActions.ts`), sent as a real, dust-sized private transfer in the
+  table's own token — a `Deposit` brings that many units into the dealer's
+  temp balance (phase 3, `+amount`), a `Transfer` immediately spends them
+  into the recipient's encrypted note (phase 5, `-amount`); nets to zero
+  within one transaction, satisfying STRK20's per-token balance invariant,
+  and needs nothing but the dealer actually holding ≤2703 (smallest-unit)
+  dust of a token they already handle for buy-ins — no auxiliary contract
+  needed. **Two things this does NOT close**, flagged in-UI: whether a
+  real wallet's UI actually lets the recipient look up the note_id a plain
+  transfer landed at (same class of assumption as the payout-note flow),
+  and whether the pool genuinely accepts a Deposit+Transfer pair for a
+  dust amount without issue — neither checked against a live pool.
+  `join_table`'s flow was reordered to match: deal first (dealer), then
+  join (recipient, once they know their own real note_id) — not the other
+  way around, since an encrypted note's id is channel-index-deterministic
+  and this dApp has no way to predict it in advance the way it can for a
+  self-directed open note (see the payout-note flow above).
 - Verified: `npx tsc --noEmit` clean, a full `next build --webpack`
   succeeds (including static generation of `/poker`), and the dev server
   actually serves both `/` and `/poker` with 200s and no compile/runtime
@@ -548,9 +569,14 @@ another party could exploit.
    **DONE (round 9)**, at `/poker` (`src/app/poker/`) rather than replacing
    the original demo — see "Frontend" above. Every contract entrypoint has
    a form; verified via a clean `tsc`, a clean `next build`, and the dev
-   server actually serving both pages with no errors. One thing this
-   didn't close: hole-card encryption (`CreateEncNote`) isn't wired —
-   needs the pool live plus real SDK integration.
+   server actually serving both pages with no errors. ~~Hole-card
+   encryption isn't wired~~ — **also done (round 10)**: a "Deal hole
+   cards" section, with this project's own card-packing convention (see
+   "Frontend" above) since none is documented anywhere to source. Two
+   things neither round closed, both needing a real wallet to check:
+   whether a wallet's UI actually surfaces a note's id the way both the
+   deal and payout-note flows assume, and whether the pool genuinely
+   accepts the dust-amount Deposit+Transfer pair this uses.
 5. Generalization write-up for the pitch: the "card-as-encrypted-note +
    commit-reveal deal" pattern applies to Battleship, Mafia, and sealed-bid
    auctions, per the RFP's own framing — worth a slide, not more code.

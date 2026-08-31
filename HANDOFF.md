@@ -27,8 +27,9 @@ stale; the project's real name is `zkpoker`, matching `package.json` and
 
 **Git:** on `main`, pushed to https://github.com/TanishaSangwan/zkpoker.
 As of 2026-08-31: rounds 1-8 work, then the test-suite fix (48da45a), then
-round 9's frontend + register_payout_note merged in from origin.
-Don't commit without asking first.
+round 9's frontend + register_payout_note merged in from origin, then (this
+Windows session, uncommitted as of this writing) round 10's hole-card
+dealing (§4f). Don't commit without asking first.
 
 **⚠️ Important caveat on "what's been checked":** rounds 1-5 scanned only
 `cairo/src/lib.cairo` as it stood after round 5. Round 7 covered
@@ -173,17 +174,20 @@ hook.
 **It has been through seven audit rounds** (five on rounds 1-5's code,
 round 7 targeted specifically at round 6's multi-street/hand-eval
 addition). Every Critical/High finding across all seven has been fixed and
-rebuilt clean. Round 8 (this session, after round 7, two passes) was
+rebuilt clean. Round 8 (a previous session, after round 7, two passes) was
 feature work, not an audit round — see §4b: the on-chain deck-shuffle
 module, `create_table`/`join_table`'s new `max_seats`/seat-bound checks,
 and (the second pass) wiring that shuffle into `settle_table_by_hand` so
 it now checks submitted cards against the actual committed-and-revealed
 deck (`SEED_NOT_REVEALED`/`CARD_MISMATCH`) — all real new
-access-control/value-moving surface, unaudited — see §4b. Round 9 (also
-this session) was the frontend pass (§4d) plus one small contract addition
-it required, `register_payout_note` (§4e) — likewise unaudited. **One
-accepted low-severity/below-threshold gap remains, plus one open item**:
-the constructor doesn't reject a zero `pool` address (round 5), and
+access-control/value-moving surface, unaudited — see §4b. Round 9 (same
+prior session) was the frontend pass (§4d) plus one small contract
+addition it required, `register_payout_note` (§4e) — likewise unaudited.
+Round 10 (this session, on Windows, after pulling round 8/9 plus the
+Linux-side test/bug-fix work — see §4f) wired hole-card encryption into
+that same frontend, no contract changes. **One accepted
+low-severity/below-threshold gap remains, plus one open item**: the
+constructor doesn't reject a zero `pool` address (round 5), and
 bet-matching/turn-order enforcement isn't implemented for `advance_street`.
 The shuffle-provenance gap that was open through round 7 (hole cards
 submitted to `settle_table_by_hand` not tied back to the seed commitment)
@@ -530,6 +534,72 @@ question" paragraph); short version of what changed:
   — flagged in-UI (the caution box in that section) rather than assumed
   solved.
 
+### 4f. Hole-card encryption: wired (round 10) — with the same class of caveat
+
+**Context on where this session picked up**: the previous session's own
+final status report said "here's what's left" and this Windows machine had
+just pulled the Linux-side work (98/98 -> 102/102 tests, the
+`deal_verify.py` deck-position bug fix, the V2 spec, skills tracked in
+git). This session immediately hit a real, current blocker: `scarb build`
+fails on THIS machine (`error: could not execute process: cargo fetch` —
+no Rust toolchain) because the Linux commit made `snforge_std` an
+unconditional dev-dependency, which is fine on Linux (prebuilt plugin) but
+not on Windows (same class of problem `cairo/tests/README.md` already
+documented once). **Unresolved as of this section** — flagged to the user,
+not fixed unilaterally (reverting would break the Linux setup if they pull
+again). If you're reading this on Windows and `scarb build` fails the same
+way, this is why; see if a decision got made (install Rust here, or treat
+Windows as frontend-only) before assuming it's still broken.
+
+The user then asked for item 4 of that status report specifically: wire
+`CreateEncNote` for hole cards. Same research-first approach as the
+payout-note gap (§4e) — checked every installed skill reference
+(`strk20-privacy`, `strk20-privacy-sdk`, `strk20-wallet-api`,
+`strk20-anonymizer-contracts`) for a documented way to encode non-monetary
+data (a card pair) into a note. **None exists** — `CreateEncNote` only
+ever appears naming the phase, never with a worked example of carrying
+arbitrary data. So this project had to invent one:
+
+- `packHoleCards(card1, card2) = card1*52 + card2` (range `0..2703`,
+  `pokerActions.ts`) — **this project's own convention, not a sourced
+  STRK20 pattern.** Say so if you build on it elsewhere.
+- Sent as a real transfer of that many units (dust — at most 2703 in the
+  token's smallest unit) of the table's own token: `Deposit` (phase 3,
+  `+amount`, into the dealer's temp balance) immediately followed by
+  `Transfer` (phase 5, `CreateEncNote`, `-amount`, to the recipient) —
+  nets to zero within one transaction, satisfying the per-token balance
+  invariant `actions-and-proofs.md` documents, without needing any
+  auxiliary "fake" token or new contract deployment. The dealer just needs
+  to actually hold that many units of a token they already handle for
+  buy-ins.
+- New export in `pokerActions.ts`: `packHoleCards`/`unpackHoleCards`,
+  round-trip-verified with plain arithmetic (`node -e` check, several
+  boundary pairs including `(0,0)` and `(51,51)`) before wiring into the
+  UI — same "verify the mechanism before trusting it" standard as
+  everything else this session.
+- New "Deal hole cards" section in `PokerPanel.tsx`, placed *before* "Join
+  table" — the flow was reordered, not just extended. An encrypted note's
+  id is channel-index-deterministic (same fact from `notes-and-
+  nullifiers.md` that resolved §4e), but for a *dealer-to-recipient*
+  transfer neither party can predict it in advance the way a
+  *self-directed* open note's creator can — so `join_table` now happens
+  *after* dealing, once the recipient has read their real note_id from
+  their own wallet, not before.
+- **What this does NOT close**, flagged in-UI same as §4e: whether a real
+  wallet's UI actually lets the recipient look up the note_id a plain
+  transfer landed at, and whether the pool genuinely accepts this
+  dust-amount Deposit+Transfer pair without issue. Neither checked against
+  a live pool — no wallet or pool was reachable from this session either.
+
+Verification actually run for this pass: `npx tsc --noEmit` clean, a full
+`next build --webpack` succeeded (including static regeneration of
+`/poker`), hook-order compliance re-checked by reading every `useState`
+call site (all top-level, unconditional — same discipline as round 9,
+where a real Rules-of-Hooks bug was caught this way), and the packing
+round-trip checked in isolation before use. Not run: anything against a
+live wallet or pool (none available here), and no browser click-through
+(no Chrome extension connection in this environment, same as round 9).
+
 ---
 
 ## 5. Security review history (full detail)
@@ -842,8 +912,9 @@ canonical, kept-up-to-date list:
 6. ~~Wire the frontend~~ — **DONE (round 9)**, at `/poker`
    (`src/app/poker/`) — see §4d. The original starter-kit demo
    (wallet connect + shield/unshield/echo) is untouched at `/`, just gained
-   a nav link across. One thing this didn't close (not an oversight — see
-   §4d for why): hole-card encryption (`CreateEncNote`) is manual entry.
+   a nav link across. ~~Hole-card encryption (`CreateEncNote`) is manual
+   entry~~ — **also done (round 10)**, see §4f: a "Deal hole cards"
+   section with this project's own card-packing convention.
 6a. ~~Resolve the payout-claim `note_id` design question~~ — **DONE
    (round 9)**: picked option (a) — see §4e for the full resolution
    (`register_payout_note` plus the two-transaction reserve-then-claim
@@ -851,7 +922,14 @@ canonical, kept-up-to-date list:
    reasoning behind why option (a) is mechanically sound. Not
    independently verified: whether a real wallet's UI actually surfaces a
    freshly created open note's id the way that flow assumes (§4e's last
-   bullet).
+   bullet) — round 10's hole-card dealing flow (§4f) has the exact same
+   open caveat, for the same underlying reason.
+6b. Resolve the current cross-platform build blocker (§4f's opening
+   paragraph): `snforge_std` is now unconditional in `cairo/Scarb.toml`
+   (correct on the Linux machine, breaks `scarb build` on Windows with no
+   Rust toolchain — confirmed live this session). Needs a decision: install
+   Rust here, keep Cairo work Linux-only, or something else — not something
+   to silently resolve either way.
 7. Deploy to Sepolia once tests pass — needs the real STRK20 pool address as
    the constructor arg; record the deployed address in `cairo/address.md`
    and wire it into `src/utils/constants.ts` (`PokerGameSepolia` — same

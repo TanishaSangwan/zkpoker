@@ -127,3 +127,28 @@ export function parseCardList(input: string): number[] {
     .filter(Boolean)
     .map(parseCard);
 }
+
+// ─── hole-card note encoding (round 10) ─────────────────────────────────
+//
+// docs/DESIGN.md describes hole cards as "STRK20 encrypted notes... created
+// via the pool's normal CreateEncNote action" — but a note only carries a
+// (token, amount) pair, not arbitrary data, and no installed skill
+// reference (strk20-privacy, strk20-privacy-sdk, strk20-wallet-api,
+// strk20-anonymizer-contracts) shows a worked example of encoding
+// non-monetary data into one. This packing is THIS PROJECT'S OWN
+// convention, invented here because none exists to source — not a
+// documented STRK20 pattern. Flag it as such if you build on it.
+//
+// card1*52 + card2, range 0..2703 — trivially fits any note's `amount`.
+// Order matters for encode/decode round-tripping, but NOT for what the
+// contract accepts: settle_table_by_hand checks a seat's two hole cards as
+// an unordered pair (see its doc comment in lib.cairo), so decoding in
+// either order is fine for that purpose.
+export function packHoleCards(card1: number, card2: number): bigint {
+  return BigInt(card1) * 52n + BigInt(card2);
+}
+export function unpackHoleCards(packed: bigint): [number, number] {
+  const card1 = Number(packed / 52n);
+  const card2 = Number(packed % 52n);
+  return [card1, card2];
+}
