@@ -754,10 +754,19 @@ canonical, kept-up-to-date list:
    in §5.
 3. ~~Multi-street betting + hand evaluation~~ — **DONE** (round 6, §5):
    `advance_street` + `settle_table_by_hand`. ~~Card validation~~ —
-   **DONE** (round 7, §5): `assert_valid_deck_cards`. ~~Bet-matching/
-   turn-order enforcement~~ is still open (see `advance_street`'s doc
-   comment); ~~`settle_table_by_hand` doesn't verify submitted hole cards
-   against the seed commitment~~ — **DONE**, see item 5.
+   **DONE** (round 7, §5): `assert_valid_deck_cards`. **Bet-matching/
+   turn-order enforcement is still open** (not done — see
+   `advance_street`'s doc comment); ~~`settle_table_by_hand` doesn't
+   verify submitted hole cards against the seed commitment~~ — **DONE**,
+   see item 5.
+4. A round 8/9 *security* sweep (`cairo-auditor`) is now ripe — round 8
+   added real access-control-shaped surface (`create_table`'s `max_seats`
+   bound, `join_table`'s seat bound) and a new value-moving check
+   (`settle_table_by_hand`'s card-position assertions); round 9 added
+   `register_payout_note` (another `note_id_owner`-binding entrypoint,
+   same shape as `join_table`'s). None of round 8 or round 9 has been
+   through `cairo-auditor` yet — see `docs/DESIGN.md` open item 6 and §4b
+   in this file.
 5. ~~Move the shuffle-from-seed algorithm on-chain~~ / ~~seat-count
    concept~~ / ~~wire it into settle_table_by_hand~~ — **ALL DONE**
    (round 8, §4b/§4c): `cairo/src/shuffle.cairo`'s Poseidon-based
