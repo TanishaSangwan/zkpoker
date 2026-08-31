@@ -169,3 +169,41 @@ mod MockErc20 {
         }
     }
 }
+
+// ── V2: mock shuffle-proof verifier ─────────────────────────────────────
+// Lets cairo/tests/ exercise the shuffle chain's ordering, chaining and
+// forfeit logic without a real proving stack. Configurable so a test can
+// make verification fail on demand and check the contract rejects that
+// step — the case that actually matters.
+#[starknet::contract]
+pub mod MockShuffleVerifier {
+    use starknet::storage::{StoragePointerReadAccess, StoragePointerWriteAccess};
+
+    #[storage]
+    struct Storage {
+        reject: bool,
+    }
+
+    #[abi(embed_v0)]
+    impl VerifierImpl of super::super::IShuffleVerifier<ContractState> {
+        fn verify_shuffle(
+            self: @ContractState, proof: Span<felt252>, public_inputs: Span<felt252>,
+        ) -> bool {
+            // Accepts by default so the happy path needs no setup; a test
+            // calls set_reject(true) to exercise rejection.
+            !self.reject.read()
+        }
+    }
+
+    #[abi(embed_v0)]
+    impl AdminImpl of super::IMockVerifierAdminTrait<ContractState> {
+        fn set_reject(ref self: ContractState, reject: bool) {
+            self.reject.write(reject);
+        }
+    }
+}
+
+#[starknet::interface]
+pub trait IMockVerifierAdminTrait<TState> {
+    fn set_reject(ref self: TState, reject: bool);
+}

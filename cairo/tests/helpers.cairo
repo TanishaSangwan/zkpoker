@@ -10,7 +10,8 @@ use snforge_std::{
     ContractClassTrait, DeclareResultTrait, declare, start_cheat_caller_address, stop_cheat_caller_address,
 };
 use zkpoker::{IErc20Dispatcher, IErc20DispatcherTrait, IPokerGameDispatcher, IPokerGameDispatcherTrait};
-use zkpoker::mocks::{IMockErc20AdminDispatcher, IMockErc20AdminDispatcherTrait};
+use zkpoker::mocks::{IMockErc20AdminDispatcher, IMockErc20AdminDispatcherTrait,
+    IMockVerifierAdminTraitDispatcher};
 
 pub fn POOL() -> ContractAddress {
     'POOL'.try_into().unwrap()
@@ -63,10 +64,27 @@ pub fn seed_hash_of(seed: felt252) -> felt252 {
     poseidon_hash_span(array![seed].span())
 }
 
+// V2: PokerGame's constructor now also pins the shuffle-proof verifier.
+// This deploys a fresh MockShuffleVerifier (accepts every proof unless a
+// test sets it to reject), so every pre-V2 test keeps working unchanged.
 pub fn deploy_pokergame(pool: ContractAddress) -> IPokerGameDispatcher {
+    let (game, _) = deploy_pokergame_with_verifier(pool);
+    game
+}
+
+// Same, but hands back the verifier so a test can flip it to reject.
+pub fn deploy_pokergame_with_verifier(
+    pool: ContractAddress,
+) -> (IPokerGameDispatcher, IMockVerifierAdminTraitDispatcher) {
+    let verifier_class = declare("MockShuffleVerifier").unwrap().contract_class();
+    let (verifier_addr, _) = verifier_class.deploy(@array![]).unwrap();
+
     let contract = declare("PokerGame").unwrap().contract_class();
-    let (address, _) = contract.deploy(@array![pool.into()]).unwrap();
-    IPokerGameDispatcher { contract_address: address }
+    let (address, _) = contract.deploy(@array![pool.into(), verifier_addr.into()]).unwrap();
+    (
+        IPokerGameDispatcher { contract_address: address },
+        IMockVerifierAdminTraitDispatcher { contract_address: verifier_addr },
+    )
 }
 
 pub fn deploy_mock_token() -> (ContractAddress, IErc20Dispatcher, IMockErc20AdminDispatcher) {

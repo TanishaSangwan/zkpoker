@@ -23,6 +23,21 @@ pub trait IErc20<TState> {
     fn transfer(ref self: TState, recipient: ContractAddress, amount: u256) -> bool;
 }
 
+// V2 (docs/V2-MENTAL-POKER.md): the shuffle-proof verifier, deployed
+// separately and pinned at construction. In production this is a
+// Garaga-generated verifier for circuits/shuffle/; cairo/tests/ swaps in a
+// mock so the chain logic can be tested without a real proving stack.
+//
+// Kept behind an interface deliberately: the proof system will change (the
+// spike has not yet measured on-chain verification gas, and a switch to a
+// Bayer-Groth argument is still on the table), and none of the shuffle
+// chain's ordering, chaining or forfeit logic depends on which one wins.
+#[starknet::interface]
+pub trait IShuffleVerifier<TState> {
+    // public_inputs = [joint_pk_x, joint_pk_y, commitment_in, commitment_out]
+    fn verify_shuffle(self: @TState, proof: Span<felt252>, public_inputs: Span<felt252>) -> bool;
+}
+
 // Test-only mock ERC20 (configurable failure/fee/reentrancy behavior) used
 // by cairo/tests/*.cairo. Never shipped in the production
 // `starknet-contract` build.
@@ -465,7 +480,59 @@ pub trait IPokerGame<TState> {
         note_id: felt252, // wallet placeholder: openNoteIds[0] — the note to fill
     ) -> Span<OpenNoteDeposit>;
 
+    // ── V2: collaborative shuffle (docs/V2-MENTAL-POKER.md) ─────────────
+    // Replaces V1's single-dealer commit-reveal for tables that opt in.
+    // Every player shuffles the deck themselves, in their own transaction,
+    // each one proving in zero knowledge that they applied SOME secret
+    // permutation and re-randomized every card. After all of them, the
+    // composed permutation is unknown to everyone unless ALL collude — so
+    // no dealer, and nobody, knows the deck order.
+    //
+    // Flow: register_shuffle_key (each player) -> begin_shuffle (dealer)
+    //       -> submit_shuffle (each player, in seat order) -> done.
+
+    // Publishes this seat's ElGamal public key share. Every share must be
+    // registered before begin_shuffle; the joint key is their sum.
+    fn register_shuffle_key(ref self: TState, table_id: felt252, seat: felt252, pk_x: felt252, pk_y: felt252);
+
+    // Dealer opens the shuffle phase. `joint_pk_*` is the sum of the
+    // registered key shares and `initial_commitment` commits to the
+    // starting deck (52 ciphertexts of the 52 cards under the joint key,
+    // with fixed public randomness — deterministic, so every player
+    // recomputes and checks both off-chain before shuffling).
+    // Freezes the participant list: every seat with a registered key, in
+    // ascending seat order, becomes the shuffle order.
+    fn begin_shuffle(
+        ref self: TState,
+        table_id: felt252,
+        joint_pk_x: felt252,
+        joint_pk_y: felt252,
+        initial_commitment: felt252,
+    );
+
+    // One player's shuffle step. Caller must be the seat whose turn it is.
+    // `proof` is checked by the configured verifier against public inputs
+    // [joint_pk_x, joint_pk_y, current_commitment, new_commitment] — so a
+    // proof is only accepted if it chains onto the deck the previous
+    // player published. Reverts if the deadline has passed.
+    fn submit_shuffle(ref self: TState, table_id: felt252, new_commitment: felt252, proof: Span<felt252>);
+
+    // All-of-n forfeit (docs/V2-MENTAL-POKER.md §6). Callable by anyone
+    // once the current player has missed their deadline. Their share is
+    // required to ever decrypt, so the hand cannot continue without them:
+    // this voids the hand and releases every seat's contribution for
+    // immediate reclaim.
+    fn claim_shuffle_timeout(ref self: TState, table_id: felt252);
+
     // ── Views ───────────────────────────────────────────────────────────
+    fn get_shuffle_commitment(self: @TState, table_id: felt252) -> felt252;
+    fn get_shuffle_turn(self: @TState, table_id: felt252) -> u32;
+    fn get_shuffle_order_len(self: @TState, table_id: felt252) -> u32;
+    fn get_shuffle_seat_at(self: @TState, table_id: felt252, position: u32) -> felt252;
+    fn get_shuffle_deadline(self: @TState, table_id: felt252) -> u64;
+    fn get_shuffle_complete(self: @TState, table_id: felt252) -> bool;
+    fn get_table_voided(self: @TState, table_id: felt252) -> bool;
+    fn get_shuffle_verifier(self: @TState) -> ContractAddress;
     fn get_pot(self: @TState, table_id: felt252) -> u128;
     fn get_seed_hash(self: @TState, table_id: felt252) -> felt252;
     fn get_revealed_seed(self: @TState, table_id: felt252) -> felt252;
@@ -495,7 +562,8 @@ pub mod PokerGame {
     use core::num::traits::Zero;
     use core::poseidon::poseidon_hash_span;
     use starknet::{ContractAddress, get_block_timestamp, get_caller_address, get_contract_address};
-    use super::{IErc20Dispatcher, IErc20DispatcherTrait, OpenNoteDeposit};
+    use super::{IErc20Dispatcher, IErc20DispatcherTrait, IShuffleVerifierDispatcher,
+        IShuffleVerifierDispatcherTrait, OpenNoteDeposit};
 
     mod errors {
         pub const BAD_POOL: felt252 = 'BAD_POOL';
@@ -537,6 +605,18 @@ pub mod PokerGame {
         // check. Distinct from BAD_CARDS (assert_valid_deck_cards), which
         // only checks a card COULD be real, not that it IS the one dealt.
         pub const CARD_MISMATCH: felt252 = 'CARD_MISMATCH';
+        // ── V2 collaborative shuffle ────────────────────────────────────
+        pub const KEY_REGISTERED: felt252 = 'KEY_ALREADY_REGISTERED';
+        pub const NO_KEY: felt252 = 'SEAT_KEY_NOT_REGISTERED';
+        pub const SHUFFLE_STARTED: felt252 = 'SHUFFLE_ALREADY_STARTED';
+        pub const SHUFFLE_NOT_STARTED: felt252 = 'SHUFFLE_NOT_STARTED';
+        pub const SHUFFLE_DONE: felt252 = 'SHUFFLE_ALREADY_COMPLETE';
+        pub const NOT_YOUR_TURN: felt252 = 'NOT_YOUR_SHUFFLE_TURN';
+        pub const BAD_PROOF: felt252 = 'SHUFFLE_PROOF_REJECTED';
+        pub const NO_PARTICIPANTS: felt252 = 'NO_SHUFFLE_PARTICIPANTS';
+        pub const DEADLINE_PASSED: felt252 = 'SHUFFLE_DEADLINE_PASSED';
+        pub const DEADLINE_NOT_PASSED: felt252 = 'DEADLINE_NOT_PASSED';
+        pub const TABLE_VOIDED: felt252 = 'TABLE_VOIDED';
     }
 
     // Security review (round 3, Finding 2): how long a table may sit
@@ -558,6 +638,16 @@ pub mod PokerGame {
     // slots) always has room for all 5 community cards in a 52-card deck:
     // 2*MAX_TABLE_SEATS + 5 <= 52.
     const MAX_TABLE_SEATS: u32 = 23;
+
+    // V2: how long one player has to publish their shuffle before the
+    // table can be voided (docs/V2-MENTAL-POKER.md §6). Much shorter than
+    // SETTLE_TIMEOUT_SECS: a shuffle step is a single proof the client
+    // generates locally, not a whole game session, and every other player
+    // is blocked until it lands. 10 minutes is a starting point, not a
+    // value validated against real proving times — the spike has not
+    // measured proving time yet (docs/V2-SPIKE-RESULTS.md §5), so revisit
+    // this once it has.
+    const SHUFFLE_TURN_SECS: u64 = 600;
 
     #[storage]
     struct Storage {
@@ -614,11 +704,43 @@ pub mod PokerGame {
         // table_id -> current betting street (round 6). 0=PreFlop by
         // default; see SHOWDOWN_STREET and `advance_street`.
         table_street: Map<felt252, u8>,
+        // ── V2 collaborative shuffle ────────────────────────────────────
+        // The shuffle-proof verifier, pinned at deploy time like `pool`.
+        shuffle_verifier: ContractAddress,
+        // (table_id, seat) -> that seat's ElGamal public key share.
+        seat_pk_x: Map<(felt252, felt252), felt252>,
+        seat_pk_y: Map<(felt252, felt252), felt252>,
+        seat_key_registered: Map<(felt252, felt252), bool>,
+        // table_id -> the joint key the shuffle proofs are checked against.
+        joint_pk_x: Map<felt252, felt252>,
+        joint_pk_y: Map<felt252, felt252>,
+        // table_id -> head of the deck-commitment chain. Each shuffle
+        // proof must consume this value and replace it, which is what
+        // forces the shuffles to compose instead of running in parallel on
+        // the same starting deck.
+        deck_commitment: Map<felt252, felt252>,
+        // table_id -> participant list, frozen at begin_shuffle.
+        shuffle_order: Map<(felt252, u32), felt252>, // position -> seat
+        shuffle_order_len: Map<felt252, u32>,
+        shuffle_turn: Map<felt252, u32>, // next position to shuffle
+        shuffle_started: Map<felt252, bool>,
+        shuffle_complete: Map<felt252, bool>,
+        // table_id -> when the current player's turn expires (§6 forfeit).
+        shuffle_deadline: Map<felt252, u64>,
+        // table_id -> hand abandoned because a player stalled. Their
+        // decryption share can never be recovered, so the cards are
+        // permanently unopenable and the only coherent outcome is to void
+        // and refund — see reclaim_stalled_bet.
+        table_voided: Map<felt252, bool>,
     }
 
     #[constructor]
-    fn constructor(ref self: ContractState, pool: ContractAddress) {
+    fn constructor(ref self: ContractState, pool: ContractAddress, shuffle_verifier: ContractAddress) {
         self.pool.write(pool);
+        // V2: pinned here for the same reason `pool` is (round 1, Finding
+        // 1) — a caller-supplied verifier address would let anyone present
+        // a contract that returns true for every proof.
+        self.shuffle_verifier.write(shuffle_verifier);
     }
 
     // pub on the enum, every event struct, and every field: cairo/tests/ is
@@ -643,6 +765,11 @@ pub mod PokerGame {
         Reclaimed: Reclaimed,
         StreetAdvanced: StreetAdvanced,
         PayoutNoteRegistered: PayoutNoteRegistered,
+        ShuffleKeyRegistered: ShuffleKeyRegistered,
+        ShuffleBegun: ShuffleBegun,
+        Shuffled: Shuffled,
+        ShuffleComplete: ShuffleComplete,
+        TableVoided: TableVoided,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -736,6 +863,51 @@ pub mod PokerGame {
         #[key]
         pub note_id: felt252,
         pub owner: ContractAddress,
+    }
+
+    // ── V2 collaborative-shuffle events ─────────────────────────────────
+    #[derive(Drop, starknet::Event)]
+    pub struct ShuffleKeyRegistered {
+        #[key]
+        pub table_id: felt252,
+        pub seat: felt252,
+        pub pk_x: felt252,
+        pub pk_y: felt252,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    pub struct ShuffleBegun {
+        #[key]
+        pub table_id: felt252,
+        pub participants: u32,
+        pub initial_commitment: felt252,
+    }
+
+    // Emitted per shuffle step. The full 52-ciphertext deck travels in
+    // calldata rather than storage (52 ciphertexts = 208 field elements
+    // per step per hand is far too much to store); players read it from
+    // the transaction and check it against `commitment` themselves.
+    #[derive(Drop, starknet::Event)]
+    pub struct Shuffled {
+        #[key]
+        pub table_id: felt252,
+        pub position: u32,
+        pub seat: felt252,
+        pub commitment: felt252,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    pub struct ShuffleComplete {
+        #[key]
+        pub table_id: felt252,
+        pub final_commitment: felt252,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    pub struct TableVoided {
+        #[key]
+        pub table_id: felt252,
+        pub stalled_seat: felt252,
     }
 
     // Internal (not embedded — no #[abi(embed_v0)], not part of
@@ -879,6 +1051,8 @@ pub mod PokerGame {
             // itself gated on !table_settled, so a post-settlement bet was
             // permanently unrecoverable. Block it at the source instead.
             assert(!self.table_settled.entry(table_id).read(), errors::ALREADY_SETTLED);
+            // V2: and never into a voided hand.
+            assert(!self.table_voided.entry(table_id).read(), errors::TABLE_VOIDED);
             // Security review (round 6): once a table reaches Showdown,
             // betting is over — only settle_table/settle_table_by_hand
             // should move the pot from here on.
@@ -926,8 +1100,14 @@ pub mod PokerGame {
             assert(!self.table_settled.entry(table_id).read(), errors::ALREADY_SETTLED);
             let caller = get_caller_address();
             assert(caller == self.seat_owner.entry((table_id, seat)).read(), errors::NOT_SEAT_OWNER);
-            let created_at = self.table_created_at.entry(table_id).read();
-            assert(get_block_timestamp() >= created_at + SETTLE_TIMEOUT_SECS, errors::TOO_EARLY);
+            // V2: a table voided by claim_shuffle_timeout is already
+            // known-unrecoverable (a missing decryption share can never be
+            // supplied), so there is nothing to wait for — refund at once.
+            // An unvoided table still has to age out the normal way.
+            if !self.table_voided.entry(table_id).read() {
+                let created_at = self.table_created_at.entry(table_id).read();
+                assert(get_block_timestamp() >= created_at + SETTLE_TIMEOUT_SECS, errors::TOO_EARLY);
+            }
 
             let key = (table_id, seat);
             let owed = self.seat_contributed.entry(key).read();
@@ -985,6 +1165,9 @@ pub mod PokerGame {
         fn settle_table(
             ref self: ContractState, table_id: felt252, winners: Span<felt252>, payout_note_ids: Span<felt252>,
         ) {
+            // V2: a voided hand's pot is owed back to the seats that
+            // contributed it, not to any winner.
+            assert(!self.table_voided.entry(table_id).read(), errors::TABLE_VOIDED);
             assert(self.table_exists.entry(table_id).read(), errors::NO_TABLE);
             // Security review (round 4, Finding 1): a table could otherwise
             // be settled more than once — a second call after new bets
@@ -1073,6 +1256,9 @@ pub mod PokerGame {
             community_cards: Span<u8>,
             payout_note_ids: Span<felt252>,
         ) {
+            // V2: a voided hand's pot is owed back to the seats that
+            // contributed it, not to any winner.
+            assert(!self.table_voided.entry(table_id).read(), errors::TABLE_VOIDED);
             assert(self.table_exists.entry(table_id).read(), errors::NO_TABLE);
             assert(!self.table_settled.entry(table_id).read(), errors::ALREADY_SETTLED);
             assert(!self.reentrancy_lock.read(), errors::REENTRANCY);
@@ -1302,6 +1488,173 @@ pub mod PokerGame {
 
             self.reentrancy_lock.write(false);
             array![OpenNoteDeposit { note_id, token, amount: owed }].span()
+        }
+
+        // ── V2: collaborative shuffle ───────────────────────────────────
+
+        fn register_shuffle_key(
+            ref self: ContractState, table_id: felt252, seat: felt252, pk_x: felt252, pk_y: felt252,
+        ) {
+            assert(self.table_exists.entry(table_id).read(), errors::NO_TABLE);
+            assert(!self.shuffle_started.entry(table_id).read(), errors::SHUFFLE_STARTED);
+            let key = (table_id, seat);
+            // Same seat-ownership rule as bet/fold: only the account that
+            // joined this seat speaks for it.
+            assert(get_caller_address() == self.seat_owner.entry(key).read(), errors::NOT_SEAT_OWNER);
+            // Immutable once set. Re-registering mid-setup would silently
+            // change the joint key other players already checked.
+            assert(!self.seat_key_registered.entry(key).read(), errors::KEY_REGISTERED);
+            // A key share of zero contributes nothing to the joint key,
+            // which is how a player would opt out of the joint key while
+            // still appearing to participate.
+            assert(pk_x != 0 || pk_y != 0, errors::NO_KEY);
+
+            self.seat_pk_x.entry(key).write(pk_x);
+            self.seat_pk_y.entry(key).write(pk_y);
+            self.seat_key_registered.entry(key).write(true);
+            self.emit(ShuffleKeyRegistered { table_id, seat, pk_x, pk_y });
+        }
+
+        fn begin_shuffle(
+            ref self: ContractState,
+            table_id: felt252,
+            joint_pk_x: felt252,
+            joint_pk_y: felt252,
+            initial_commitment: felt252,
+        ) {
+            assert(self.table_exists.entry(table_id).read(), errors::NO_TABLE);
+            assert(!self.table_settled.entry(table_id).read(), errors::ALREADY_SETTLED);
+            assert(!self.table_voided.entry(table_id).read(), errors::TABLE_VOIDED);
+            assert(get_caller_address() == self.table_dealer.entry(table_id).read(), errors::NOT_DEALER);
+            assert(!self.shuffle_started.entry(table_id).read(), errors::SHUFFLE_STARTED);
+
+            // Freeze the participant list: every seat holding a registered
+            // key, in ascending seat order. Fixing it here is what stops a
+            // late joiner being inserted into a chain that is already
+            // running.
+            let max_seats = self.table_max_seats.entry(table_id).read();
+            let mut position: u32 = 0;
+            let mut s: u32 = 0;
+            loop {
+                if s == max_seats {
+                    break;
+                }
+                let seat: felt252 = s.into();
+                if self.seat_key_registered.entry((table_id, seat)).read() {
+                    self.shuffle_order.entry((table_id, position)).write(seat);
+                    position += 1;
+                }
+                s += 1;
+            };
+            assert(position != 0, errors::NO_PARTICIPANTS);
+
+            self.shuffle_order_len.entry(table_id).write(position);
+            self.shuffle_turn.entry(table_id).write(0);
+            self.joint_pk_x.entry(table_id).write(joint_pk_x);
+            self.joint_pk_y.entry(table_id).write(joint_pk_y);
+            self.deck_commitment.entry(table_id).write(initial_commitment);
+            self.shuffle_started.entry(table_id).write(true);
+            self.shuffle_deadline.entry(table_id).write(get_block_timestamp() + SHUFFLE_TURN_SECS);
+            self.emit(ShuffleBegun { table_id, participants: position, initial_commitment });
+        }
+
+        fn submit_shuffle(
+            ref self: ContractState, table_id: felt252, new_commitment: felt252, proof: Span<felt252>,
+        ) {
+            assert(self.table_exists.entry(table_id).read(), errors::NO_TABLE);
+            assert(!self.table_voided.entry(table_id).read(), errors::TABLE_VOIDED);
+            assert(self.shuffle_started.entry(table_id).read(), errors::SHUFFLE_NOT_STARTED);
+            assert(!self.shuffle_complete.entry(table_id).read(), errors::SHUFFLE_DONE);
+            // Late submissions are refused even before anyone calls
+            // claim_shuffle_timeout, so the forfeit outcome can't be
+            // dodged by front-running it with the missing shuffle.
+            assert(get_block_timestamp() <= self.shuffle_deadline.entry(table_id).read(), errors::DEADLINE_PASSED);
+
+            // Strict turn order: the chain only means anything if each
+            // shuffle consumes the previous player's output.
+            let turn = self.shuffle_turn.entry(table_id).read();
+            let seat = self.shuffle_order.entry((table_id, turn)).read();
+            assert(get_caller_address() == self.seat_owner.entry((table_id, seat)).read(), errors::NOT_YOUR_TURN);
+
+            let current = self.deck_commitment.entry(table_id).read();
+            // The proof is checked against the CURRENT chain head, read
+            // from storage — never against a commitment the caller
+            // supplies — so a valid proof for some other starting deck is
+            // useless here.
+            let verifier = IShuffleVerifierDispatcher { contract_address: self.shuffle_verifier.read() };
+            let public_inputs = array![
+                self.joint_pk_x.entry(table_id).read(),
+                self.joint_pk_y.entry(table_id).read(),
+                current,
+                new_commitment,
+            ];
+            assert(verifier.verify_shuffle(proof, public_inputs.span()), errors::BAD_PROOF);
+
+            self.deck_commitment.entry(table_id).write(new_commitment);
+            let next = turn + 1;
+            self.shuffle_turn.entry(table_id).write(next);
+            self.emit(Shuffled { table_id, position: turn, seat, commitment: new_commitment });
+
+            if next == self.shuffle_order_len.entry(table_id).read() {
+                self.shuffle_complete.entry(table_id).write(true);
+                self.emit(ShuffleComplete { table_id, final_commitment: new_commitment });
+            } else {
+                self.shuffle_deadline.entry(table_id).write(get_block_timestamp() + SHUFFLE_TURN_SECS);
+            }
+        }
+
+        fn claim_shuffle_timeout(ref self: ContractState, table_id: felt252) {
+            assert(self.table_exists.entry(table_id).read(), errors::NO_TABLE);
+            assert(self.shuffle_started.entry(table_id).read(), errors::SHUFFLE_NOT_STARTED);
+            assert(!self.shuffle_complete.entry(table_id).read(), errors::SHUFFLE_DONE);
+            assert(!self.table_voided.entry(table_id).read(), errors::TABLE_VOIDED);
+            assert(
+                get_block_timestamp() > self.shuffle_deadline.entry(table_id).read(), errors::DEADLINE_NOT_PASSED,
+            );
+
+            // Deliberately callable by anyone: the stalling player has no
+            // incentive to report themselves, and every other player is
+            // harmed until someone does.
+            let turn = self.shuffle_turn.entry(table_id).read();
+            let stalled_seat = self.shuffle_order.entry((table_id, turn)).read();
+
+            // All-of-n (docs/V2-MENTAL-POKER.md §6): this player's
+            // decryption share is required to ever open a card, so the
+            // hand is unrecoverable. Void it and let every seat reclaim.
+            self.table_voided.entry(table_id).write(true);
+            self.emit(TableVoided { table_id, stalled_seat });
+        }
+
+        fn get_shuffle_commitment(self: @ContractState, table_id: felt252) -> felt252 {
+            self.deck_commitment.entry(table_id).read()
+        }
+
+        fn get_shuffle_turn(self: @ContractState, table_id: felt252) -> u32 {
+            self.shuffle_turn.entry(table_id).read()
+        }
+
+        fn get_shuffle_order_len(self: @ContractState, table_id: felt252) -> u32 {
+            self.shuffle_order_len.entry(table_id).read()
+        }
+
+        fn get_shuffle_seat_at(self: @ContractState, table_id: felt252, position: u32) -> felt252 {
+            self.shuffle_order.entry((table_id, position)).read()
+        }
+
+        fn get_shuffle_deadline(self: @ContractState, table_id: felt252) -> u64 {
+            self.shuffle_deadline.entry(table_id).read()
+        }
+
+        fn get_shuffle_complete(self: @ContractState, table_id: felt252) -> bool {
+            self.shuffle_complete.entry(table_id).read()
+        }
+
+        fn get_table_voided(self: @ContractState, table_id: felt252) -> bool {
+            self.table_voided.entry(table_id).read()
+        }
+
+        fn get_shuffle_verifier(self: @ContractState) -> ContractAddress {
+            self.shuffle_verifier.read()
         }
 
         fn get_pot(self: @ContractState, table_id: felt252) -> u128 {
