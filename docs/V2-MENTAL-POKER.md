@@ -1,7 +1,12 @@
 # V2: collaborative shuffle with no trusted dealer — protocol spec
 
-Status: **specification only. Nothing here is implemented.** V1
-(trusted-dealer commit-reveal, `docs/DESIGN.md`) is what currently ships.
+Status: **partially implemented.** The shuffle chain (§4.1–§4.3) and the
+forfeit policy (§6) are built and tested on-chain — see
+`cairo/tests/test_shuffle.cairo`, 23 tests. Proof verification is behind an
+`IShuffleVerifier` interface with a mock in tests; **the real
+Garaga-generated verifier does not exist yet**, so nothing here is usable
+against real money. Dealing and decryption (§4.4–§4.6) are not started. V1
+(trusted-dealer commit-reveal, `docs/DESIGN.md`) is still what ships.
 
 This answers the RFP's V2 ("Noir + Garaga mental poker, no trusted dealer").
 It replaces V1's shuffle core rather than extending it — see §8 for exactly
