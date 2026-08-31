@@ -109,9 +109,14 @@ zkpoker/
   security-review-*.md          one file per audit round (5 so far — round 6
                                  hasn't been audited yet), see §5
   HANDOFF.md                    this file
-  src/, public/, package.json   still the ORIGINAL starter-kit demo UI
-                                 (Akashneelesh/strk20-starter-kit) — nothing
-                                 wired to PokerGame yet
+  src/app/page.tsx, .../WalletAccountV6Tag.tsx
+                                 the ORIGINAL starter-kit demo UI
+                                 (Akashneelesh/strk20-starter-kit), untouched
+                                 except a nav link to /poker
+  src/app/poker/                round 9: PokerGame's own frontend — see §4d.
+                                 NOT the starter kit's page; a new route.
+  src/utils/pokerGameAbi.ts,
+  src/utils/erc20Abi.ts         ABIs used by src/app/poker/ — see §4d
 ```
 
 `scarb build` in `cairo/` succeeds with **zero warnings** as of the last
@@ -144,16 +149,19 @@ module, `create_table`/`join_table`'s new `max_seats`/seat-bound checks,
 and (the second pass) wiring that shuffle into `settle_table_by_hand` so
 it now checks submitted cards against the actual committed-and-revealed
 deck (`SEED_NOT_REVEALED`/`CARD_MISMATCH`) — all real new
-access-control/value-moving surface, unaudited — see §4b. **One accepted
-low-severity/below-threshold gap remains, plus one open item**: the
-constructor doesn't reject a zero `pool` address (round 5), and
+access-control/value-moving surface, unaudited — see §4b. Round 9 (also
+this session) was the frontend pass (§4d) plus one small contract addition
+it required, `register_payout_note` (§4e) — likewise unaudited. **One
+accepted low-severity/below-threshold gap remains, plus one open item**:
+the constructor doesn't reject a zero `pool` address (round 5), and
 bet-matching/turn-order enforcement isn't implemented for `advance_street`.
 The shuffle-provenance gap that was open through round 7 (hole cards
 submitted to `settle_table_by_hand` not tied back to the seed commitment)
 is now **closed** — round 8 built the shuffle module, the seat-count
 precondition, and the `settle_table_by_hand` check itself, all three (see
-§7 item 5). None of the two remaining items are findings from any audit
-round; both are documented open items — see §7. Regardless of audit
+§7 item 5). The payout-claim design gap found early in round 9 is also now
+**closed** — see §4e. None of the remaining items are findings from any
+audit round; all are documented open items — see §7. Regardless of audit
 status: don't deploy any of this anywhere with real value without also
 getting the test suite running (see §4a) and ideally a real, non-AI
 security review before mainnet. The file's own
@@ -337,6 +345,135 @@ baked in). `helpers.cairo` gained `CAROL()`, `SEAT_2`, `NOTE_C`, and
 auditor doesn't know that distinction. Either mentally discount findings
 scoped to that file, or pass `cairo/src/lib.cairo` explicitly as the
 target instead of a full-repo scan.
+
+### 4d. Frontend (round 9): `/poker` drives PokerGame directly
+
+New session, new round number (9 — round 8 was all Cairo; this is the
+first frontend work). `src/app/poker/` is a genuinely functional, verified
+frontend for every `PokerGame` entrypoint — deliberately an operator/admin
+panel (raw felt/hex fields, comma-separated lists for `settle_table_by_hand`),
+not a polished poker table with rendered cards. That's a scope call, not a
+shortcut forced by running out of time — see docs/DESIGN.md's "Frontend"
+section for the reasoning.
+
+**Files**: `src/utils/pokerGameAbi.ts` (the real compiled ABI, copied from
+`cairo/target/dev/zkpoker_PokerGame.contract_class.json` and diffed
+byte-for-byte to confirm — not eyeballed), `src/utils/erc20Abi.ts` (minimal,
+for the bet-approval flow), `src/utils/constants.ts` (extended:
+`pokerGameAddressForIndex`, `defaultPokerToken` — same "0x0 = not deployed"
+pattern as the existing `echoHelperForIndex`), `src/app/poker/pokerActions.ts`
+(pure contract-call wiring — no React), `src/app/poker/PokerPanel.tsx` (the
+actual UI, ~750 lines, one file — matches `WalletAccountV6Tag.tsx`'s own
+monolithic-component convention rather than over-fragmenting into many small
+files), `src/app/poker/page.tsx` + `PokerPageClient.tsx` (route shell — split
+in two because Next.js route `metadata` exports need a server component, and
+the actual UI needs `"use client"`), `src/app/poker/poker.module.css`.
+
+**Real bug caught and fixed while building this** (worth knowing about if
+you write more React here): a `useSection()` helper was first written as a
+function *defined inside* `PokerPanel`'s own body that itself called
+`useState` — a nested "hook" that violates the Rules of Hooks (React
+requires hooks to be called from a stable, top-level location; a hook
+defined inside another component's render function is recreated every
+render and is explicitly called out as invalid in React's own docs). It
+happened to still work by luck here (11 call sites, always in the same
+order, every render), but was refactored out anyway: a module-level plain
+async function `runAction(setResult, ...)` that calls no hooks itself,
+paired with 11 directly-declared `useState` calls in the component body.
+Also caught: a genuinely broken placeholder (`tableTokenOf`) left over from
+realizing mid-write that `PokerGame` has no `get_table_token` view — fixed
+by having the Bet section's token field just reuse `ctToken` from Create
+Table instead of trying to read something that isn't there. **Neither of
+these was caught by `tsc` or the Next.js build** — both are logic bugs a
+type-checker can't see; they were caught by re-reading the code, the same
+standard applied to the Cairo side all session.
+
+**Verification actually run** (all in this session, not assumed):
+- Diffed the transcribed ABI against the real compiled JSON via `node`
+  (`JSON.stringify` equality) — exact match.
+- Compiled representative calls (`create_table`, `bet`, and specifically
+  `settle_table_by_hand`'s unusual `Span<(u8,u8)>` hole-cards parameter)
+  through `starknet.js`'s real `CallData.compile` — all produced correct
+  Cairo calldata (length-prefixed spans, tuples flattened correctly).
+- Verified `starknet.js`'s `hash.computePoseidonHashOnElements` matches
+  Cairo's `core::poseidon::poseidon_hash_span` for the single-element case
+  `commit_deal`/`reveal_seed` actually use (the two-element case was
+  already confirmed in round 8) — via a throwaway
+  `js_poseidon_scratch.cairo` test, genuinely run and passing, then
+  deleted, same pattern as every other cross-language check this session.
+- Verified `shortString.encodeShortString('TABLE_1')` produces the exact
+  same felt as Cairo's `'TABLE_1'` short-string literal (hand-computed the
+  ASCII hex and compared).
+- `npx tsc --noEmit` clean across the whole project.
+- `npm run build` (`next build --webpack`) succeeded, including static
+  generation of `/poker`.
+- Started the dev server, `curl`'d both `/` and `/poker` — HTTP 200, no
+  error markers in the HTML, no compile/runtime errors in the server log.
+  **No actual browser was used** — the Chrome extension wasn't connected in
+  this environment (`tabs_context_mcp` returned "Browser extension is not
+  connected"). If you have it available, a real click-through is still
+  worth doing; HTTP-level checks don't catch every possible runtime issue
+  (e.g. a hook order bug that only manifests on a specific interaction
+  path, though the one found above was caught by reading, not running).
+- No ESLint config exists in this starter kit at all (`next lint` /
+  `npx eslint` both fail — no `eslint.config.*`) — this predates round 9,
+  not something broken by it. Manually re-verified Rules-of-Hooks
+  compliance by reading every hook call site instead (see the bug above).
+
+Also not done: hole-card encryption (`CreateEncNote`) — `join_table`'s
+`hole_card_note_id` field is manual entry with an explanatory note, since
+wiring the real thing needs the STRK20 pool live plus real
+`strk20-privacy-sdk` integration, out of scope for this pass.
+
+### 4e. Payout-claim design gap: RESOLVED (round 9, option (a))
+
+The gap described in the original round-9 pass (a dealer-chosen
+`payout_note_ids[i]` had no way to match the fresh `${openNoteIds[0]}` a
+wallet generates at claim time) is now closed — the user picked option (a):
+the winner pre-registers a payout note before settlement. Full reasoning
+in docs/DESIGN.md's "Buy-in, betting, payout flow" (the "Resolved design
+question" paragraph); short version of what changed:
+
+- **Contract** (`cairo/src/lib.cairo`): new entrypoint
+  `register_payout_note(note_id)` — binds `note_id_owner[note_id]` to the
+  caller, same `NOTE_ID_TAKEN` "first registration wins" rule as
+  `join_table`'s own note_id binding, but standalone (no seat, no
+  `table_id`). The shared logic was factored into an internal (not
+  embedded, not part of `IPokerGame`) `#[generate_trait]` helper,
+  `register_note_id_owner` — `join_table` now calls it too instead of
+  duplicating the zero-check/assert. New event: `PayoutNoteRegistered`. 4
+  new tests in `cairo/tests/test_lifecycle.cairo` (success + event,
+  `NOTE_ID_TAKEN` by a different owner, same-owner idempotent re-register,
+  and cross-use with `join_table`'s own registration) — unexecuted like
+  the rest of that suite, but the contract itself rebuilds clean
+  (`scarb build`) and all 30 unit tests still pass.
+- **Frontend** (`src/app/poker/PokerPanel.tsx`): a new "Reserve a payout
+  note" section (create a standalone open note via a bare `CreateOpenNote`
+  STRK20 action, then `register_payout_note` it — two steps, two separate
+  transactions, deliberately not combined since the UI can't itself learn
+  the note_id from the first one — see below), and the "Claim a payout"
+  section was rewritten: no more paired `transfer OPEN` +
+  `${openNoteIds[0]}`; now a bare `invoke` action naming the literal,
+  already-registered `note_id` directly.
+- **What made option (a) more than a guess**: `notes-and-nullifiers.md`
+  (the `strk20-privacy` skill) shows `note_id` is fully deterministic
+  (`h(NOTE_ID_TAG, channel_key, token, index, 0)`) and that an open note's
+  amount is `0` "while awaiting deposit" — so a bare, unfunded
+  `CreateOpenNote` is a complete, self-balancing action on its own (the
+  phase table's per-token invariant needs nothing paired with it), and
+  `actions-and-proofs.md`'s phase table already allows a transaction to be
+  *just* `InvokeExternal` (phases may be skipped). Both are exactly what
+  option (a)'s two-separate-transactions shape needs — checked against the
+  actual skill references, not assumed.
+- **What's still NOT independently verified**: whether a real wallet's own
+  UI actually surfaces a freshly created open note's id the way the
+  "Reserve a payout note" section's step 2 assumes (read it from your
+  wallet's activity view, since this dApp deliberately can't compute or
+  list it itself — that needs the private `channel_key` STRK20 keeps
+  inside the wallet). This is plausible given the deterministic derivation
+  above, but nothing in this session touched a real wallet to confirm it
+  — flagged in-UI (the caution box in that section) rather than assumed
+  solved.
 
 ---
 
@@ -638,11 +775,23 @@ canonical, kept-up-to-date list:
    level.** (`assert_valid_deck_cards`'s range/distinctness check is now
    largely redundant for calls that reach it — kept anyway as
    defense-in-depth.)
-6. Wire the frontend — `src/` still runs the starter kit's original demo UI
-   (wallet connect + shield/unshield/echo). Nothing calls `PokerGame` yet.
+6. ~~Wire the frontend~~ — **DONE (round 9)**, at `/poker`
+   (`src/app/poker/`) — see §4d. The original starter-kit demo
+   (wallet connect + shield/unshield/echo) is untouched at `/`, just gained
+   a nav link across. One thing this didn't close (not an oversight — see
+   §4d for why): hole-card encryption (`CreateEncNote`) is manual entry.
+6a. ~~Resolve the payout-claim `note_id` design question~~ — **DONE
+   (round 9)**: picked option (a) — see §4e for the full resolution
+   (`register_payout_note` plus the two-transaction reserve-then-claim
+   flow) and docs/DESIGN.md "Buy-in, betting, payout flow" for the
+   reasoning behind why option (a) is mechanically sound. Not
+   independently verified: whether a real wallet's UI actually surfaces a
+   freshly created open note's id the way that flow assumes (§4e's last
+   bullet).
 7. Deploy to Sepolia once tests pass — needs the real STRK20 pool address as
    the constructor arg; record the deployed address in `cairo/address.md`
-   and wire it into `src/utils/constants.ts`.
+   and wire it into `src/utils/constants.ts` (`PokerGameSepolia` — same
+   file now also has `pokerGameAddressForIndex`, round 9).
 8. Housekeeping: first git commit (ask the user first), `npm audit fix`
    decision on `sharp`, pitch/demo narrative (the "card-as-encrypted-note +
    commit-reveal" pattern generalizes to Battleship/Mafia/sealed-bid

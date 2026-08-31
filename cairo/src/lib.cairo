@@ -244,14 +244,34 @@ mod shuffle_vector_check;
 // snforge-level test flow itself (dispatcher calls, cheat codes, event
 // assertions) is unverified like everything else in that directory.
 //
+// Round 9 (feature work, not an audit round; contract change made while
+// wiring the frontend at src/app/poker/): register_payout_note(note_id) —
+// resolves a payout-claim design gap found there (full writeup:
+// docs/DESIGN.md "Buy-in, betting, payout flow"). Short version:
+// settle_table/settle_table_by_hand require payout_note_ids[i] to already
+// be registered in note_id_owner, but until now the only way to write
+// note_id_owner at all was join_table, coupled to taking a seat — a player
+// wanting a payout routed into an open note they control (not their
+// hole-card note, which is an *encrypted* note and can never become an
+// *open* one — open-vs-encrypted is fixed at note creation via the salt,
+// see notes-and-nullifiers.md) had no standalone way to register one.
+// register_payout_note does exactly that: same NOTE_ID_TAKEN protection as
+// join_table's own note_id binding, factored into a shared
+// register_note_id_owner internal helper (#[generate_trait], not embedded
+// — no seat, no table_id, moves no funds). New event:
+// PayoutNoteRegistered. New tests in cairo/tests/test_lifecycle.cairo
+// (unexecuted like the rest of that suite — see below).
+//
 // Everything here remains unaudited beyond round 7. Round 8 added real
 // access-control-shaped surface (create_table's max_seats bound,
 // join_table's seat bound) AND a new value-moving check
-// (settle_table_by_hand's card-position assertions) that have NOT been
-// through cairo-auditor yet — treat BAD_MAX_SEATS/BAD_SEAT/
-// SEED_NOT_REVEALED/CARD_MISMATCH as unaudited until a fresh sweep covers
-// them. Re-run cairo-auditor after any further change and before this
-// touches a real pool.
+// (settle_table_by_hand's card-position assertions); round 9 added
+// register_payout_note (another note_id_owner-binding entrypoint, same
+// shape as join_table's). NONE of round 8 or round 9 has been through
+// cairo-auditor yet — treat BAD_MAX_SEATS/BAD_SEAT/SEED_NOT_REVEALED/
+// CARD_MISMATCH/register_payout_note as unaudited until a fresh sweep
+// covers them. Re-run cairo-auditor after any further change and before
+// this touches a real pool.
 // ─────────────────────────────────────────────────────────────────────────
 
 #[starknet::interface]
@@ -277,6 +297,23 @@ pub trait IPokerGame<TState> {
     // the player will be dealt into. `seat` must parse as a u32 strictly
     // less than the table's `max_seats` (round 8) — see create_table.
     fn join_table(ref self: TState, table_id: felt252, seat: felt252, hole_card_note_id: felt252);
+
+    // Round 9: binds `note_id` to the caller in `note_id_owner`, same
+    // effect and same NOTE_ID_TAKEN protection as `join_table`'s own
+    // note_id registration, but standalone — no seat, no table_id.
+    // Resolves the payout-claim design gap found while wiring the
+    // frontend (see docs/DESIGN.md "Buy-in, betting, payout flow"): a
+    // player who wants a `settle_table`/`settle_table_by_hand` payout
+    // routed into an open note they control (rather than reusing their
+    // hole-card note, which is an encrypted note and can't later become an
+    // open one — notes-and-nullifiers.md: open vs. encrypted is fixed at
+    // creation via the salt) must register that note_id as theirs BEFORE
+    // the dealer settles — `settle_table`'s `note_id_owner == seat_owner`
+    // check would otherwise reject an unregistered note_id with
+    // NOTE_ID_TAKEN. Until this fn existed, `join_table` was the only way
+    // to write `note_id_owner` at all, coupling note registration to
+    // taking a seat.
+    fn register_payout_note(ref self: TState, note_id: felt252);
 
     // ── Fairness: commit / deal / reveal ───────────────────────────────
     // Dealer commits hash(seed) before any cards are dealt. `seed` itself
@@ -363,7 +400,10 @@ pub trait IPokerGame<TState> {
     // the same order; each seat must not be folded, and requires
     // `table_street == 4` (Showdown) — call `advance_street` four times
     // first. Shares every other guard `settle_table` has (dealer,
-    // reentrancy, `table_settled`, `note_id_owner`/`payout_token` binding).
+    // reentrancy, `table_settled`, `note_id_owner`/`payout_token` binding —
+    // see `settle_table`'s own doc comment for what a valid
+    // `payout_note_ids[i]` needs, round 9's `register_payout_note`
+    // included).
     fn settle_table_by_hand(
         ref self: TState,
         table_id: felt252,
@@ -384,12 +424,22 @@ pub trait IPokerGame<TState> {
     fn reclaim_stalled_bet(ref self: TState, table_id: felt252, seat: felt252);
 
     // ── Settlement ──────────────────────────────────────────────────────
-    // TODO(hand-eval): winners is trusted input for this skeleton. Replace
-    // with on-chain (or STARK-proven off-chain) hand evaluation once
-    // showdown reveal logic is designed — see docs/DESIGN.md "Open items".
-    // Splits the table's recorded pot evenly across `winners`' open notes
-    // and marks each amount owed. The pool's privacy_invoke call (below)
-    // is what actually moves the tokens once those open notes exist.
+    // `winners` is dealer-supplied trusted input — `settle_table_by_hand`
+    // below is the on-chain-computed alternative, added round 6. Splits
+    // the table's recorded pot evenly across `winners`' open notes and
+    // marks each amount owed. The pool's privacy_invoke call (below) is
+    // what actually moves the tokens once those open notes exist.
+    //
+    // Each entry in `payout_note_ids` must already be registered to that
+    // seat's owner in `note_id_owner` — either from `join_table` (reusing
+    // that seat's hole-card note_id) or, round 9, from
+    // `register_payout_note` (a note_id reserved specifically for this
+    // payout). The latter is what a real claim needs: a hole-card note is
+    // an *encrypted* note (STRK20 `CreateEncNote`) and can't later become
+    // an *open* one that `privacy_invoke`'s `OpenNoteDeposit` can fill —
+    // open vs. encrypted is fixed at note creation. See
+    // `register_payout_note`'s doc comment and docs/DESIGN.md "Buy-in,
+    // betting, payout flow" for the full claim-flow writeup.
     fn settle_table(
         ref self: TState, table_id: felt252, winners: Span<felt252>, payout_note_ids: Span<felt252>,
     );
@@ -573,6 +623,7 @@ pub mod PokerGame {
         Invoked: Invoked,
         Reclaimed: Reclaimed,
         StreetAdvanced: StreetAdvanced,
+        PayoutNoteRegistered: PayoutNoteRegistered,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -657,6 +708,34 @@ pub mod PokerGame {
         street: u8,
     }
 
+    // Round 9: register_payout_note's event.
+    #[derive(Drop, starknet::Event)]
+    struct PayoutNoteRegistered {
+        #[key]
+        note_id: felt252,
+        owner: ContractAddress,
+    }
+
+    // Internal (not embedded — no #[abi(embed_v0)], not part of
+    // IPokerGame) helper shared by join_table and register_payout_note:
+    // both bind a caller-supplied note_id to a caller in note_id_owner,
+    // with the identical "first registration wins, a different caller
+    // reusing it reverts" rule (Security review, 2026-08-30 re-audit,
+    // Finding 1). Factored out in round 9 rather than duplicated.
+    #[generate_trait]
+    impl InternalImpl of InternalTrait {
+        fn register_note_id_owner(
+            ref self: ContractState, note_id: felt252, caller: ContractAddress,
+        ) {
+            let existing_owner = self.note_id_owner.entry(note_id).read();
+            if existing_owner.is_zero() {
+                self.note_id_owner.entry(note_id).write(caller);
+            } else {
+                assert(existing_owner == caller, errors::NOTE_ID_TAKEN);
+            }
+        }
+    }
+
     #[abi(embed_v0)]
     impl PokerGameImpl of super::IPokerGame<ContractState> {
         fn create_table(
@@ -708,13 +787,21 @@ pub mod PokerGame {
             // without this, a different account could reuse a note_id it
             // doesn't own — copied from someone else's real table — to
             // hijack that note's eventual payout via its own settle_table.
-            let existing_owner = self.note_id_owner.entry(hole_card_note_id).read();
-            if existing_owner.is_zero() {
-                self.note_id_owner.entry(hole_card_note_id).write(caller);
-            } else {
-                assert(existing_owner == caller, errors::NOTE_ID_TAKEN);
-            }
+            // Round 9: factored into register_note_id_owner, shared with
+            // register_payout_note below.
+            self.register_note_id_owner(hole_card_note_id, caller);
             self.emit(SeatJoined { table_id, seat, hole_card_note_id });
+        }
+
+        // Round 9: see this fn's interface doc comment for why it exists.
+        // Just the shared note_id_owner-binding logic plus an event —
+        // deliberately does nothing else (no seat, no table_id, moves no
+        // funds): registering a note_id you intend to receive a payout
+        // into is independent of any specific table or seat.
+        fn register_payout_note(ref self: ContractState, note_id: felt252) {
+            let caller = get_caller_address();
+            self.register_note_id_owner(note_id, caller);
+            self.emit(PayoutNoteRegistered { note_id, owner: caller });
         }
 
         fn commit_deal(ref self: ContractState, table_id: felt252, seed_hash: felt252) {

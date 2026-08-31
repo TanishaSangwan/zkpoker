@@ -225,6 +225,86 @@ fn test_join_table_note_id_reuse_by_same_owner_allowed() {
     assert(game.get_note_id_owner(NOTE_A) == ALICE(), 'owner should stay ALICE');
 }
 
+// ─── register_payout_note (round 9) ────────────────────────────────────
+
+#[test]
+fn test_register_payout_note_success() {
+    // Regression: round 9 — standalone note_id registration, no table or
+    // seat involved. Resolves the payout-claim design gap (see
+    // docs/DESIGN.md "Buy-in, betting, payout flow"): before this fn
+    // existed, note_id_owner could only ever be written via join_table.
+    let game = deploy_pokergame(DEALER());
+    let mut spy = spy_events();
+
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.register_payout_note(NOTE_A);
+    stop_cheat_caller_address(game.contract_address);
+
+    assert(game.get_note_id_owner(NOTE_A) == ALICE(), 'owner not recorded');
+    spy
+        .assert_emitted(
+            @array![
+                (
+                    game.contract_address,
+                    PokerGame::Event::PayoutNoteRegistered(
+                        PokerGame::PayoutNoteRegistered { note_id: NOTE_A, owner: ALICE() },
+                    ),
+                ),
+            ],
+        );
+}
+
+#[test]
+#[should_panic(expected: 'NOTE_ID_TAKEN')]
+fn test_register_payout_note_taken_by_different_owner_rejected() {
+    // Same NOTE_ID_TAKEN protection as join_table's own note_id
+    // registration — a different account can't claim a note_id someone
+    // else already registered.
+    let game = deploy_pokergame(DEALER());
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.register_payout_note(NOTE_A);
+    stop_cheat_caller_address(game.contract_address);
+
+    start_cheat_caller_address(game.contract_address, MALLORY());
+    game.register_payout_note(NOTE_A);
+}
+
+#[test]
+fn test_register_payout_note_same_owner_reregister_allowed() {
+    // Idempotent for the owner who already registered it — same pattern
+    // as test_join_table_note_id_reuse_by_same_owner_allowed.
+    let game = deploy_pokergame(DEALER());
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.register_payout_note(NOTE_A);
+    game.register_payout_note(NOTE_A);
+    stop_cheat_caller_address(game.contract_address);
+
+    assert(game.get_note_id_owner(NOTE_A) == ALICE(), 'owner should stay ALICE');
+}
+
+#[test]
+fn test_register_payout_note_then_join_table_same_owner_allowed() {
+    // A note_id registered standalone, then reused as a hole_card_note_id
+    // at join_table (or vice versa — order doesn't matter), is the same
+    // "same owner reusing their own note_id" case join_table already
+    // allows; register_note_id_owner is the single shared code path for
+    // both callers now.
+    let game = deploy_pokergame(DEALER());
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.register_payout_note(NOTE_A);
+    stop_cheat_caller_address(game.contract_address);
+
+    start_cheat_caller_address(game.contract_address, DEALER());
+    game.create_table(TABLE_1, DEALER(), 0, TWO_SEATS);
+    stop_cheat_caller_address(game.contract_address);
+
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.join_table(TABLE_1, SEAT_0, NOTE_A);
+    stop_cheat_caller_address(game.contract_address);
+
+    assert(game.get_note_id_owner(NOTE_A) == ALICE(), 'owner should stay ALICE');
+}
+
 // ─── commit_deal ─────────────────────────────────────────────────────────
 
 fn setup_created_table() -> zkpoker::IPokerGameDispatcher {
