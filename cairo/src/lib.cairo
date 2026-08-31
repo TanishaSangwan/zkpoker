@@ -728,11 +728,14 @@ pub mod PokerGame {
     }
 
     // Round 9: register_payout_note's event.
+    // pub, like every event above it — cairo/tests/ constructs these
+    // directly for assert_emitted and can't see private items or fields
+    // (edition 2024_07). See the note on the Event enum.
     #[derive(Drop, starknet::Event)]
-    struct PayoutNoteRegistered {
+    pub struct PayoutNoteRegistered {
         #[key]
-        note_id: felt252,
-        owner: ContractAddress,
+        pub note_id: felt252,
+        pub owner: ContractAddress,
     }
 
     // Internal (not embedded — no #[abi(embed_v0)], not part of

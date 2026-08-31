@@ -25,16 +25,18 @@ references to that path or to an earlier `strk20-poker` folder name, they're
 stale; the project's real name is `zkpoker`, matching `package.json` and
 `cairo/Scarb.toml`).
 
-**Git:** 5 commits on `main` as of 2026-08-31 (`8c0b57b` "first" through
-`8c1f68a` "test needed"). Don't commit without asking first.
+**Git:** on `main`, pushed to https://github.com/TanishaSangwan/zkpoker.
+As of 2026-08-31: rounds 1-8 work, then the test-suite fix (48da45a), then
+round 9's frontend + register_payout_note merged in from origin.
+Don't commit without asking first.
 
 **⚠️ Important caveat on "what's been checked":** rounds 1-5 scanned only
 `cairo/src/lib.cairo` as it stood after round 5. Round 7 covered
 `cairo/src/poker_hand.cairo` too (round 6's addition), explicitly
 targeted rather than a full-repo scan. `cairo/src/mocks.cairo` has never
 been audited and never will need to be under normal circumstances —
-`#[cfg(test)]`-gated, never in the production build, low stakes, and was
-deliberately excluded from round 7's scope for that reason. Nothing
+feature-gated (`testing`), never in the production build, low stakes, and
+was deliberately excluded from round 7's scope for that reason. Nothing
 outside `cairo/` — frontend, scripts, docs — has ever had a security
 review. See §5's "Round 7" entry for exactly what it covered and found.
 
@@ -103,17 +105,20 @@ zkpoker/
                                  #[cfg(test)]-only regression tests pinning
                                  Cairo's core::poseidon output against an
                                  independently-computed Python value — see §4b
-  cairo/src/mocks.cairo         test-only mock ERC20, #[cfg(test)]-gated,
-                                 never in the production build
+  cairo/src/mocks.cairo         test-only mock ERC20, gated on the
+                                 `testing` Scarb FEATURE (not #[cfg(test)]
+                                 — that made cairo/tests/ uncompilable;
+                                 see §4a), never in the production build
   cairo/Scarb.toml              package "zkpoker", scarb build succeeds
-                                 clean — has comments explaining why
-                                 snforge_std is deliberately NOT a
-                                 dependency, and why cairo_test IS one and
-                                 is safe (see §4a)
+                                 clean. snforge_std IS a dev-dependency
+                                 now (the old Windows blocker doesn't
+                                 apply on Linux) and [features] testing
+                                 gates mocks.cairo — see §4a
   cairo/tests/                  full contract-level test suite (incl.
-                                 streets/settle_table_by_hand), WRITTEN BUT
-                                 NOT RUN — see §4a and cairo/tests/README.md
-                                 before you trust any of it
+                                 streets/settle_table_by_hand). RUNS AND
+                                 PASSES — 102/102 with src/'s unit tests,
+                                 via `snforge test --features testing`.
+                                 See §4a and cairo/tests/README.md
   scripts/deal_verify.py        fairness-check CLI, tested working. Shuffle
                                  is now the same Poseidon Fisher-Yates as
                                  cairo/src/shuffle.cairo (was random.Random —
@@ -184,7 +189,7 @@ security review before mainnet. The file's own
 header comment (top of `cairo/src/lib.cairo`) is kept up to date with a
 summary of this history — read it too.
 
-### 4a. Test suite: RUNS AND PASSES — 98/98 (updated 2026-08-31, Linux)
+### 4a. Test suite: RUNS AND PASSES — 102/102 (updated 2026-08-31, Linux)
 
 **This section's old "written but never run" status is RESOLVED.** The full
 suite — `cairo/tests/` included — compiles and passes on this Linux machine
@@ -192,8 +197,8 @@ suite — `cairo/tests/` included — compiles and passes on this Linux machine
 
 ```bash
 cd cairo && snforge test --features testing
-# Collected 98 test(s): 30 from src/, 68 from tests/
-# Tests: 98 passed, 0 failed, 0 ignored, 0 filtered out
+# Collected 102 test(s): 30 from src/, 72 from tests/
+# Tests: 102 passed, 0 failed, 0 ignored, 0 filtered out
 ```
 
 `--features testing` is mandatory (it gates `src/mocks.cairo`). Two real
@@ -219,7 +224,7 @@ plugin, no `cargo fetch` fallback) — re-verified clean.
 **Superseded:** `scarb test -- -t unit` (the old command below) no longer
 collects anything — snforge's `#[test]` macro owns collection once
 `snforge_std` is present, so `cairo_test` sees 0 tests. The 30 unit tests it
-used to run are now part of the 98 above. Historical form:
+used to run are now part of the 102 above. Historical form:
 
 ```bash
 cd cairo && scarb test -- -t unit   # now reports 0 tests — use snforge
@@ -244,7 +249,7 @@ target). **None of that applies on Linux** — the prebuilt plugin exists, so
 
 What's covered vs. not: `cairo/tests/README.md`. Note the coverage gaps it
 lists are still real (no fuzz tests, no `privacy_invoke`-specific reentrancy
-test, no multi-table stress) — "98 passing" means every test that exists
+test, no multi-table stress) — "102 passing" means every test that exists
 passes, not that coverage is complete. Each test was authored carefully and
 re-read multiple times, which held up: nothing failed on first execution
 (one real bug had already been caught during writing:
@@ -299,10 +304,10 @@ that doesn't parse as a `u32 < max_seats` (`BAD_MAX_SEATS`/`BAD_SEAT`,
 respectively). **This is a breaking interface change** — every
 `create_table` call site was updated, including all of `cairo/tests/`
 (`helpers.cairo`'s new `TWO_SEATS` constant, plus new regression tests in
-`test_lifecycle.cairo` for both new error paths) — but like the rest of
-that suite, these new tests are unexecuted/unverified on this machine (no
-`snforge`). The `felt252 -> u32` conversion logic itself (the part that
-can't wait for `snforge` to at least sanity-check) WAS verified directly:
+`test_lifecycle.cairo` for both new error paths). These were unexecuted
+when written; they now run and pass with the rest of the suite (§4a).
+The `felt252 -> u32` conversion logic was additionally verified directly
+at the time, before `snforge` was available:
 a throwaway `scarb test -- -t unit` check confirmed `try_into()` panics on
 an out-of-`u32`-range felt252 and compares correctly in-range, matching
 exactly what `join_table` relies on, before that scratch file was deleted.
@@ -345,9 +350,9 @@ actual committed/revealed seed**:
    asserted the exact card values at every relevant position, genuinely
    run and passing, before being deleted and the same values baked into
    the `snforge`-only test file. So the deck-math inputs to those tests
-   are independently confirmed twice (Python + Cairo), even though the
-   `snforge` test flow around them (dispatcher calls, cheat codes, event
-   assertions) remains unexecuted like the rest of `cairo/tests/`.
+   are independently confirmed twice (Python + Cairo). The `snforge` test
+   flow around them (dispatcher calls, cheat codes, event assertions) was
+   unexecuted when written and now runs and passes — see §4a.
 4. `helpers.cairo` gained a shared `seed_hash_of` helper (previously only
    `test_lifecycle.cairo` had a local copy) since `test_hand_eval.cairo`
    now needs it too for `commit_deal`.
@@ -483,9 +488,11 @@ question" paragraph); short version of what changed:
   duplicating the zero-check/assert. New event: `PayoutNoteRegistered`. 4
   new tests in `cairo/tests/test_lifecycle.cairo` (success + event,
   `NOTE_ID_TAKEN` by a different owner, same-owner idempotent re-register,
-  and cross-use with `join_table`'s own registration) — unexecuted like
-  the rest of that suite, but the contract itself rebuilds clean
-  (`scarb build`) and all 30 unit tests still pass.
+  and cross-use with `join_table`'s own registration). These now run and
+  pass — they were part of the merge that brought the suite to 102/102
+  (§4a). One fix was needed: `PayoutNoteRegistered` was declared without
+  `pub`, which the tests can't construct for `assert_emitted`; made `pub`
+  like every other event.
 - **Frontend** (`src/app/poker/PokerPanel.tsx`): a new "Reserve a payout
   note" section (create a standalone open note via a bare `CreateOpenNote`
   STRK20 action, then `register_payout_note` it — two steps, two separate
@@ -783,7 +790,7 @@ In rough priority order — see `docs/DESIGN.md` "Open items" for the
 canonical, kept-up-to-date list:
 
 1. ~~**Get the test suite actually running**~~ — **DONE** (2026-08-31, on
-   Linux). All 98 tests pass: `cd cairo && snforge test --features testing`.
+   Linux). All 102 tests pass: `cd cairo && snforge test --features testing`.
    See §4a for the two structural bugs that had to be fixed (cfg(test)-gated
    mocks, non-`pub` events) — no test logic changed, nothing failed once it
    compiled. **The remaining coverage gaps in `cairo/tests/README.md` are

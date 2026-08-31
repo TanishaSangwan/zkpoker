@@ -170,7 +170,7 @@ dense 0..N-1 index) — now it does:
 - This is a **breaking interface change**: every `create_table` call site,
   including all of `cairo/tests/`, now passes `max_seats` — updated (with
   new regression tests for `BAD_MAX_SEATS`/`BAD_SEAT`) but, like the rest
-  of that suite, unexecuted on this machine (see "Test suite" below).
+  of that suite — now executed and passing (see "Test suite" below).
 
 **Wired into `settle_table_by_hand` (round 8, same session, follow-up
 pass).** The module and the seat-index precondition above both now feed a
@@ -200,7 +200,7 @@ into the `snforge`-only test file (see that file's own header for the
 regenerate-if-needed Python snippet). Two new regression tests
 (`SEED_NOT_REVEALED`, `CARD_MISMATCH` on a wrong hole card and separately
 a wrong community card) cover the new checks directly. Like the rest of
-`cairo/tests/`, these are still unexecuted on this machine — the deck-math
+`cairo/tests/`, these now run and pass (see "Test suite") — the deck-math
 inputs are independently verified, the `snforge` test flow itself isn't.
 
 ## Buy-in, betting, payout flow (SDK / wallet side)
@@ -478,12 +478,23 @@ coverage, including a dedicated regression test per historical finding
 reentrancy on both `bet` and `settle_table`, pool spoofing, unchecked
 approve, etc.).
 
-**Not yet run.** This machine has no `snforge` (no Windows binary; building
-from source needs a Rust toolchain that isn't installed either) — see
-`cairo/tests/README.md` for the full explanation and exact setup steps for
-whoever runs it next. The tests were authored carefully and re-read
-multiple times (one real bug was caught this way — see the README), but
-are unverified until an actual `snforge test` run.
+**Runs and passes: 102/102** (2026-08-31, Linux with snforge 0.63.0):
+
+```bash
+cd cairo && snforge test --features testing   # 30 from src/, 72 from tests/
+```
+
+`--features testing` is required — it gates `cairo/src/mocks.cairo`. The
+suite went unexecuted for its whole authoring life (written on Windows,
+where snforge ships no binary). On first execution two structural bugs had
+to be fixed — `mocks` was `#[cfg(test)]`-gated (invisible to snforge's
+separate integration-test crate, and never compiled to a declarable
+contract class), and the events weren't `pub` (edition 2024_07 defaults
+items and fields private, so `assert_emitted` couldn't see them). **No
+test's logic or assertions needed changing, and nothing failed once it
+compiled.** See `cairo/tests/README.md` for the full writeup and the
+remaining coverage gaps (no fuzz tests, no `privacy_invoke`-specific
+reentrancy test, no multi-table stress).
 
 ## `reveal_seed` commitment hash
 
@@ -507,20 +518,21 @@ another party could exploit.
 
 ## Open items (in priority order for the hackathon)
 
-1. Get `snforge` running (Linux/Mac/WSL — see `cairo/tests/README.md`) and
-   actually run the test suite (`cairo/tests/`, including
-   `test_hand_eval.cairo`'s streets/settle_table_by_hand/card-validation
-   coverage); fix whatever the first real compile/run surfaces.
-   (`poker_hand`'s own unit tests already run and pass today — 24 tests,
-   see "Hand evaluation" above.)
+1. ~~Get `snforge` running and actually run the test suite~~ — **DONE**
+   (2026-08-31). 102/102 pass via `snforge test --features testing`; see
+   "Test suite" above for the two structural bugs the first run surfaced.
+   **Still open from this item:** the coverage gaps `cairo/tests/README.md`
+   lists — no fuzz tests, no `privacy_invoke`-specific reentrancy test, no
+   multi-table stress. "102 passing" means every test that exists passes,
+   not that coverage is complete.
 2. ~~Shuffle-from-seed on-chain~~ — **DONE (round 8)**. The module, the
    seat-count concept it needs, and the `settle_table_by_hand` wiring that
    actually checks submitted cards against the seed-derived deck are all
    in place — see "Deck shuffle from seed" above. This was the last piece
    of the provenance gap (round 7 fixed card *validity/distinctness*, not
-   *provenance*); it's now closed at the contract level. What remains
-   is the same as everything in `cairo/tests/`: unexecuted on this
-   machine (item 1).
+   *provenance*); it's now closed at the contract level, and its
+   `cairo/tests/` coverage now runs and passes (item 1). What remains is
+   an audit pass: round 8's checks have never been through cairo-auditor.
 3. Bet-matching / turn-order enforcement for `advance_street` — currently
    a dealer can advance streets without every active seat having called
    the current bet.
