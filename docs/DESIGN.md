@@ -211,11 +211,116 @@ inputs are independently verified, the `snforge` test flow itself isn't.
 - **Actions**: `bet` / `fold` / `commit_deal` / `reveal_seed` calls are
   submitted paymaster-side so the submitting address is never the player's
   wallet — read per-player activity off this contract's own events, never
-  off the transaction envelope.
+  off the transaction envelope. In practice `bet` moves funds via a plain
+  ERC20 `approve`/`transfer_from` (see "Privacy boundary" above — bet
+  amounts are intentionally public), so it's a normal contract call, not an
+  STRK20 wallet-action.
 - **Payout**: `settle_table` + `privacy_invoke` land in the same batched
   transaction as the winner's `CreateOpenNote` action (phase 6 before
   phase 7), matching the "at most one invoke, and it comes after the open
   note exists" rule in the STRK20 phase table.
+
+  **Resolved design question (found + closed, round 9): option (a) — the
+  winner pre-registers a payout note before settlement.** The STRK20
+  wallet-action pattern most examples show (`strk20-wallet-api` skill's
+  private-defi reference, and the starter kit's own echo-helper demo)
+  creates the open note *and* invokes the helper in the *same*
+  transaction — the invoke's calldata references `${openNoteIds[0]}`, a
+  note id the wallet generates fresh, right then. But
+  `settle_table`/`settle_table_by_hand` record `pending_payout` keyed by a
+  `note_id` the *dealer* chooses, in an *earlier*, separate transaction —
+  so the dealer's choice and a later fresh `${openNoteIds[0]}` would never
+  naturally match.
+
+  Two things made option (a) — decouple note creation from the claim,
+  across two transactions — checkable rather than a guess: `notes-and-
+  nullifiers.md` shows `note_id = h(NOTE_ID_TAG, channel_key, token,
+  index, 0)` and that an open note's amount is `0` "while awaiting
+  deposit" — so a bare `CreateOpenNote` with no paired invoke is a
+  complete, self-contained, zero-funded action (nothing to balance to
+  zero within that transaction, satisfying the phase table's per-token
+  invariant on its own), not something that needs bundling with a
+  same-transaction fill. And `actions-and-proofs.md`'s phase table already
+  allows a transaction to consist of *just* `InvokeExternal` (phase 7) —
+  no `CreateOpenNote` in the same transaction is required, since a
+  transaction "may skip phases". So: create the note in one transaction
+  (alone), invoke against its already-known id in a separate, later one.
+
+  What was missing on the *contract* side, not just the frontend: the only
+  way to write `note_id_owner` (which `settle_table`'s own
+  `payout_note_ids[i]` check requires) was `join_table`, coupled to taking
+  a seat — a player reserving a note purely for payout, independent of any
+  seat, had no way to register it. **Fixed**: `register_payout_note(note_id)`
+  — same `NOTE_ID_TAKEN` protection as `join_table`'s note registration,
+  factored into a shared internal helper (`register_note_id_owner`), no
+  seat or table involved. A hole-card note can't be reused for this either
+  way — it's an *encrypted* note (`CreateEncNote`), and open-vs-encrypted
+  is fixed at note creation via the salt, so it can never later become an
+  open note `privacy_invoke`'s `OpenNoteDeposit` can fill.
+
+  The resulting flow: (1) the intending winner submits a standalone
+  `CreateOpenNote` action; (2) they read the resulting note_id from their
+  *wallet's own* activity/notes view — this dApp deliberately can't
+  compute or list it itself, since that needs the private `channel_key`
+  STRK20 keeps inside the wallet, never exposed to a dApp; (3) they call
+  `register_payout_note(that_note_id)` and give the same value to the
+  dealer; (4) the dealer uses it in `payout_note_ids[i]` when settling;
+  (5) later, the winner claims with a bare `invoke` action (no paired
+  `CreateOpenNote` this time — the note already exists) naming that same
+  literal `note_id`, not `${openNoteIds[0]}`. See `/poker`'s "Reserve a
+  payout note" and "Claim a payout" sections
+  (`src/app/poker/PokerPanel.tsx`) and HANDOFF.md for the implementation
+  detail, including what's still unverified against a live pool (step 2's
+  wallet-side discoverability — plausible from the deterministic note_id
+  derivation, but not tested against a real wallet in this environment).
+
+## Frontend (`src/app/poker/`, round 9)
+
+Drives `PokerGame` directly — every contract entrypoint has a form, plus a
+"Load table" panel reading all `get_*` views at once. Deliberately an
+operator/admin-style panel (raw felt/hex inputs, comma-separated lists),
+not a polished poker-table UI with rendered cards — matches this project's
+existing `WalletAccountV6Tag.tsx` demo's own aesthetic and is a defensible
+scope for a hackathon frontend pass on top of everything else already
+built. Cards accept rank+suit notation (`"As"`, `"Th"`, `"2c"`) or a plain
+0-51 index, matching `scripts/deal_verify.py`'s convention.
+
+- `src/utils/pokerGameAbi.ts` — the real compiled ABI from
+  `cairo/target/dev/zkpoker_PokerGame.contract_class.json`, copied in (not
+  hand-written) and diffed byte-for-byte against that file to confirm the
+  transcription was exact, not eyeballed. Regenerate the same way if the
+  contract's interface changes.
+- `src/app/poker/pokerActions.ts` — pure contract-call wiring, separate
+  from the UI: builds `Call`s via `starknet.js`'s `CallData.compile`
+  against that ABI, computes `commit_deal`'s Poseidon hash client-side
+  (`hash.computePoseidonHashOnElements`, verified during this session to
+  match Cairo's `core::poseidon::poseidon_hash_span` exactly, single- and
+  two-element cases both cross-checked in Cairo tests), and does the
+  felt/card-notation parsing.
+- `src/app/poker/PokerPanel.tsx` — the actual UI: table lookup/state,
+  create/join, bet+approve (one multicall)/fold, dealer actions
+  (commit/mark-dealt/reveal/advance-street), both settle paths, reclaim,
+  reserve-a-payout-note + register (round 9), and claim.
+- Every ABI type was runtime-verified against `starknet.js`'s `CallData`
+  (including the unusual `Span<(u8,u8)>` `settle_table_by_hand` needs) —
+  see HANDOFF.md for the exact checks run.
+- `PokerGame` isn't deployed anywhere yet (`cairo/address.md`) — the page
+  shows a clear "not deployed on this network" banner
+  (`NEXT_PUBLIC_POKERGAME_MAINNET`/`_SEPOLIA`, both default `0x0`) rather
+  than failing silently, same pattern as the starter kit's own echo-helper
+  gating.
+- **Not wired**: hole-card encryption (the STRK20 `CreateEncNote` action,
+  "phase 5") — `join_table`'s `hole_card_note_id` is entered manually, with
+  an in-UI explanation of what would normally produce it. Needs the pool
+  live plus real `strk20-privacy-sdk` integration; out of scope for this
+  pass.
+- Verified: `npx tsc --noEmit` clean, a full `next build --webpack`
+  succeeds (including static generation of `/poker`), and the dev server
+  actually serves both `/` and `/poker` with 200s and no compile/runtime
+  errors in the server log — checked directly (`curl` + the dev server's
+  own log), not assumed. Not checked: an actual browser session (no
+  Chrome-extension connection available in this environment) or any call
+  against a real deployed contract, since none exists yet.
 
 ## Security review
 
@@ -419,13 +524,28 @@ another party could exploit.
 3. Bet-matching / turn-order enforcement for `advance_street` — currently
    a dealer can advance streets without every active seat having called
    the current bet.
-4. Frontend: wire `PokerGame` actions into the starter-kit UI
-   (`src/app/components`), replacing the echo-helper demo flow.
+4. ~~Frontend: wire `PokerGame` actions into the starter-kit UI~~ —
+   **DONE (round 9)**, at `/poker` (`src/app/poker/`) rather than replacing
+   the original demo — see "Frontend" above. Every contract entrypoint has
+   a form; verified via a clean `tsc`, a clean `next build`, and the dev
+   server actually serving both pages with no errors. One thing this
+   didn't close: hole-card encryption (`CreateEncNote`) isn't wired —
+   needs the pool live plus real SDK integration.
 5. Generalization write-up for the pitch: the "card-as-encrypted-note +
    commit-reveal deal" pattern applies to Battleship, Mafia, and sealed-bid
    auctions, per the RFP's own framing — worth a slide, not more code.
-6. A round 8 *security* sweep is now ripe — round 8 added real
+6. A round 8/9 *security* sweep is now ripe — round 8 added real
    access-control-shaped surface (`create_table`'s `max_seats` bound,
-   `join_table`'s seat bound) AND a new value-moving check
-   (`settle_table_by_hand`'s card-position assertions), none of which has
-   been through `cairo-auditor` yet.
+   `join_table`'s seat bound) and a new value-moving check
+   (`settle_table_by_hand`'s card-position assertions); round 9 added
+   `register_payout_note` (another `note_id_owner`-binding entrypoint,
+   same shape as `join_table`'s). None of it has been through
+   `cairo-auditor` yet.
+7. ~~Resolve the payout-claim `note_id` design question~~ — **DONE
+   (round 9)**: picked option (a) — see "Buy-in, betting, payout flow"
+   above for the full resolution (`register_payout_note` plus the
+   two-transaction reserve-then-claim flow). What's *not* independently
+   verified: whether a real wallet's UI actually surfaces a freshly
+   created open note's id the way step 2 of that flow assumes — plausible
+   from the deterministic `note_id` derivation in `notes-and-nullifiers.md`,
+   not tested against a live wallet.

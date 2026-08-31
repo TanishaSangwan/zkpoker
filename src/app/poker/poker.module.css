@@ -1,0 +1,180 @@
+/* Poker page — reuses the CSS custom properties declared on .page in
+   ../uni.module.css (--ink, --muted, --pink, --pink-soft, --pink-text,
+   --green, --green-soft, --danger, --line, --inset, --inset-2). Those only
+   need to be inherited from an ancestor with that class, so page.tsx wraps
+   this page's content in uni.module.css's .page too — nothing here
+   redeclares them. */
+
+.wrap {
+  width: min(720px, calc(100vw - 32px));
+  margin: 0 auto;
+  padding-bottom: 60px;
+}
+
+.section {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 20px;
+  margin-bottom: 16px;
+}
+
+.sectionHead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+
+.sectionTitle {
+  font-weight: 600;
+  font-size: 16px;
+  letter-spacing: -0.01em;
+}
+
+.sectionHint {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+  margin: 4px 0 14px;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.chipDealer { color: var(--pink-text); background: var(--pink-soft); }
+.chipOwner { color: var(--green); background: var(--green-soft); }
+.chipMuted { color: var(--muted); background: var(--inset); }
+
+.grid2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.grid3 {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 12px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+.field:last-child { margin-bottom: 0; }
+
+.label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.input, .textarea, .select {
+  font-family: var(--font-mono-ui, monospace);
+  font-size: 14px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--inset);
+  color: var(--ink);
+  outline: none;
+  width: 100%;
+  box-sizing: border-box;
+}
+.input:focus, .textarea:focus, .select:focus { border-color: var(--pink-soft-2); background: var(--card); }
+.textarea { font-family: var(--font-mono-ui, monospace); min-height: 64px; resize: vertical; }
+
+.fieldHint { color: var(--muted); font-size: 12px; line-height: 1.4; }
+
+.actionsRow {
+  display: flex;
+  gap: 10px;
+  margin-top: 4px;
+  flex-wrap: wrap;
+}
+
+.stateGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px 16px;
+  margin-bottom: 4px;
+}
+.stateItem { display: flex; flex-direction: column; gap: 3px; }
+.stateLabel { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; }
+.stateValue { font-family: var(--font-mono-ui, monospace); font-size: 14px; font-weight: 500; }
+
+.banner {
+  border: 1px solid var(--pink-soft-2);
+  background: var(--pink-soft);
+  color: var(--pink-text);
+  border-radius: 12px;
+  padding: 14px 16px;
+  font-size: 13px;
+  line-height: 1.5;
+  margin-bottom: 16px;
+}
+.bannerCode {
+  font-family: var(--font-mono-ui, monospace);
+  background: var(--inset);
+  padding: 1px 5px;
+  border-radius: 5px;
+}
+
+.caution {
+  border: 1px solid #f4dcc9;
+  background: #fdf3ea;
+  color: #8a5a1f;
+  border-radius: 12px;
+  padding: 12px 14px;
+  font-size: 12.5px;
+  line-height: 1.55;
+  margin-top: 10px;
+}
+
+.nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  max-width: 1160px;
+  margin: 0 auto;
+  padding: 18px 24px;
+}
+.navLinks { display: flex; align-items: center; gap: 18px; }
+.navLink {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--muted);
+  text-decoration: none;
+}
+.navLink:hover { color: var(--ink); }
+.navLinkActive { color: var(--pink-text); }
+
+.hero { text-align: center; margin: 34px auto 26px; padding: 0 20px; }
+.heroTitle {
+  font-weight: 600;
+  font-size: clamp(30px, 5vw, 46px);
+  line-height: 1.08;
+  letter-spacing: -0.03em;
+  margin: 0;
+  color: var(--ink);
+}
+.heroSub { margin: 12px auto 0; max-width: 480px; color: var(--muted); font-size: 15px; line-height: 1.5; }
+
+.tableIdRow {
+  display: flex;
+  gap: 10px;
+  align-items: flex-end;
+}
+.tableIdRow .field { flex: 1; margin-bottom: 0; }

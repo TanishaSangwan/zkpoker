@@ -1,0 +1,427 @@
+// ABI for cairo/src/lib.cairo's PokerGame contract, copied from
+// cairo/target/dev/zkpoker_PokerGame.contract_class.json (built via
+// `scarb build` — see cairo/Scarb.toml). Regenerate this file the same way
+// if the contract's interface ever changes; a stale copy here would silently
+// desync from what's actually deployed.
+export const pokerGameAbi = [
+  {
+    type: "impl",
+    name: "PokerGameImpl",
+    interface_name: "zkpoker::IPokerGame",
+  },
+  {
+    type: "struct",
+    name: "core::array::Span::<core::felt252>",
+    members: [{ name: "snapshot", type: "@core::array::Array::<core::felt252>" }],
+  },
+  {
+    type: "struct",
+    name: "core::array::Span::<(core::integer::u8, core::integer::u8)>",
+    members: [{ name: "snapshot", type: "@core::array::Array::<(core::integer::u8, core::integer::u8)>" }],
+  },
+  {
+    type: "struct",
+    name: "core::array::Span::<core::integer::u8>",
+    members: [{ name: "snapshot", type: "@core::array::Array::<core::integer::u8>" }],
+  },
+  {
+    type: "struct",
+    name: "zkpoker::OpenNoteDeposit",
+    members: [
+      { name: "note_id", type: "core::felt252" },
+      { name: "token", type: "core::starknet::contract_address::ContractAddress" },
+      { name: "amount", type: "core::integer::u128" },
+    ],
+  },
+  {
+    type: "struct",
+    name: "core::array::Span::<zkpoker::OpenNoteDeposit>",
+    members: [{ name: "snapshot", type: "@core::array::Array::<zkpoker::OpenNoteDeposit>" }],
+  },
+  {
+    type: "enum",
+    name: "core::bool",
+    variants: [
+      { name: "False", type: "()" },
+      { name: "True", type: "()" },
+    ],
+  },
+  {
+    type: "interface",
+    name: "zkpoker::IPokerGame",
+    items: [
+      {
+        type: "function",
+        name: "create_table",
+        inputs: [
+          { name: "table_id", type: "core::felt252" },
+          { name: "token", type: "core::starknet::contract_address::ContractAddress" },
+          { name: "buy_in", type: "core::integer::u128" },
+          { name: "max_seats", type: "core::integer::u32" },
+        ],
+        outputs: [],
+        state_mutability: "external",
+      },
+      {
+        type: "function",
+        name: "join_table",
+        inputs: [
+          { name: "table_id", type: "core::felt252" },
+          { name: "seat", type: "core::felt252" },
+          { name: "hole_card_note_id", type: "core::felt252" },
+        ],
+        outputs: [],
+        state_mutability: "external",
+      },
+      {
+        type: "function",
+        name: "register_payout_note",
+        inputs: [{ name: "note_id", type: "core::felt252" }],
+        outputs: [],
+        state_mutability: "external",
+      },
+      {
+        type: "function",
+        name: "commit_deal",
+        inputs: [
+          { name: "table_id", type: "core::felt252" },
+          { name: "seed_hash", type: "core::felt252" },
+        ],
+        outputs: [],
+        state_mutability: "external",
+      },
+      {
+        type: "function",
+        name: "mark_dealt",
+        inputs: [{ name: "table_id", type: "core::felt252" }],
+        outputs: [],
+        state_mutability: "external",
+      },
+      {
+        type: "function",
+        name: "reveal_seed",
+        inputs: [
+          { name: "table_id", type: "core::felt252" },
+          { name: "seed", type: "core::felt252" },
+        ],
+        outputs: [],
+        state_mutability: "external",
+      },
+      {
+        type: "function",
+        name: "bet",
+        inputs: [
+          { name: "table_id", type: "core::felt252" },
+          { name: "seat", type: "core::felt252" },
+          { name: "amount", type: "core::integer::u128" },
+        ],
+        outputs: [],
+        state_mutability: "external",
+      },
+      {
+        type: "function",
+        name: "fold",
+        inputs: [
+          { name: "table_id", type: "core::felt252" },
+          { name: "seat", type: "core::felt252" },
+        ],
+        outputs: [],
+        state_mutability: "external",
+      },
+      {
+        type: "function",
+        name: "advance_street",
+        inputs: [{ name: "table_id", type: "core::felt252" }],
+        outputs: [],
+        state_mutability: "external",
+      },
+      {
+        type: "function",
+        name: "settle_table_by_hand",
+        inputs: [
+          { name: "table_id", type: "core::felt252" },
+          { name: "seats", type: "core::array::Span::<core::felt252>" },
+          { name: "hole_cards", type: "core::array::Span::<(core::integer::u8, core::integer::u8)>" },
+          { name: "community_cards", type: "core::array::Span::<core::integer::u8>" },
+          { name: "payout_note_ids", type: "core::array::Span::<core::felt252>" },
+        ],
+        outputs: [],
+        state_mutability: "external",
+      },
+      {
+        type: "function",
+        name: "reclaim_stalled_bet",
+        inputs: [
+          { name: "table_id", type: "core::felt252" },
+          { name: "seat", type: "core::felt252" },
+        ],
+        outputs: [],
+        state_mutability: "external",
+      },
+      {
+        type: "function",
+        name: "settle_table",
+        inputs: [
+          { name: "table_id", type: "core::felt252" },
+          { name: "winners", type: "core::array::Span::<core::felt252>" },
+          { name: "payout_note_ids", type: "core::array::Span::<core::felt252>" },
+        ],
+        outputs: [],
+        state_mutability: "external",
+      },
+      {
+        type: "function",
+        name: "privacy_invoke",
+        inputs: [
+          { name: "token", type: "core::starknet::contract_address::ContractAddress" },
+          { name: "pool_address", type: "core::starknet::contract_address::ContractAddress" },
+          { name: "note_id", type: "core::felt252" },
+        ],
+        outputs: [{ type: "core::array::Span::<zkpoker::OpenNoteDeposit>" }],
+        state_mutability: "external",
+      },
+      {
+        type: "function",
+        name: "get_pot",
+        inputs: [{ name: "table_id", type: "core::felt252" }],
+        outputs: [{ type: "core::integer::u128" }],
+        state_mutability: "view",
+      },
+      {
+        type: "function",
+        name: "get_seed_hash",
+        inputs: [{ name: "table_id", type: "core::felt252" }],
+        outputs: [{ type: "core::felt252" }],
+        state_mutability: "view",
+      },
+      {
+        type: "function",
+        name: "get_revealed_seed",
+        inputs: [{ name: "table_id", type: "core::felt252" }],
+        outputs: [{ type: "core::felt252" }],
+        state_mutability: "view",
+      },
+      {
+        type: "function",
+        name: "get_seat_note",
+        inputs: [
+          { name: "table_id", type: "core::felt252" },
+          { name: "seat", type: "core::felt252" },
+        ],
+        outputs: [{ type: "core::felt252" }],
+        state_mutability: "view",
+      },
+      {
+        type: "function",
+        name: "get_pending_payout",
+        inputs: [{ name: "note_id", type: "core::felt252" }],
+        outputs: [{ type: "core::integer::u128" }],
+        state_mutability: "view",
+      },
+      {
+        type: "function",
+        name: "get_pool",
+        inputs: [],
+        outputs: [{ type: "core::starknet::contract_address::ContractAddress" }],
+        state_mutability: "view",
+      },
+      {
+        type: "function",
+        name: "get_table_dealer",
+        inputs: [{ name: "table_id", type: "core::felt252" }],
+        outputs: [{ type: "core::starknet::contract_address::ContractAddress" }],
+        state_mutability: "view",
+      },
+      {
+        type: "function",
+        name: "get_seat_owner",
+        inputs: [
+          { name: "table_id", type: "core::felt252" },
+          { name: "seat", type: "core::felt252" },
+        ],
+        outputs: [{ type: "core::starknet::contract_address::ContractAddress" }],
+        state_mutability: "view",
+      },
+      {
+        type: "function",
+        name: "get_note_id_owner",
+        inputs: [{ name: "note_id", type: "core::felt252" }],
+        outputs: [{ type: "core::starknet::contract_address::ContractAddress" }],
+        state_mutability: "view",
+      },
+      {
+        type: "function",
+        name: "get_table_created_at",
+        inputs: [{ name: "table_id", type: "core::felt252" }],
+        outputs: [{ type: "core::integer::u64" }],
+        state_mutability: "view",
+      },
+      {
+        type: "function",
+        name: "get_seat_contributed",
+        inputs: [
+          { name: "table_id", type: "core::felt252" },
+          { name: "seat", type: "core::felt252" },
+        ],
+        outputs: [{ type: "core::integer::u128" }],
+        state_mutability: "view",
+      },
+      {
+        type: "function",
+        name: "get_table_settled",
+        inputs: [{ name: "table_id", type: "core::felt252" }],
+        outputs: [{ type: "core::bool" }],
+        state_mutability: "view",
+      },
+      {
+        type: "function",
+        name: "get_table_street",
+        inputs: [{ name: "table_id", type: "core::felt252" }],
+        outputs: [{ type: "core::integer::u8" }],
+        state_mutability: "view",
+      },
+      {
+        type: "function",
+        name: "get_table_max_seats",
+        inputs: [{ name: "table_id", type: "core::felt252" }],
+        outputs: [{ type: "core::integer::u32" }],
+        state_mutability: "view",
+      },
+    ],
+  },
+  {
+    type: "constructor",
+    name: "constructor",
+    inputs: [{ name: "pool", type: "core::starknet::contract_address::ContractAddress" }],
+  },
+  {
+    type: "event",
+    name: "zkpoker::PokerGame::TableCreated",
+    kind: "struct",
+    members: [
+      { name: "table_id", type: "core::felt252", kind: "key" },
+      { name: "token", type: "core::starknet::contract_address::ContractAddress", kind: "data" },
+      { name: "buy_in", type: "core::integer::u128", kind: "data" },
+      { name: "max_seats", type: "core::integer::u32", kind: "data" },
+    ],
+  },
+  {
+    type: "event",
+    name: "zkpoker::PokerGame::SeatJoined",
+    kind: "struct",
+    members: [
+      { name: "table_id", type: "core::felt252", kind: "key" },
+      { name: "seat", type: "core::felt252", kind: "data" },
+      { name: "hole_card_note_id", type: "core::felt252", kind: "data" },
+    ],
+  },
+  {
+    type: "event",
+    name: "zkpoker::PokerGame::DealCommitted",
+    kind: "struct",
+    members: [
+      { name: "table_id", type: "core::felt252", kind: "key" },
+      { name: "seed_hash", type: "core::felt252", kind: "data" },
+    ],
+  },
+  {
+    type: "event",
+    name: "zkpoker::PokerGame::Dealt",
+    kind: "struct",
+    members: [{ name: "table_id", type: "core::felt252", kind: "key" }],
+  },
+  {
+    type: "event",
+    name: "zkpoker::PokerGame::SeedRevealed",
+    kind: "struct",
+    members: [
+      { name: "table_id", type: "core::felt252", kind: "key" },
+      { name: "seed", type: "core::felt252", kind: "data" },
+    ],
+  },
+  {
+    type: "event",
+    name: "zkpoker::PokerGame::Bet",
+    kind: "struct",
+    members: [
+      { name: "table_id", type: "core::felt252", kind: "key" },
+      { name: "seat", type: "core::felt252", kind: "data" },
+      { name: "amount", type: "core::integer::u128", kind: "data" },
+    ],
+  },
+  {
+    type: "event",
+    name: "zkpoker::PokerGame::Fold",
+    kind: "struct",
+    members: [
+      { name: "table_id", type: "core::felt252", kind: "key" },
+      { name: "seat", type: "core::felt252", kind: "data" },
+    ],
+  },
+  {
+    type: "event",
+    name: "zkpoker::PokerGame::Settled",
+    kind: "struct",
+    members: [
+      { name: "table_id", type: "core::felt252", kind: "key" },
+      { name: "winner_count", type: "core::integer::u32", kind: "data" },
+    ],
+  },
+  {
+    type: "event",
+    name: "zkpoker::PokerGame::Invoked",
+    kind: "struct",
+    members: [
+      { name: "note_id", type: "core::felt252", kind: "key" },
+      { name: "amount", type: "core::integer::u128", kind: "data" },
+      { name: "caller", type: "core::starknet::contract_address::ContractAddress", kind: "data" },
+    ],
+  },
+  {
+    type: "event",
+    name: "zkpoker::PokerGame::Reclaimed",
+    kind: "struct",
+    members: [
+      { name: "table_id", type: "core::felt252", kind: "key" },
+      { name: "seat", type: "core::felt252", kind: "data" },
+      { name: "amount", type: "core::integer::u128", kind: "data" },
+    ],
+  },
+  {
+    type: "event",
+    name: "zkpoker::PokerGame::StreetAdvanced",
+    kind: "struct",
+    members: [
+      { name: "table_id", type: "core::felt252", kind: "key" },
+      { name: "street", type: "core::integer::u8", kind: "data" },
+    ],
+  },
+  {
+    type: "event",
+    name: "zkpoker::PokerGame::PayoutNoteRegistered",
+    kind: "struct",
+    members: [
+      { name: "note_id", type: "core::felt252", kind: "key" },
+      { name: "owner", type: "core::starknet::contract_address::ContractAddress", kind: "data" },
+    ],
+  },
+  {
+    type: "event",
+    name: "zkpoker::PokerGame::Event",
+    kind: "enum",
+    variants: [
+      { name: "TableCreated", type: "zkpoker::PokerGame::TableCreated", kind: "nested" },
+      { name: "SeatJoined", type: "zkpoker::PokerGame::SeatJoined", kind: "nested" },
+      { name: "DealCommitted", type: "zkpoker::PokerGame::DealCommitted", kind: "nested" },
+      { name: "Dealt", type: "zkpoker::PokerGame::Dealt", kind: "nested" },
+      { name: "SeedRevealed", type: "zkpoker::PokerGame::SeedRevealed", kind: "nested" },
+      { name: "Bet", type: "zkpoker::PokerGame::Bet", kind: "nested" },
+      { name: "Fold", type: "zkpoker::PokerGame::Fold", kind: "nested" },
+      { name: "Settled", type: "zkpoker::PokerGame::Settled", kind: "nested" },
+      { name: "Invoked", type: "zkpoker::PokerGame::Invoked", kind: "nested" },
+      { name: "Reclaimed", type: "zkpoker::PokerGame::Reclaimed", kind: "nested" },
+      { name: "StreetAdvanced", type: "zkpoker::PokerGame::StreetAdvanced", kind: "nested" },
+      { name: "PayoutNoteRegistered", type: "zkpoker::PokerGame::PayoutNoteRegistered", kind: "nested" },
+    ],
+  },
+] as const;

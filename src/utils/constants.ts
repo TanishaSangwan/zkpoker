@@ -43,3 +43,28 @@ export function echoHelperForIndex(index: number): string {
 // Frontend provider indices where the STRK20 privacy pool is available, mapped to a
 // display name. Used to gate the WalletAccountV6 STRK20 actions.
 export const Strk20Networks: Record<number, string> = { 0: "MAINNET", 2: "SEPOLIA" };
+
+// ─── PokerGame (cairo/src/lib.cairo) ────────────────────────────────────────
+// This project's own contract. NOT deployed anywhere yet — see
+// cairo/address.md. Both env vars default to "0x0" (undeployed); the /poker
+// page shows a clear "not deployed on this network" state instead of a
+// broken/silently-failing one whenever the resolved address is zero.
+export const PokerGameMainnet = process.env.NEXT_PUBLIC_POKERGAME_MAINNET ?? "0x0";
+export const PokerGameSepolia = process.env.NEXT_PUBLIC_POKERGAME_SEPOLIA ?? "0x0";
+
+// Resolve PokerGame's address for a frontend provider index (0 = Mainnet, 2 =
+// Sepolia — same indices as echoHelperForIndex above). Returns "0x0" when
+// nothing is configured for that network.
+export function pokerGameAddressForIndex(index: number): string {
+  if (index === 0) return PokerGameMainnet;
+  if (index === 2) return PokerGameSepolia;
+  return "0x0";
+}
+
+// DEMO VALUE: the token /poker's "Create table" form pre-fills as the buy-in
+// token. PokerGame.bet() moves this token via plain approve/transfer_from
+// (see docs/DESIGN.md's privacy table — bet amounts are intentionally
+// public), so it must be a real ERC20 the connected wallet can approve, not
+// necessarily the STRK20-shielded asset. Swap for whatever token you're
+// actually testing with.
+export const defaultPokerToken = addrSTRK;

@@ -47,3 +47,12 @@ A1priv/A1priv.ts
 
 # cairo build artifacts
 /cairo/target/
+
+# Next.js 16 auto-generates these on every `next dev` run (see
+# node_modules/next/dist/server/lib/generate-agent-files.js) — not
+# hand-authored project docs, so don't track the regenerated copies.
+# This project's real Claude Code memory file is CLAUDE.local.md (untracked
+# by default anyway) plus whatever's in .claude/ — see HANDOFF.md instead
+# for cross-session continuity notes.
+/CLAUDE.md
+/AGENTS.md

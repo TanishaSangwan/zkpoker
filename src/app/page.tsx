@@ -1,6 +1,7 @@
 "use client";
 
 import type { CSSProperties } from 'react';
+import Link from 'next/link';
 import styles from './uni.module.css';
 import SelectWallet from './components/client/WalletHandle/SelectWallet';
 import WalletAccountV6Tag from './components/client/WalletHandle/WalletAccountV6Tag';
@@ -52,7 +53,12 @@ export default function Page() {
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img src="/tokens/strk20.png" alt="STRK20" className={styles.brandImg} />
         </div>
-        <SelectWallet variant="nav" />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 18 }}>
+          <Link href="/poker" style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--pink-text)', textDecoration: 'none' }}>
+            PokerGame →
+          </Link>
+          <SelectWallet variant="nav" />
+        </div>
       </nav>
 
       <header className={styles.hero}>
