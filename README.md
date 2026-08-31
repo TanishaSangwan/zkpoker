@@ -12,7 +12,7 @@ Scaffolded from [Akashneelesh/strk20-starter-kit](https://github.com/Akashneeles
 so far; the poker-specific pieces are `cairo/src/lib.cairo`,
 `scripts/deal_verify.py`, and `docs/DESIGN.md`.
 
-## What's inside
+## What's inside?
 
 - `cairo/src/lib.cairo` — `PokerGame`, the STRK20 anonymizer (`privacy_invoke`)
   for this table: table/seat setup, commit-reveal dealing, bet/fold pot
