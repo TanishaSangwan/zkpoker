@@ -2,11 +2,27 @@
 
 Status: **partially implemented.** The shuffle chain (§4.1–§4.3) and the
 forfeit policy (§6) are built and tested on-chain — see
-`cairo/tests/test_shuffle.cairo`, 23 tests. Proof verification is behind an
-`IShuffleVerifier` interface with a mock in tests; **the real
-Garaga-generated verifier does not exist yet**, so nothing here is usable
-against real money. Dealing and decryption (§4.4–§4.6) are not started. V1
-(trusted-dealer commit-reveal, `docs/DESIGN.md`) is still what ships.
+`cairo/tests/test_shuffle.cairo`, 23 tests. A real proof for the shuffle
+circuit has been generated, verified locally, **and verified on-chain by a
+real deployed Garaga-generated Cairo verifier** on a local `starknet-devnet`
+(`docs/V2-SPIKE-RESULTS.md` §7–§8) — proving time, proof size, and real
+verification gas (811,907,200 L2 gas per shuffle proof) are all measured,
+not estimated, clearing both of §9's kill criteria. Both directions were
+tested: a real proof verifies (`Ok`, correct public inputs reconstructed
+by hand), a corrupted one is rejected on-chain with a real cryptographic
+error. **Still not wired to `PokerGame`** — the generated verifier's
+interface doesn't match `IShuffleVerifier::verify_shuffle`, so
+`MockShuffleVerifier` is still what tests use; an adapter contract is the
+next step, not a circuit or proving concern anymore. Dealing and
+decryption (§4.4–§4.6) are not started at all — no circuit, no Cairo code.
+V1 (trusted-dealer commit-reveal, `docs/DESIGN.md`) is still what ships.
+
+**The dealer role is no longer a player.** `scripts/dealer_bot.mjs` is a
+standalone off-chain service that is the only thing that ever calls
+`create_table` (so it's always the dealer) and every dealer-only
+entrypoint — driven by real on-chain bet-matching, not a human deciding
+when to advance. See the "mechanical role" note in §1 below for exactly
+what this does and doesn't achieve.
 
 This answers the RFP's V2 ("Noir + Garaga mental poker, no trusted dealer").
 It replaces V1's shuffle core rather than extending it — see §8 for exactly
@@ -41,6 +57,22 @@ the actual point of V2.
 
 The dealer seat survives only as a mechanical role (advancing streets,
 submitting settlement), never as a holder of secrets.
+
+**`scripts/dealer_bot.mjs` implements this for V1's mechanics today.** It's
+a fixed, non-player identity — the only thing that ever calls
+`create_table`/`commit_deal`/`advance_street`/`reveal_seed`/
+`settle_table_by_hand` — driven by actually watching whether active seats'
+contributions match before advancing a street (closing the "advance
+whenever the dealer feels like it" gap `advance_street`'s own doc comment
+admits to), and computing real settlement cards from the seed it committed
+itself. **Be precise about what this does and doesn't buy under V1's
+mechanics**: it removes the collusion incentive (the bot has no stake in
+any hand, unlike a player-dealer) and removes manual advance-street abuse,
+but the bot still generates the seed and therefore still sees every hole
+card while dealing — same trust position a human dealer has today, just
+automated and auditable instead of a person with something to gain.
+Genuinely removing that trust requirement is what §4.4–§4.6 (still
+unbuilt) are for.
 
 ---
 

@@ -8,6 +8,14 @@ doc is what a new agent (or human) needs to pick it up cold.
 model in detail. This file is about *state and process*: what's been done,
 what broke, what's still open, and what decisions are still pending.
 
+**If you're picking up V2 (mental-poker / ZK shuffle) work, read
+`docs/HANDOFF-V2-SESSION.md` too** — a session log covering local devnet
+deployment, the Play/Verify frontend redesign, and (the main event) getting
+a real ZK shuffle proof verified on-chain by a real deployed Cairo
+verifier with measured gas. Everything below this point in the current file
+predates that session and is still accurate for the V1 contract, but
+doesn't mention any of the V2 work yet.
+
 ---
 
 ## 1. What this project is

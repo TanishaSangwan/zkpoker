@@ -1,0 +1,10 @@
+[package]
+name = "deck_open"
+type = "bin"
+authors = [""]
+
+[dependencies]
+# Must match circuits/shuffle/Nargo.toml exactly -- this circuit re-derives
+# the same commitment the shuffle circuit produced. A version skew here
+# means the hashes silently stop matching.
+poseidon = { tag = "v0.3.0", git = "https://github.com/noir-lang/poseidon" }
