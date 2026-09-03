@@ -70,14 +70,52 @@ multi-contributor ceremony mitigates it and is standard practice, but
 "provably fair, assuming the ceremony was honest" is materially weaker than
 "there is no ceremony to compromise."
 
-Most of the measured 811M gas is **Keccak in the Fiat–Shamir transcript**, which
-is brutal in Cairo. Garaga's `ultra_starknet_zk_honk` flavour swaps it for
-Poseidon. That is a config change to a working pipeline, not a rewrite.
-
 **This decision is cheap to revisit.** `cairo-verifier/src/lib.cairo`'s header
 already notes why: verifiers live behind an address and an interface, so
 swapping proof systems never touches `PokerGame`. Ship on Honk; revisit Groth16
 with a real ceremony if mainnet volume ever makes gas binding.
+
+#### A correction: the Keccak transcript is not the problem
+
+An earlier version of this document claimed most of the 811M was **Keccak in
+the Fiat–Shamir transcript**, and that Garaga's `ultra_starknet_zk_honk`
+flavour — Poseidon instead of Keccak — would cut it to the 200–400M range.
+**That was wrong, and it was measured wrong.**
+
+Two findings:
+
+**1. The variant does not exist.** Garaga 1.1.0 supports only `groth16` and
+`ultra_keccak_zk_honk`. `ProofSystem.UltraStarknetZKHonk` is commented out in
+`garaga/curves.py` with the note `# Disabled.`, the generator branch in
+`gen.py` is commented out, and the Cairo side ships only `KeccakHasherState` —
+no Poseidon hasher exists in `zk_honk_transcript.cairo` at all. 1.1.0 is also
+the latest release on PyPI. The surrounding code is visibly dead:
+`supported_curves` references `ProofSystem.UltraKeccakHonk` and
+`UltraStarknetHonk`, neither of which exists as an enum member, so that path
+would `AttributeError` if reached. Re-enabling it would mean generating a
+security-critical verifier from code upstream deliberately disabled, with no
+way to validate soundness beyond "it accepted one proof." Not done.
+
+**2. It would barely have mattered.** Measured on devnet with a purpose-built
+benchmark contract, per hash over a comparable payload:
+
+| | L2 gas per hash |
+|---|---:|
+| `keccak::cairo_keccak` (128 u64 words) | **1,634,074** |
+| `poseidon_hash_span` (64 felts) | **202,963** |
+
+Poseidon is **8.1× cheaper per hash** — the intuition was right. But the ZK
+Honk transcript performs roughly 27 digests (11 `digest()` sites, one inside a
+`log_circuit_size` loop), so the whole swap is worth about **38.6M gas: 4.8%
+of the 811M**. And 128 words per digest is generous for a 9,408-byte proof, so
+treat 4.8% as an upper bound.
+
+**Honk verification is expensive because Honk verification is expensive** —
+pairings, MSMs and sumcheck, not hashing. The practical consequence is that
+there is no cheap fix for the largest cost in this protocol. If per-hand gas
+ever becomes binding, the real lever is Groth16 (structurally cheaper
+verification, at the cost of a per-circuit ceremony — §2.2 above) or fewer
+shuffle rounds (§9), not a different transcript hash.
 
 ---
 
@@ -333,12 +371,18 @@ Two things this costs, both real:
 Down from 9.7B. DLEQ falls from **42% of the hand to 9%**, and the shuffle
 chain is decisively dominant again at 78%.
 
-The remaining lever is therefore the shuffle:
+The remaining lever is therefore the shuffle — and the easy version of it is
+now closed off. Swapping the transcript to Poseidon was worth ~4.8%, and the
+variant does not exist in Garaga 1.1.0 anyway (§2.2). What is left:
 
-- **`ultra_starknet_zk_honk`** — Poseidon instead of Keccak in the transcript
-  (§2.2). Unmeasured, and now the highest-value measurement left.
 - **Cap the chain at `k < n`** (§9). Security needs one honest shuffler, not
-  all of them; `k=3` halves the largest term outright.
+  all of them, so this is a straight linear cut with no cryptographic cost:
+  `k=3` removes ~2.4B L2 gas, taking the hand to ~3.8B. **The best lever
+  available, and it is a parameter choice, not an implementation.**
+- **Shuffle the next hand's deck during the current hand's betting** (§9).
+  Does not reduce gas, but removes the latency entirely from the critical path.
+- **Groth16**, if per-hand gas ever becomes genuinely binding — structurally
+  cheaper verification, paid for with a per-circuit trusted setup (§2.2).
 
 Cheap hands stay cheap: everyone folding pre-flop reveals no community cards
 and reaches no showdown, costing **zero** verifications beyond the shuffle.
