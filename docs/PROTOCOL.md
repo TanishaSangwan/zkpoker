@@ -276,19 +276,72 @@ That inverts the assumption this protocol was designed around. Individually a
 DLEQ is cheap; there are just 63 of them, and `n`-of-`n` threshold decryption
 means the count grows with players *and* with cards.
 
-Two levers, neither built:
+### 6.2 Share aggregation — built and measured, `O(1)` in players
 
-- **Batch the `n+1` shares of one card into a single check.** Verify
-  `Σ ρ^i · (equations)` with Fiat-Shamir coefficients `ρ` — one MSM of size
-  ~2(n+1) instead of `n+1` separate MSMs of size 2. Should cut the 4.07B DLEQ
-  total by roughly 3–4×. This is the single highest-value optimisation
-  available and it changes no security property, only the arithmetic.
-- **Cap the shuffle chain at `k < n`** (§9). Security needs one honest
-  shuffler, not all of them; `k=3` halves the shuffle term.
+Random-linear-combination batching, the obvious approach, **loses**: combining
+`n+1` proofs gives two MSMs of size `2n+3`, which at n=6 is 30 scalar muls
+against 28 unbatched.
 
-Cheap hands are already cheap: everyone folding pre-flop reveals no community
-cards and reaches no showdown, so it costs **zero** proof verifications beyond
-the shuffle.
+The structure that works exploits two facts the protocol already has: every
+share of one card uses the **same** `H = c1`, and the contract already stores
+the **joint key** `Y = Σ y_X`. Since `Y = X·G` and `D = Σ d_i = X·H` for the
+joint secret `X = Σ x_i`, the statement `log_G(Y) = log_H(D)` is a *single*
+DLEQ — and the individual proofs sum directly into one:
+
+```
+R1 = Σ k_i·G = K·G      R2 = Σ k_i·H = K·H      S = Σ (k_i + e·x_i) = K + e·X
+
+S·G − e·Y = (K + eX)G − e(XG) = K·G = R1        (and likewise for H, D)
+```
+
+**Measured on devnet, and it needs no contract change** — it is the same
+`DleqVerifier` with `(Y, H, D)` substituted for `(PK, H, d)`:
+
+| Parties aggregated | Calldata | L2 gas | Result |
+|---:|---:|---:|---|
+| 2 | 58 felts | — | `true` |
+| 7 | 58 felts | **64,327,680** | `true` |
+| 24 (max table) | 58 felts | **64,007,680** | `true` |
+| 7, one dishonest | 58 felts | — | **`false`** |
+
+Flat in the number of players. **7× cheaper at n=6, 24× at a full table.**
+
+Two things this costs, both real:
+
+- **A commitment round is mandatory.** `e` depends on `R1 = Σ R1_i`, so whoever
+  reveals last could grind their `R1_i` against everyone else's — the classic
+  naive-multisignature weakness (Wagner; the original MuSig flaw). Deployment
+  must run three rounds: commit `Poseidon(R1_i, R2_i)`, reveal only once every
+  commitment is in, then compute `s_i`. Shares are exchanged off-chain anyway,
+  so this is free on-chain. `scripts/dleq_prove.py` models the honest case and
+  does **not** enforce it — the dealer bot must.
+- **Accountability is lost on failure.** A failed aggregate proves someone
+  cheated but not who. The fallback is to demand individual proofs and verify
+  those at `(n+1) × 64.6M` to identify the culprit — expensive, but only on
+  dispute, which is the right way round.
+
+### 6.3 Revised per-hand cost
+
+| Phase | Count | L2 gas |
+|---|---:|---:|
+| Shuffle chain (k=6) | 6 | 4,871,443,200 |
+| Deck opening | 1 | 772,299,520 |
+| Community DLEQ (aggregated) | 5 | 321,638,400 |
+| Showdown DLEQ (aggregated) | 4 | 257,310,720 |
+| **Total** | | **≈ 6.22 billion** |
+
+Down from 9.7B. DLEQ falls from **42% of the hand to 9%**, and the shuffle
+chain is decisively dominant again at 78%.
+
+The remaining lever is therefore the shuffle:
+
+- **`ultra_starknet_zk_honk`** — Poseidon instead of Keccak in the transcript
+  (§2.2). Unmeasured, and now the highest-value measurement left.
+- **Cap the chain at `k < n`** (§9). Security needs one honest shuffler, not
+  all of them; `k=3` halves the largest term outright.
+
+Cheap hands stay cheap: everyone folding pre-flop reveals no community cards
+and reaches no showdown, costing **zero** verifications beyond the shuffle.
 
 ### 6.2 Still estimated
 
