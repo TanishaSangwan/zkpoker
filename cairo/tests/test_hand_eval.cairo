@@ -58,13 +58,49 @@ fn card(rank: u8, suit: u8) -> u8 {
     suit * 13 + rank
 }
 
-fn advance_to_showdown(game: zkpoker::IPokerGameDispatcher, table_id: felt252) {
-    start_cheat_caller_address(game.contract_address, DEALER());
-    game.advance_street(table_id); // PreFlop -> Flop
-    game.advance_street(table_id); // Flop -> Turn
-    game.advance_street(table_id); // Turn -> River
-    game.advance_street(table_id); // River -> Showdown
+// Bet matching: a street can only end once every seat still in the hand
+// has acted since the last raise and matched the high. Nobody is betting
+// on these streets, so they check -- a silent street still has to be
+// played out, which is exactly what advance_street used to let you skip.
+fn check_seat(
+    game: zkpoker::IPokerGameDispatcher,
+    table_id: felt252,
+    who: starknet::ContractAddress,
+    seat: felt252,
+) {
+    start_cheat_caller_address(game.contract_address, who);
+    game.check(table_id, seat);
     stop_cheat_caller_address(game.contract_address);
+}
+
+fn advance_only(game: zkpoker::IPokerGameDispatcher, table_id: felt252) {
+    start_cheat_caller_address(game.contract_address, DEALER());
+    game.advance_street(table_id);
+    stop_cheat_caller_address(game.contract_address);
+}
+
+fn advance_to_showdown(game: zkpoker::IPokerGameDispatcher, table_id: felt252) {
+    advance_only(game, table_id); // PreFlop -> Flop
+    let mut n: u32 = 0;
+    while n != 3 {
+        check_seat(game, table_id, ALICE(), SEAT_0);
+        check_seat(game, table_id, BOB(), SEAT_1);
+        advance_only(game, table_id);
+        n += 1;
+    }
+}
+
+// Same, for the 3-seat fixture.
+fn advance_to_showdown_three(game: zkpoker::IPokerGameDispatcher, table_id: felt252) {
+    advance_only(game, table_id);
+    let mut n: u32 = 0;
+    while n != 3 {
+        check_seat(game, table_id, ALICE(), SEAT_0);
+        check_seat(game, table_id, BOB(), SEAT_1);
+        check_seat(game, table_id, CAROL(), SEAT_2);
+        advance_only(game, table_id);
+        n += 1;
+    }
 }
 
 // Round 8: settle_table_by_hand now requires this — commits and reveals
@@ -464,7 +500,7 @@ fn test_settle_table_by_hand_three_seat_table() {
     // is sliced (3 seats instead of 2, community starting 2 slots later)
     // differs.
     commit_and_reveal(game, TABLE_1, CLEAR_WINNER_SEED);
-    advance_to_showdown(game, TABLE_1);
+    advance_to_showdown_three(game, TABLE_1);
 
     start_cheat_caller_address(game.contract_address, DEALER());
     game

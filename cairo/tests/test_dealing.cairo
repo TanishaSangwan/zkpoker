@@ -512,7 +512,7 @@ fn board() -> Array<u8> {
     array![card(0, 0), card(3, 1), card(5, 2), card(7, 3), card(9, 0)]
 }
 
-fn setup_showdown() -> zkpoker::IPokerGameDispatcher {
+fn setup_preflop_done() -> zkpoker::IPokerGameDispatcher {
     let (game, _v) = deploy_pokergame_with_verifier(POOL());
     let (token_addr, token, admin) = deploy_mock_token();
     super::helpers::fund_and_approve(token, admin, ALICE(), game.contract_address, 10_000);
@@ -522,15 +522,23 @@ fn setup_showdown() -> zkpoker::IPokerGameDispatcher {
     game.create_table(TABLE_1, token_addr, 0, TWO_SEATS);
     stop_cheat_caller_address(game.contract_address);
 
+    // Everyone seats BEFORE anyone bets. Turn order skips seats that have
+    // not joined, so betting into a half-empty table would leave the turn
+    // stuck on the only occupied seat.
     start_cheat_caller_address(game.contract_address, ALICE());
     game.join_table(TABLE_1, SEAT_0, NOTE_A);
     game.register_shuffle_key(TABLE_1, SEAT_0, PK_A_X, PK_A_Y, key_proof());
-    game.bet(TABLE_1, SEAT_0, 1_000);
     stop_cheat_caller_address(game.contract_address);
 
     start_cheat_caller_address(game.contract_address, BOB());
     game.join_table(TABLE_1, SEAT_1, NOTE_B);
     game.register_shuffle_key(TABLE_1, SEAT_1, PK_B_X, PK_B_Y, key_proof());
+    stop_cheat_caller_address(game.contract_address);
+
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.bet(TABLE_1, SEAT_0, 1_000);
+    stop_cheat_caller_address(game.contract_address);
+    start_cheat_caller_address(game.contract_address, BOB());
     game.bet(TABLE_1, SEAT_1, 1_000);
     stop_cheat_caller_address(game.contract_address);
 
@@ -546,13 +554,37 @@ fn setup_showdown() -> zkpoker::IPokerGameDispatcher {
 
     game.open_deck(TABLE_1, all_positions(), all_ciphertexts(), proof());
 
+    game
+}
+
+fn setup_showdown() -> zkpoker::IPokerGameDispatcher {
+    let game = setup_preflop_done();
+    advance(game); // PreFlop -> Flop; the bets above completed that round
+    let mut n: u32 = 0;
+    while n != 3 {
+        check_both(game);
+        advance(game);
+        n += 1;
+    }
+    game
+}
+
+fn advance(game: zkpoker::IPokerGameDispatcher) {
     start_cheat_caller_address(game.contract_address, DEALER());
     game.advance_street(TABLE_1);
-    game.advance_street(TABLE_1);
-    game.advance_street(TABLE_1);
-    game.advance_street(TABLE_1);
     stop_cheat_caller_address(game.contract_address);
-    game
+}
+
+// A street with no betting still has to be played out: every seat still in
+// the hand must act before it can end. That is the rule advance_street used
+// to let you skip entirely.
+fn check_both(game: zkpoker::IPokerGameDispatcher) {
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.check(TABLE_1, SEAT_0);
+    stop_cheat_caller_address(game.contract_address);
+    start_cheat_caller_address(game.contract_address, BOB());
+    game.check(TABLE_1, SEAT_1);
+    stop_cheat_caller_address(game.contract_address);
 }
 
 fn reveal_board(game: zkpoker::IPokerGameDispatcher) {
@@ -617,10 +649,19 @@ fn test_settle_from_reveals_tie_splits_pot() {
 // demanded. Making them show would leak a hand nobody contested.
 #[test]
 fn test_settle_from_reveals_uncontested_needs_no_cards() {
-    let game = setup_showdown();
+    let game = setup_preflop_done();
+    advance(game); // PreFlop -> Flop
+    // BOB folds in turn on the flop. With one seat left the round is
+    // trivially complete, so the remaining streets need no action at all.
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.check(TABLE_1, SEAT_0);
+    stop_cheat_caller_address(game.contract_address);
     start_cheat_caller_address(game.contract_address, BOB());
     game.fold(TABLE_1, SEAT_1);
     stop_cheat_caller_address(game.contract_address);
+    advance(game);
+    advance(game);
+    advance(game);
 
     game.settle_from_reveals(TABLE_1);
     assert(game.get_pending_payout(NOTE_A) == 2_000, 'alice takes it uncontested');

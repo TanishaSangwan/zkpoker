@@ -7,10 +7,12 @@ use snforge_std::{
     stop_cheat_block_timestamp, stop_cheat_caller_address,
 };
 use zkpoker::mocks::IMockErc20AdminDispatcherTrait;
-use zkpoker::{IErc20DispatcherTrait, IPokerGameDispatcherTrait, PokerGame};
+use zkpoker::{
+    IErc20DispatcherTrait, IPokerGameDispatcherTrait, IPokerGameSafeDispatcherTrait, PokerGame,
+};
 use super::helpers::{
-    ALICE, DEALER, MALLORY, NOTE_A, SEAT_0, TABLE_1, TWO_SEATS, deploy_pokergame, deploy_mock_token,
-    fund_and_approve, setup_table_with_two_seats,
+    ALICE, BOB, DEALER, MALLORY, NOTE_A, SEAT_0, SEAT_1, TABLE_1, TWO_SEATS, deploy_pokergame,
+    deploy_mock_token, fund_and_approve, setup_table_with_two_seats,
 };
 
 const FUND: u256 = 10_000;
@@ -233,4 +235,171 @@ fn test_reclaim_stalled_bet_twice_rejected() {
     start_cheat_caller_address(game.contract_address, ALICE());
     game.reclaim_stalled_bet(TABLE_1, SEAT_0);
     game.reclaim_stalled_bet(TABLE_1, SEAT_0); // second reclaim: nothing left owed
+}
+
+
+// ─── turn order and bet matching ────────────────────────────────────────
+//
+// The gap these close: advance_street used to be callable at any moment and
+// bet/fold at any time by anyone seated, so a street could end with bets
+// unmatched and a player never given the chance to act. That is not poker.
+
+fn seated() -> zkpoker::IPokerGameDispatcher {
+    let (game, _t, _a, _ta) = setup_table_with_two_seats(FUND);
+    game
+}
+
+fn act_bet(game: zkpoker::IPokerGameDispatcher, who: starknet::ContractAddress, seat: felt252, amt: u128) {
+    start_cheat_caller_address(game.contract_address, who);
+    game.bet(TABLE_1, seat, amt);
+    stop_cheat_caller_address(game.contract_address);
+}
+
+#[test]
+fn test_action_starts_with_first_seat() {
+    let game = seated();
+    assert(game.get_action_turn(TABLE_1) == SEAT_0, 'seat 0 acts first');
+}
+
+#[test]
+#[feature("safe_dispatcher")]
+fn test_bet_out_of_turn_rejected() {
+    let game = seated();
+    let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
+    start_cheat_caller_address(game.contract_address, BOB());
+    let outcome = safe.bet(TABLE_1, SEAT_1, BET);
+    stop_cheat_caller_address(game.contract_address);
+    match outcome {
+        Result::Ok(_) => panic!("acted out of turn"),
+        Result::Err(p) => assert(*p.at(0) == 'NOT_YOUR_BETTING_TURN', 'wrong error'),
+    }
+}
+
+#[test]
+fn test_turn_passes_after_acting() {
+    let game = seated();
+    act_bet(game, ALICE(), SEAT_0, BET);
+    assert(game.get_action_turn(TABLE_1) == SEAT_1, 'turn should pass to seat 1');
+    assert(game.get_amount_to_call(TABLE_1, SEAT_1) == BET, 'bob owes the bet');
+}
+
+#[test]
+#[feature("safe_dispatcher")]
+fn test_calling_short_rejected() {
+    let game = seated();
+    act_bet(game, ALICE(), SEAT_0, BET);
+    let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
+    start_cheat_caller_address(game.contract_address, BOB());
+    let outcome = safe.bet(TABLE_1, SEAT_1, BET - 1);
+    stop_cheat_caller_address(game.contract_address);
+    match outcome {
+        Result::Ok(_) => panic!("called short"),
+        Result::Err(p) => assert(*p.at(0) == 'BET_BELOW_CALL_AMOUNT', 'wrong error'),
+    }
+}
+
+#[test]
+#[feature("safe_dispatcher")]
+fn test_check_facing_a_bet_rejected() {
+    let game = seated();
+    act_bet(game, ALICE(), SEAT_0, BET);
+    let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
+    start_cheat_caller_address(game.contract_address, BOB());
+    let outcome = safe.check(TABLE_1, SEAT_1);
+    stop_cheat_caller_address(game.contract_address);
+    match outcome {
+        Result::Ok(_) => panic!("checked while facing a bet"),
+        Result::Err(p) => assert(*p.at(0) == 'CANNOT_CHECK_FACING_BET', 'wrong error'),
+    }
+}
+
+#[test]
+fn test_round_completes_when_bets_match() {
+    let game = seated();
+    assert(!game.get_round_complete(TABLE_1), 'nobody has acted yet');
+    act_bet(game, ALICE(), SEAT_0, BET);
+    assert(!game.get_round_complete(TABLE_1), 'bob still to act');
+    act_bet(game, BOB(), SEAT_1, BET);
+    assert(game.get_round_complete(TABLE_1), 'both matched');
+}
+
+// The subtle one. A raise must reopen the action for players who already
+// acted -- otherwise the last raiser gets the final word for free and
+// everyone before them is committed to a price they never agreed to.
+#[test]
+fn test_raise_reopens_the_action() {
+    let game = seated();
+    act_bet(game, ALICE(), SEAT_0, BET);
+    act_bet(game, BOB(), SEAT_1, BET * 2); // raise
+    assert(!game.get_round_complete(TABLE_1), 'raise must reopen action');
+    assert(game.get_amount_to_call(TABLE_1, SEAT_0) == BET, 'alice owes the raise');
+    act_bet(game, ALICE(), SEAT_0, BET); // call the raise
+    assert(game.get_round_complete(TABLE_1), 'round closes once called');
+}
+
+#[test]
+#[feature("safe_dispatcher")]
+fn test_advance_street_with_unmatched_bets_rejected() {
+    let game = seated();
+    act_bet(game, ALICE(), SEAT_0, BET);
+    let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
+    start_cheat_caller_address(game.contract_address, DEALER());
+    let outcome = safe.advance_street(TABLE_1);
+    stop_cheat_caller_address(game.contract_address);
+    match outcome {
+        Result::Ok(_) => panic!("advanced with bets unmatched"),
+        Result::Err(p) => assert(*p.at(0) == 'BETTING_ROUND_INCOMPLETE', 'wrong error'),
+    }
+}
+
+#[test]
+#[feature("safe_dispatcher")]
+fn test_advance_street_before_anyone_acts_rejected() {
+    let game = seated();
+    let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
+    start_cheat_caller_address(game.contract_address, DEALER());
+    let outcome = safe.advance_street(TABLE_1);
+    stop_cheat_caller_address(game.contract_address);
+    match outcome {
+        Result::Ok(_) => panic!("advanced a street nobody played"),
+        Result::Err(p) => assert(*p.at(0) == 'BETTING_ROUND_INCOMPLETE', 'wrong error'),
+    }
+}
+
+#[test]
+fn test_check_around_completes_the_round() {
+    let game = seated();
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.check(TABLE_1, SEAT_0);
+    stop_cheat_caller_address(game.contract_address);
+    assert(!game.get_round_complete(TABLE_1), 'bob still to act');
+    start_cheat_caller_address(game.contract_address, BOB());
+    game.check(TABLE_1, SEAT_1);
+    stop_cheat_caller_address(game.contract_address);
+    assert(game.get_round_complete(TABLE_1), 'checked around');
+}
+
+// One player left is trivially complete: there is nobody to match.
+#[test]
+fn test_fold_leaves_round_complete() {
+    let game = seated();
+    act_bet(game, ALICE(), SEAT_0, BET);
+    start_cheat_caller_address(game.contract_address, BOB());
+    game.fold(TABLE_1, SEAT_1);
+    stop_cheat_caller_address(game.contract_address);
+    assert(game.get_round_complete(TABLE_1), 'one player left');
+}
+
+#[test]
+#[feature("safe_dispatcher")]
+fn test_fold_out_of_turn_rejected() {
+    let game = seated();
+    let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
+    start_cheat_caller_address(game.contract_address, BOB());
+    let outcome = safe.fold(TABLE_1, SEAT_1);
+    stop_cheat_caller_address(game.contract_address);
+    match outcome {
+        Result::Ok(_) => panic!("folded out of turn"),
+        Result::Err(p) => assert(*p.at(0) == 'NOT_YOUR_BETTING_TURN', 'wrong error'),
+    }
 }

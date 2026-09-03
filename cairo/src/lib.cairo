@@ -652,6 +652,20 @@ pub trait IPokerGame<TState> {
     // legal without a separate entrypoint.
     fn settle_from_reveals(ref self: TState, table_id: felt252);
 
+    // Act without putting anything in. Legal only when there is nothing to
+    // call -- facing a bet you must call, raise or fold. A street with no
+    // betting still needs every seat to act before it can end, which is why
+    // this exists rather than letting advance_street skip a silent round.
+    fn check(ref self: TState, table_id: felt252, seat: felt252);
+
+    // Seat index whose turn it is to act.
+    fn get_action_turn(self: @TState, table_id: felt252) -> felt252;
+    // What this seat must add to call. 0 means it may check.
+    fn get_amount_to_call(self: @TState, table_id: felt252, seat: felt252) -> u128;
+    fn get_street_contributed(self: @TState, table_id: felt252, seat: felt252) -> u128;
+    // Whether advance_street would be accepted right now.
+    fn get_round_complete(self: @TState, table_id: felt252) -> bool;
+
     // ── Views ───────────────────────────────────────────────────────────
     fn get_shuffle_commitment(self: @TState, table_id: felt252) -> u256;
     fn get_shuffle_turn(self: @TState, table_id: felt252) -> u32;
@@ -758,6 +772,10 @@ pub mod PokerGame {
         pub const COMMUNITY_INCOMPLETE: felt252 = 'COMMUNITY_NOT_REVEALED';
         pub const HOLE_NOT_REVEALED: felt252 = 'HOLE_NOT_REVEALED';
         pub const NO_CONTENDERS: felt252 = 'NO_CONTENDERS';
+        pub const NOT_BETTING_TURN: felt252 = 'NOT_YOUR_BETTING_TURN';
+        pub const BELOW_CALL: felt252 = 'BET_BELOW_CALL_AMOUNT';
+        pub const MUST_CALL: felt252 = 'CANNOT_CHECK_FACING_BET';
+        pub const ROUND_INCOMPLETE: felt252 = 'BETTING_ROUND_INCOMPLETE';
         pub const DEADLINE_PASSED: felt252 = 'SHUFFLE_DEADLINE_PASSED';
         pub const DEADLINE_NOT_PASSED: felt252 = 'DEADLINE_NOT_PASSED';
         pub const TABLE_VOIDED: felt252 = 'TABLE_VOIDED';
@@ -897,6 +915,20 @@ pub mod PokerGame {
         opened_c2_y: Map<(felt252, u32), u256>,
         position_opened: Map<(felt252, u32), bool>,
         deck_opened: Map<felt252, bool>,
+
+        // ── Betting rounds ───────────────────────────────────────────
+        // Keyed by street so advancing needs no reset loop.
+        street_contributed: Map<(felt252, u8, felt252), u128>,
+        // The amount to call on this street.
+        street_high: Map<(felt252, u8), u128>,
+        // Seat index whose turn it is to act.
+        action_turn: Map<felt252, u32>,
+        // A raise reopens the action: everyone who already acted must act
+        // again. Bumping an epoch does that without touching per-seat
+        // state. Stored 0 means "never bumped" and reads as 1, so a seat's
+        // acted-epoch of 0 can never equal a live epoch.
+        aggression_epoch: Map<(felt252, u8), u32>,
+        seat_acted_epoch: Map<(felt252, u8, felt252), u32>,
         // Community cards, plaintext once revealed.
         community_card: Map<(felt252, u32), u8>,
         community_revealed: Map<(felt252, u32), bool>,
@@ -944,6 +976,7 @@ pub mod PokerGame {
         Shuffled: Shuffled,
         ShuffleComplete: ShuffleComplete,
         TableVoided: TableVoided,
+        Checked: Checked,
         DeckOpened: DeckOpened,
         CommunityCardRevealed: CommunityCardRevealed,
         HoleSharesCommitted: HoleSharesCommitted,
@@ -1089,6 +1122,14 @@ pub mod PokerGame {
     }
 
     #[derive(Drop, starknet::Event)]
+    pub struct Checked {
+        #[key]
+        pub table_id: felt252,
+        pub seat: felt252,
+        pub street: u8,
+    }
+
+    #[derive(Drop, starknet::Event)]
     pub struct DeckOpened {
         #[key]
         pub table_id: felt252,
@@ -1205,6 +1246,127 @@ pub mod PokerGame {
             self.table_pot.entry(table_id).write(0);
             self.table_settled.entry(table_id).write(true);
             self.emit(Settled { table_id, winner_count: winners.len() });
+        }
+
+        // Stored 0 means the epoch has never been bumped; it reads as 1.
+        // Keeping 0 as "unset" lets seat_acted_epoch default to 0 and
+        // never collide with a live epoch.
+        fn epoch_of(self: @ContractState, table_id: felt252, street: u8) -> u32 {
+            let e = self.aggression_epoch.entry((table_id, street)).read();
+            if e == 0 {
+                1
+            } else {
+                e
+            }
+        }
+
+        // Seated and still in the hand.
+        fn is_active(self: @ContractState, table_id: felt252, seat: felt252) -> bool {
+            self.seat_owner.entry((table_id, seat)).read().is_non_zero()
+                && !self.seat_folded.entry((table_id, seat)).read()
+        }
+
+        fn active_count(self: @ContractState, table_id: felt252) -> u32 {
+            let max_seats = self.table_max_seats.entry(table_id).read();
+            let mut n: u32 = 0;
+            let mut i: u32 = 0;
+            loop {
+                if i == max_seats {
+                    break;
+                }
+                if self.is_active(table_id, i.into()) {
+                    n += 1;
+                }
+                i += 1;
+            };
+            n
+        }
+
+        // Requires `seat` to be the seat on turn. This is what stops a
+        // player acting out of order, and with it the whole idea of a
+        // betting round having a defined end.
+        fn assert_on_turn(self: @ContractState, table_id: felt252, seat: felt252) {
+            let turn = self.action_turn.entry(table_id).read();
+            let expected: felt252 = turn.into();
+            assert(expected == seat, errors::NOT_BETTING_TURN);
+        }
+
+        // Move to the next seat still in the hand, wrapping. Bounded by
+        // max_seats so a table of all-folded seats cannot spin.
+        fn advance_turn(ref self: ContractState, table_id: felt252) {
+            let max_seats = self.table_max_seats.entry(table_id).read();
+            let start = self.action_turn.entry(table_id).read();
+            let mut step: u32 = 1;
+            loop {
+                if step > max_seats {
+                    break;
+                }
+                let cand = (start + step) % max_seats;
+                if self.is_active(table_id, cand.into()) {
+                    self.action_turn.entry(table_id).write(cand);
+                    break;
+                }
+                step += 1;
+            };
+        }
+
+        // Records that `seat` acted in the current epoch, then passes the
+        // turn.
+        fn mark_acted(ref self: ContractState, table_id: felt252, seat: felt252) {
+            let street = self.table_street.entry(table_id).read();
+            let epoch = self.epoch_of(table_id, street);
+            self.seat_acted_epoch.entry((table_id, street, seat)).write(epoch);
+            self.advance_turn(table_id);
+        }
+
+        // A street is over when every seat still in the hand has acted
+        // since the last raise AND has put in the same amount. Both halves
+        // are needed: matching alone would end the round before players
+        // behind a caller had spoken, and acting alone would let someone
+        // call short.
+        fn round_complete(self: @ContractState, table_id: felt252) -> bool {
+            if self.active_count(table_id) <= 1 {
+                return true;
+            }
+            let street = self.table_street.entry(table_id).read();
+            let epoch = self.epoch_of(table_id, street);
+            let high = self.street_high.entry((table_id, street)).read();
+            let max_seats = self.table_max_seats.entry(table_id).read();
+            let mut ok = true;
+            let mut i: u32 = 0;
+            loop {
+                if i == max_seats {
+                    break;
+                }
+                let seat: felt252 = i.into();
+                if self.is_active(table_id, seat) {
+                    let acted = self.seat_acted_epoch.entry((table_id, street, seat)).read();
+                    let put_in = self.street_contributed.entry((table_id, street, seat)).read();
+                    if acted != epoch || put_in != high {
+                        ok = false;
+                        break;
+                    }
+                }
+                i += 1;
+            };
+            ok
+        }
+
+        // Start-of-street: action begins with the lowest-numbered seat
+        // still in the hand.
+        fn reset_turn(ref self: ContractState, table_id: felt252) {
+            let max_seats = self.table_max_seats.entry(table_id).read();
+            let mut i: u32 = 0;
+            loop {
+                if i == max_seats {
+                    break;
+                }
+                if self.is_active(table_id, i.into()) {
+                    self.action_turn.entry(table_id).write(i);
+                    break;
+                }
+                i += 1;
+            };
         }
 
         fn register_note_id_owner(
@@ -1352,6 +1514,10 @@ pub mod PokerGame {
             let caller = get_caller_address();
             assert(caller == self.seat_owner.entry((table_id, seat)).read(), errors::NOT_SEAT_OWNER);
             assert(!self.seat_folded.entry((table_id, seat)).read(), errors::FOLDED);
+            // Turn order. Without this a player could act out of position
+            // -- seeing what everyone else does before committing -- and no
+            // betting round would ever have a well-defined end.
+            self.assert_on_turn(table_id, seat);
             // Security review (round 3, Finding 3): table_token is pinned
             // once by whoever called create_table, with no allowlist, so
             // this call is to a caller-controlled contract in general.
@@ -1375,6 +1541,25 @@ pub mod PokerGame {
 
             let pot_entry = self.table_pot.entry(table_id);
             pot_entry.write(pot_entry.read() + received);
+
+            // Bet matching. A seat's total for the street must reach the
+            // current high, or it has not called. Anything above is a
+            // raise, which reopens the action for everyone who already
+            // acted -- that is what the epoch bump does.
+            let street = self.table_street.entry(table_id).read();
+            let sc_entry = self.street_contributed.entry((table_id, street, seat));
+            let put_in = sc_entry.read() + received;
+            sc_entry.write(put_in);
+
+            let high_entry = self.street_high.entry((table_id, street));
+            let high = high_entry.read();
+            assert(put_in >= high, errors::BELOW_CALL);
+            if put_in > high {
+                high_entry.write(put_in);
+                let e = self.epoch_of(table_id, street);
+                self.aggression_epoch.entry((table_id, street)).write(e + 1);
+            }
+            self.mark_acted(table_id, seat);
             // Security review (round 3, Finding 2): tracks what this seat
             // can reclaim via reclaim_stalled_bet if the table never settles.
             let contributed_entry = self.seat_contributed.entry((table_id, seat));
@@ -1435,6 +1620,12 @@ pub mod PokerGame {
             // Security review follow-up: same seat-ownership check as bet —
             // previously any caller could force-fold any seat at any table.
             assert(get_caller_address() == self.seat_owner.entry((table_id, seat)).read(), errors::NOT_SEAT_OWNER);
+            assert(!self.seat_folded.entry((table_id, seat)).read(), errors::FOLDED);
+            self.assert_on_turn(table_id, seat);
+            // Pass the turn BEFORE folding: advance_turn skips inactive
+            // seats, so folding first would make this seat un-skippable as
+            // the search start and could land the turn back on itself.
+            self.advance_turn(table_id);
             self.seat_folded.entry((table_id, seat)).write(true);
             self.emit(Fold { table_id, seat });
         }
@@ -1446,8 +1637,16 @@ pub mod PokerGame {
             let street_entry = self.table_street.entry(table_id);
             let current = street_entry.read();
             assert(current != SHOWDOWN_STREET, errors::BETTING_CLOSED);
+            // The gap this closes: previously a street could be advanced at
+            // any moment, so bets never had to be matched and a player
+            // could be skipped entirely. Now every seat still in the hand
+            // must have acted since the last raise and put in the same
+            // amount -- or be the only one left.
+            assert(self.round_complete(table_id), errors::ROUND_INCOMPLETE);
             let next = current + 1;
             street_entry.write(next);
+            // Action reopens from the first seat still in the hand.
+            self.reset_turn(table_id);
             self.emit(StreetAdvanced { table_id, street: next });
         }
 
@@ -2125,6 +2324,55 @@ pub mod PokerGame {
 
         fn get_deck_opened(self: @ContractState, table_id: felt252) -> bool {
             self.deck_opened.entry(table_id).read()
+        }
+
+        fn check(ref self: ContractState, table_id: felt252, seat: felt252) {
+            assert(self.table_exists.entry(table_id).read(), errors::NO_TABLE);
+            assert(!self.table_settled.entry(table_id).read(), errors::ALREADY_SETTLED);
+            assert(!self.table_voided.entry(table_id).read(), errors::TABLE_VOIDED);
+            let street = self.table_street.entry(table_id).read();
+            assert(street != SHOWDOWN_STREET, errors::BETTING_CLOSED);
+            assert(
+                get_caller_address() == self.seat_owner.entry((table_id, seat)).read(),
+                errors::NOT_SEAT_OWNER,
+            );
+            assert(!self.seat_folded.entry((table_id, seat)).read(), errors::FOLDED);
+            self.assert_on_turn(table_id, seat);
+            // Facing a bet you must call, raise or fold -- checking would be
+            // acting for free while behind.
+            let high = self.street_high.entry((table_id, street)).read();
+            let put_in = self.street_contributed.entry((table_id, street, seat)).read();
+            assert(put_in == high, errors::MUST_CALL);
+            self.mark_acted(table_id, seat);
+            self.emit(Checked { table_id, seat, street });
+        }
+
+        fn get_action_turn(self: @ContractState, table_id: felt252) -> felt252 {
+            self.action_turn.entry(table_id).read().into()
+        }
+
+        fn get_amount_to_call(
+            self: @ContractState, table_id: felt252, seat: felt252,
+        ) -> u128 {
+            let street = self.table_street.entry(table_id).read();
+            let high = self.street_high.entry((table_id, street)).read();
+            let put_in = self.street_contributed.entry((table_id, street, seat)).read();
+            if high > put_in {
+                high - put_in
+            } else {
+                0
+            }
+        }
+
+        fn get_street_contributed(
+            self: @ContractState, table_id: felt252, seat: felt252,
+        ) -> u128 {
+            let street = self.table_street.entry(table_id).read();
+            self.street_contributed.entry((table_id, street, seat)).read()
+        }
+
+        fn get_round_complete(self: @ContractState, table_id: felt252) -> bool {
+            self.round_complete(table_id)
         }
 
         fn settle_from_reveals(ref self: ContractState, table_id: felt252) {

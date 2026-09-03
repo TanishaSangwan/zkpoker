@@ -609,9 +609,9 @@ but "should be" is not "measured," and the entire client-side story rests on it.
   uncontested pot needs no cards shown at all.
 - The accusation path (§8) and the threshold decision.
 - Any client UI for the above; browser proving.
-- **Bet-matching and turn-order enforcement** — `advance_street` still lets anyone
-  advance at any time, and bet/fold is always open. A perfect shuffle on a game
-  that is not poker is not a demo.
+- ~~Bet-matching and turn-order enforcement~~ — **done.** `bet`/`fold`/`check`
+  are turn-ordered; a street cannot end until every seat still in the hand has
+  acted since the last raise and matched the high; a raise reopens the action.
 
 **To be deleted:** V1 commit-reveal (`commit_deal`/`reveal_seed`/`shuffle.cairo`),
 `MockShuffleVerifier`, the seed-based fairness UI.

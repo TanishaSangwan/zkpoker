@@ -10,8 +10,9 @@ use snforge_std::{
 use zkpoker::mocks::{IMockErc20AdminDispatcher, IMockErc20AdminDispatcherTrait};
 use zkpoker::{IPokerGameDispatcherTrait, PokerGame};
 use super::helpers::{
-    ALICE, BOB, DEALER, MALLORY, NOTE_A, NOTE_B, POOL, SEAT_0, SEAT_1, TABLE_1, TABLE_2, TWO_SEATS,
-    deploy_pokergame, deploy_mock_token, fund_and_approve, setup_table_with_bets, setup_table_with_two_seats,
+    ALICE, BOB, CAROL, DEALER, MALLORY, NOTE_A, NOTE_B, NOTE_C, POOL, SEAT_0, SEAT_1, SEAT_2,
+    TABLE_1, TABLE_2, THREE_SEATS, TWO_SEATS, deploy_pokergame, deploy_mock_token, fund_and_approve,
+    setup_table_with_bets, setup_table_with_two_seats,
 };
 
 const FUND: u256 = 10_000;
@@ -43,25 +44,55 @@ fn test_settle_table_success_single_winner() {
         );
 }
 
+// Three seated players, funded and approved. Local to this file: only the
+// remainder test needs an odd pot, which two players can no longer produce.
+fn deploy_and_seat_three(amount: u256) -> zkpoker::IPokerGameDispatcher {
+    let game = deploy_pokergame(POOL());
+    let (token_addr, token, admin) = deploy_mock_token();
+    start_cheat_caller_address(game.contract_address, DEALER());
+    game.create_table(TABLE_1, token_addr, 0, THREE_SEATS);
+    stop_cheat_caller_address(game.contract_address);
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.join_table(TABLE_1, SEAT_0, NOTE_A);
+    stop_cheat_caller_address(game.contract_address);
+    start_cheat_caller_address(game.contract_address, BOB());
+    game.join_table(TABLE_1, SEAT_1, NOTE_B);
+    stop_cheat_caller_address(game.contract_address);
+    start_cheat_caller_address(game.contract_address, CAROL());
+    game.join_table(TABLE_1, SEAT_2, NOTE_C);
+    stop_cheat_caller_address(game.contract_address);
+    fund_and_approve(token, admin, ALICE(), game.contract_address, amount);
+    fund_and_approve(token, admin, BOB(), game.contract_address, amount);
+    fund_and_approve(token, admin, CAROL(), game.contract_address, amount);
+    game
+}
+
 #[test]
 fn test_settle_table_remainder_credited_to_first_winner() {
     // Round 1 Finding 4 regression: the integer-division remainder must
     // land somewhere, not be silently stranded while table_pot is zeroed.
-    let (game, _token, _admin, _token_addr) = setup_table_with_two_seats(FUND);
+    // Bet matching now forbids calling short, so an odd pot can no longer
+    // be made by two players contributing different amounts. Three players
+    // each putting in an odd amount gives the same uneven split: 3003
+    // across 2 winners is 1501 each with 1 left over.
+    let game = deploy_and_seat_three(FUND);
     start_cheat_caller_address(game.contract_address, ALICE());
-    game.bet(TABLE_1, SEAT_0, 1500);
+    game.bet(TABLE_1, SEAT_0, 1001);
     stop_cheat_caller_address(game.contract_address);
     start_cheat_caller_address(game.contract_address, BOB());
     game.bet(TABLE_1, SEAT_1, 1001);
     stop_cheat_caller_address(game.contract_address);
-    // pot = 2501, 2 winners -> share 1250, remainder 1
+    start_cheat_caller_address(game.contract_address, CAROL());
+    game.bet(TABLE_1, SEAT_2, 1001);
+    stop_cheat_caller_address(game.contract_address);
+    // pot = 3003, 2 winners -> share 1501, remainder 1
 
     start_cheat_caller_address(game.contract_address, DEALER());
     game.settle_table(TABLE_1, array![SEAT_0, SEAT_1].span(), array![NOTE_A, NOTE_B].span());
     stop_cheat_caller_address(game.contract_address);
 
-    assert(game.get_pending_payout(NOTE_A) == 1251, 'winner 0 should get remainder');
-    assert(game.get_pending_payout(NOTE_B) == 1250, 'winner 1 gets plain share');
+    assert(game.get_pending_payout(NOTE_A) == 1502, 'winner 0 should get remainder');
+    assert(game.get_pending_payout(NOTE_B) == 1501, 'winner 1 gets plain share');
 }
 
 #[test]
