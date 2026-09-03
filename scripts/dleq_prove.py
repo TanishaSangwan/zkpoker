@@ -172,6 +172,47 @@ def aggregate(secrets: list[int], h: G1Point, rng: random.Random):
     return proof, public_inputs, {"Y": Y, "D": D, "e": e, "S": S}
 
 
+def card_reveal(card: int, n_parties: int, rng: random.Random, tamper: bool = False):
+    """Full card-reveal case: encrypt a card under a joint key, aggregate every
+    party's decryption share, and prove the result is that card.
+
+    Mirrors what the contract does end to end:
+
+        M_c = (c+1)*G                       card encoding (card_table.cairo)
+        c1  = r*G,  c2 = M_c + r*Y          ElGamal under joint key Y = X*G
+        D   = sum(x_i * c1) = X*c1 = r*Y    aggregated decryption shares
+        m   = c2 - D = M_c                  what the verifier recomputes
+
+    `tamper` claims the wrong card, which must be rejected.
+    """
+    secrets = [rng.randrange(1, N) for _ in range(n_parties)]
+    Y = G.scalar_mul(secrets[0])
+    for x in secrets[1:]:
+        Y = Y.add(G.scalar_mul(x))
+
+    r = rng.randrange(1, N)
+    c1 = G.scalar_mul(r)
+    M = G.scalar_mul(card + 1)          # card encoding: (i+1)*G
+    c2 = M.add(Y.scalar_mul(r))         # M + r*Y
+
+    proof, public_inputs, dbg = aggregate(secrets, c1, rng)
+
+    # Sanity: the aggregate share must equal r*Y, and c2 - D must be M.
+    D = dbg["D"]
+    assert D == Y.scalar_mul(r), "aggregate share != r*Y"
+    neg_D = G1Point(D.x, (-D.y) % CURVE.p, CurveID.GRUMPKIN)
+    assert c2.add(neg_D) == M, "c2 - D != M_card"
+
+    claimed = (card + 1) % 52 if tamper else card
+    calldata = (
+        [len(proof)] + proof
+        + [len(public_inputs)] + public_inputs
+        + u256_pair(c2.x) + u256_pair(c2.y)
+        + [claimed]
+    )
+    return calldata, claimed
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--corrupt", action="store_true",
@@ -189,6 +230,13 @@ def main() -> int:
     ap.add_argument("--bad-aggregate", action="store_true",
                     help="with --aggregate: one party contributes a share computed from a "
                          "different secret, so D != X*H and the aggregate must fail")
+    ap.add_argument("--card", type=int, metavar="C", default=-1,
+                    help="full card-reveal case: encrypt card C under a joint key, "
+                         "aggregate every share, prove m = c2 - D is card C")
+    ap.add_argument("--parties", type=int, default=7,
+                    help="parties for --card (default 7 = 6 players + dealer)")
+    ap.add_argument("--wrong-card", action="store_true",
+                    help="with --card: claim the wrong card index; must be rejected")
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
 
@@ -197,6 +245,12 @@ def main() -> int:
     # Stand-in for a card ciphertext's c1. Any curve point works; using a
     # known multiple of G keeps this reproducible.
     h = G.scalar_mul(rng.randrange(1, N))
+
+    if args.card >= 0:
+        calldata, claimed = card_reveal(args.card, args.parties, rng, args.wrong_card)
+        print(f"# card {args.card}, {args.parties} parties, claiming {claimed}", file=sys.stderr)
+        print(" ".join(str(v) for v in calldata))
+        return 0
 
     if args.aggregate:
         secrets = [rng.randrange(1, N) for _ in range(args.aggregate)]

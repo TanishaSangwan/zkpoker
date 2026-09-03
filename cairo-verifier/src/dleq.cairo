@@ -36,6 +36,30 @@ pub trait IDleqVerifier<TState> {
     fn verify_decryption_share(
         self: @TState, proof: Span<felt252>, public_inputs: Span<felt252>,
     ) -> bool;
+
+    // Verifies a decryption share AND that removing it from the ciphertext
+    // yields the claimed card. This is the call PokerGame actually makes:
+    // it cannot do the point arithmetic itself, because that would drag
+    // Garaga into the game contract's dependency graph.
+    //
+    // The card index is CHECKED, not trusted -- the caller names a card and
+    // this recomputes m = c2 - D and compares against the encoding table.
+    // Naming the card costs one comparison instead of scanning all 52.
+    //
+    // In the aggregated flow (docs/PROTOCOL.md 6.2) the "share" is the sum
+    // of every party's share and `pk` is the table's JOINT key, so one call
+    // settles a card regardless of how many players sit at the table.
+    //
+    // public_inputs = [pk, h, d] as u256 low/high pairs, exactly as for
+    // verify_decryption_share, where h is the ciphertext's c1.
+    fn verify_card_reveal(
+        self: @TState,
+        proof: Span<felt252>,
+        public_inputs: Span<felt252>,
+        c2_x: u256,
+        c2_y: u256,
+        claimed_card: u8,
+    ) -> bool;
 }
 
 #[starknet::contract]
@@ -43,7 +67,8 @@ pub mod DleqVerifier {
     use core::poseidon::poseidon_hash_span;
     use garaga::basic_field_ops::neg_mod_p;
     use garaga::definitions::{G1Point, Zero, get_G, get_curve_order_modulus, get_n, u384};
-    use garaga::ec_ops::{G1PointTrait, msm_g1};
+    use garaga::ec_ops::{G1PointTrait, ec_safe_add, msm_g1};
+    use zkpoker_verifier::card_table::card_x;
 
     // Garaga curve id: 0 BN254, 1 BLS12_381, 2 SECP256K1, 3 SECP256R1,
     // 4 ED25519, 5 GRUMPKIN.
@@ -104,15 +129,14 @@ pub mod DleqVerifier {
         Option::Some(u256 { low: lo.unwrap(), high: hi.unwrap() })
     }
 
-    #[abi(embed_v0)]
-    impl DleqVerifierImpl of super::IDleqVerifier<ContractState> {
-        fn verify_decryption_share(
-            self: @ContractState, proof: Span<felt252>, public_inputs: Span<felt252>,
-        ) -> bool {
+    // Shared by both entrypoints. Returns the decryption share point D on
+    // success so the caller can subtract it, or None if anything about the
+    // proof or its inputs is wrong.
+    fn check_dleq(proof: Span<felt252>, public_inputs: Span<felt252>) -> Option<G1Point> {
             // Reject rather than panic on anything malformed: this is
             // called from PokerGame with caller-supplied data.
             if proof.len() != PROOF_LEN || public_inputs.len() != PUBLIC_INPUTS_LEN {
-                return false;
+                return Option::None;
             }
 
             let mut coords: Array<u256> = array![];
@@ -120,7 +144,7 @@ pub mod DleqVerifier {
             while i != PUBLIC_INPUTS_LEN {
                 match read_u256(public_inputs, i) {
                     Option::Some(v) => coords.append(v),
-                    Option::None => { return false; },
+                    Option::None => { return Option::None; },
                 }
                 i += 2;
             }
@@ -135,21 +159,21 @@ pub mod DleqVerifier {
             if !pk.is_on_curve_excluding_infinity(GRUMPKIN)
                 || !h.is_on_curve_excluding_infinity(GRUMPKIN)
                 || !d.is_on_curve_excluding_infinity(GRUMPKIN) {
-                return false;
+                return Option::None;
             }
 
             let s = match read_u256(proof, 0) {
                 Option::Some(v) => v,
-                Option::None => { return false; },
+                Option::None => { return Option::None; },
             };
             let e = match read_u256(proof, 2) {
                 Option::Some(v) => v,
-                Option::None => { return false; },
+                Option::None => { return Option::None; },
             };
 
             let n: u256 = get_n(GRUMPKIN);
             if s == 0 || s >= n || e == 0 || e >= n {
-                return false;
+                return Option::None;
             }
 
             let n_modulus = get_curve_order_modulus(GRUMPKIN);
@@ -166,12 +190,60 @@ pub mod DleqVerifier {
             let r2 = msm_g1(array![h, d].span(), array![s, e_neg].span(), GRUMPKIN, hint2);
 
             if r1.is_zero() || r2.is_zero() {
+                return Option::None;
+            }
+
+        let expected_e: felt252 = compute_challenge(pk, h, d, r1, r2);
+        let expected_e_u256: u256 = expected_e.into();
+        if e != expected_e_u256 {
+            return Option::None;
+        }
+        Option::Some(d)
+    }
+
+    #[abi(embed_v0)]
+    impl DleqVerifierImpl of super::IDleqVerifier<ContractState> {
+        fn verify_decryption_share(
+            self: @ContractState, proof: Span<felt252>, public_inputs: Span<felt252>,
+        ) -> bool {
+            check_dleq(proof, public_inputs).is_some()
+        }
+
+        fn verify_card_reveal(
+            self: @ContractState,
+            proof: Span<felt252>,
+            public_inputs: Span<felt252>,
+            c2_x: u256,
+            c2_y: u256,
+            claimed_card: u8,
+        ) -> bool {
+            if claimed_card >= 52 {
+                return false;
+            }
+            let d = match check_dleq(proof, public_inputs) {
+                Option::Some(v) => v,
+                Option::None => { return false; },
+            };
+
+            let c2 = G1Point { x: c2_x.into(), y: c2_y.into() };
+            if !c2.is_on_curve_excluding_infinity(GRUMPKIN) {
                 return false;
             }
 
-            let expected_e: felt252 = compute_challenge(pk, h, d, r1, r2);
-            let expected_e_u256: u256 = expected_e.into();
-            e == expected_e_u256
+            // m = c2 - D. With D = X*c1 for the joint secret X, this is the
+            // plaintext card point: c2 = M + X*c1 by construction, so
+            // subtracting a share proven to equal X*c1 recovers M exactly.
+            let m = ec_safe_add(c2, d.negate(GRUMPKIN), GRUMPKIN);
+            if m.is_zero() {
+                return false;
+            }
+
+            // Compare against the encoding table. x alone identifies the
+            // card: the 52 x-coordinates are distinct and m is a genuine
+            // curve point, so y is determined up to sign.
+            let expected_x = card_x(claimed_card);
+            let m_x: u256 = m.x.try_into().unwrap();
+            expected_x != 0 && m_x == expected_x
         }
     }
 }
