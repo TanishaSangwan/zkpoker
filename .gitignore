@@ -64,3 +64,12 @@ cairo-verifier/target/
 circuits/*/target/
 circuits/*/*/target/
 **/.snfoundry_cache/
+
+# starknet-skills ships ~2.4MB of datasets, eval fixtures and a website that
+# nothing in this repo's audit process reads. The skill modules and the
+# preflight script ARE tracked -- HANDOFF §2 explains why: the untracked copy
+# of this bundle did not survive the last machine move, and §5's procedure
+# cannot run without it.
+.agents/skills/starknet-skills/datasets/
+.agents/skills/starknet-skills/evals/
+.agents/skills/starknet-skills/website/

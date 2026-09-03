@@ -1,6 +1,12 @@
 {
   "version": 1,
   "skills": {
+    "starknet-skills": {
+      "source": "keep-starknet-strange/starknet-skills",
+      "sourceType": "github",
+      "skillPath": "SKILL.md",
+      "computedHash": "b9000f5ac910ecc81639a7dfb91336fd6ec1eca9421f47885e84a7b1d71aaf0e"
+    },
     "strk20-anonymizer-contracts": {
       "source": "welttowelt/strk20-skills",
       "sourceType": "github",

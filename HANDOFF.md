@@ -86,15 +86,18 @@ Historical (Windows):
   - **Present:** `strk20-privacy`, `strk20-anonymizer-contracts`,
     `strk20-privacy-sdk`, `strk20-wallet-api` — STRK20 concepts/SDK/wallet
     integration, from `welttowelt/strk20-skills`.
-  - **⚠️ MISSING on this machine:** `starknet-skills` (Keep Starknet
-    Strange) — the bundle containing `cairo-auditor`,
+  - **`starknet-skills`** (Keep Starknet Strange) — reinstalled and now
+    TRACKED IN GIT as of 2026-09-04, along with a `skills-lock.json` entry
+    recording its source (`keep-starknet-strange/starknet-skills`), which is
+    what was missing when it vanished the first time. Its `datasets/`,
+    `evals/` and `website/` subdirs are gitignored — ~2.4MB nothing in this
+    repo reads. Contains `cairo-auditor`,
     `cairo-contract-authoring`, `cairo-testing`, `cairo-optimization`,
     `cairo-toolchain`, `account-abstraction`, `starknet-network-facts`. It
     was installed on the old Windows machine, was never committed, and is
     gone. **§5's audit procedure reads files out of
-    `.agents/skills/starknet-skills/cairo-auditor/` and cannot run as
-    written until this is reinstalled** — do that before attempting the
-    round 9/10 audit that rounds 8 and 9 still need.
+    `.agents/skills/starknet-skills/cairo-auditor/` and RUNS AGAIN** — it
+    was used for the 2026-09-04 review of the dealing/betting surface.
   - Skills installed mid-conversation don't show up in that session's
     "available skills" listing — the `Skill` tool call fails with "Unknown
     skill" until a fresh session. **Workaround used throughout this
