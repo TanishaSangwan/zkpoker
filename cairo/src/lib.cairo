@@ -579,18 +579,24 @@ pub trait IPokerGame<TState> {
     // ── Dealing (docs/PROTOCOL.md §4 phases 2-4) ─────────────────────────
 
     // Binds the in-play ciphertexts to the deck the shuffle chain produced.
-    // `ciphertexts` is flat, four u256 per position: c1.x, c1.y, c2.x, c2.y.
-    // The contract supplies the deck hash to the verifier from its OWN
-    // storage rather than trusting the caller, so a proof about any other
-    // deck simply fails to verify. Callable once, by anyone -- the proof is
-    // self-authenticating, so who submits it does not matter.
-    fn open_deck(
-        ref self: TState,
-        table_id: felt252,
-        positions: Span<u32>,
-        ciphertexts: Span<u256>,
-        proof: Span<felt252>,
-    );
+    // `ciphertexts` is flat, four u256 per position: c1.x, c1.y, c2.x, c2.y,
+    // in canonical position order 0..2*max_seats+4 -- seat i's hole cards at
+    // 2i and 2i+1, then the five community cards.
+    //
+    // Positions are DERIVED on-chain, not supplied. An earlier version took
+    // them from the caller, which was a griefing hole: open_deck is one-shot
+    // and callable by anyone, the deck travels in public calldata so any
+    // observer can build a valid opening proof, and opening a single
+    // irrelevant position flipped deck_opened and left every later reveal
+    // failing POSITION_NOT_OPENED. The hand was permanently unplayable and
+    // the pot stuck until the reclaim timeout. Deriving the set removes the
+    // choice entirely.
+    //
+    // The deck hash also comes from storage rather than the caller, so a
+    // proof about any other deck simply fails to verify. Callable by anyone
+    // -- the proof is self-authenticating, so who submits it cannot change
+    // what it proves.
+    fn open_deck(ref self: TState, table_id: felt252, ciphertexts: Span<u256>, proof: Span<felt252>);
 
     // Reveals community card `index` (0-4: flop, flop, flop, turn, river).
     // `share` is the AGGREGATE of every party's decryption share and the
@@ -773,6 +779,7 @@ pub mod PokerGame {
         pub const HOLE_NOT_REVEALED: felt252 = 'HOLE_NOT_REVEALED';
         pub const NO_CONTENDERS: felt252 = 'NO_CONTENDERS';
         pub const NOT_BETTING_TURN: felt252 = 'NOT_YOUR_BETTING_TURN';
+        pub const LAST_PLAYER: felt252 = 'LAST_PLAYER_CANNOT_FOLD';
         pub const BELOW_CALL: felt252 = 'BET_BELOW_CALL_AMOUNT';
         pub const MUST_CALL: felt252 = 'CANNOT_CHECK_FACING_BET';
         pub const ROUND_INCOMPLETE: felt252 = 'BETTING_ROUND_INCOMPLETE';
@@ -1622,6 +1629,12 @@ pub mod PokerGame {
             assert(get_caller_address() == self.seat_owner.entry((table_id, seat)).read(), errors::NOT_SEAT_OWNER);
             assert(!self.seat_folded.entry((table_id, seat)).read(), errors::FOLDED);
             self.assert_on_turn(table_id, seat);
+            // The last player in the hand has already won it and must not be
+            // able to fold. Allowing it dropped the contender count to zero,
+            // after which settle_from_reveals reverts NO_CONTENDERS and the
+            // pot is stranded until the reclaim timeout -- a way to burn a
+            // pot nobody could then collect.
+            assert(self.active_count(table_id) > 1, errors::LAST_PLAYER);
             // Pass the turn BEFORE folding: advance_turn skips inactive
             // seats, so folding first would make this seat un-skippable as
             // the search start and could land the turn back on itself.
@@ -2142,7 +2155,6 @@ pub mod PokerGame {
         fn open_deck(
             ref self: ContractState,
             table_id: felt252,
-            positions: Span<u32>,
             ciphertexts: Span<u256>,
             proof: Span<felt252>,
         ) {
@@ -2152,8 +2164,21 @@ pub mod PokerGame {
             assert(self.shuffle_complete.entry(table_id).read(), errors::SHUFFLE_INCOMPLETE);
             assert(!self.deck_opened.entry(table_id).read(), errors::DECK_OPENED);
 
-            let k = positions.len();
-            assert(k != 0 && ciphertexts.len() == k * 4, errors::BAD_OPENING_LEN);
+            // Security: this makes an external call to the verifier. The
+            // verifier address is constructor-pinned so it is not
+            // caller-controlled the way bet()'s table_token is, but every
+            // other function that calls out here takes the lock (round 3
+            // finding 3, round 4 finding 2) and an inconsistent guard is
+            // the kind of gap a later change turns into a real one.
+            assert(!self.reentrancy_lock.read(), errors::REENTRANCY);
+            self.reentrancy_lock.write(true);
+
+            // Every in-play position, derived: 2*max_seats hole slots
+            // followed by 5 community slots. Not caller-supplied -- see the
+            // interface comment for the griefing hole that closed.
+            let max_seats = self.table_max_seats.entry(table_id).read();
+            let k = 2 * max_seats + 5;
+            assert(ciphertexts.len() == k * 4, errors::BAD_OPENING_LEN);
 
             // The deck hash comes from STORAGE, never from the caller. That
             // is the whole binding: a proof about any other deck cannot
@@ -2164,7 +2189,7 @@ pub mod PokerGame {
             inputs.append(deck_hash.high.into());
             let mut i: u32 = 0;
             while i != k {
-                let pos: u256 = (*positions.at(i)).into();
+                let pos: u256 = i.into();
                 inputs.append(pos.low.into());
                 inputs.append(pos.high.into());
                 i += 1;
@@ -2184,7 +2209,7 @@ pub mod PokerGame {
 
             let mut n: u32 = 0;
             while n != k {
-                let pos = *positions.at(n);
+                let pos = n;
                 let b = n * 4;
                 self.opened_c1_x.entry((table_id, pos)).write(*ciphertexts.at(b));
                 self.opened_c1_y.entry((table_id, pos)).write(*ciphertexts.at(b + 1));
@@ -2194,6 +2219,7 @@ pub mod PokerGame {
                 n += 1;
             }
             self.deck_opened.entry(table_id).write(true);
+            self.reentrancy_lock.write(false);
             self.emit(DeckOpened { table_id, positions: k, deck_hash });
         }
 
@@ -2219,9 +2245,19 @@ pub mod PokerGame {
             let pos = 2 * max_seats + index;
             assert(self.position_opened.entry((table_id, pos)).read(), errors::POSITION_NOT_OPENED);
 
+            // Security: this makes an external call to the verifier. The
+            // verifier address is constructor-pinned so it is not
+            // caller-controlled the way bet()'s table_token is, but every
+            // other function that calls out here takes the lock (round 3
+            // finding 3, round 4 finding 2) and an inconsistent guard is
+            // the kind of gap a later change turns into a real one.
+            assert(!self.reentrancy_lock.read(), errors::REENTRANCY);
+            self.reentrancy_lock.write(true);
+
             let card = self.verify_reveal_at(table_id, pos, share_x, share_y, claimed_card, proof);
             self.community_card.entry((table_id, index)).write(card);
             self.community_revealed.entry((table_id, index)).write(true);
+            self.reentrancy_lock.write(false);
             self.emit(CommunityCardRevealed { table_id, index, card });
         }
 
@@ -2296,9 +2332,19 @@ pub mod PokerGame {
             let pos = 2 * seat_u32 + slot;
             assert(self.position_opened.entry((table_id, pos)).read(), errors::POSITION_NOT_OPENED);
 
+            // Security: this makes an external call to the verifier. The
+            // verifier address is constructor-pinned so it is not
+            // caller-controlled the way bet()'s table_token is, but every
+            // other function that calls out here takes the lock (round 3
+            // finding 3, round 4 finding 2) and an inconsistent guard is
+            // the kind of gap a later change turns into a real one.
+            assert(!self.reentrancy_lock.read(), errors::REENTRANCY);
+            self.reentrancy_lock.write(true);
+
             let card = self.verify_reveal_at(table_id, pos, share_x, share_y, claimed_card, proof);
             self.hole_card.entry((table_id, seat, slot)).write(card);
             self.hole_revealed.entry((table_id, seat, slot)).write(true);
+            self.reentrancy_lock.write(false);
             self.emit(HoleCardRevealed { table_id, seat, slot, card });
         }
 

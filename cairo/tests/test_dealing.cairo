@@ -122,7 +122,7 @@ fn setup_opened() -> (
     zkpoker::IPokerGameDispatcher, zkpoker::mocks::IMockVerifierAdminTraitDispatcher,
 ) {
     let (game, verifier) = setup_shuffled();
-    game.open_deck(TABLE_1, all_positions(), all_ciphertexts(), proof());
+    game.open_deck(TABLE_1, all_ciphertexts(), proof());
     (game, verifier)
 }
 
@@ -132,7 +132,7 @@ fn setup_opened() -> (
 fn test_open_deck_success_and_event() {
     let (game, _v) = setup_shuffled();
     let mut spy = spy_events();
-    game.open_deck(TABLE_1, all_positions(), all_ciphertexts(), proof());
+    game.open_deck(TABLE_1, all_ciphertexts(), proof());
     assert(game.get_deck_opened(TABLE_1), 'deck not marked opened');
     spy
         .assert_emitted(
@@ -153,7 +153,7 @@ fn test_open_deck_success_and_event() {
 fn test_open_deck_callable_by_non_participant() {
     let (game, _v) = setup_shuffled();
     start_cheat_caller_address(game.contract_address, MALLORY());
-    game.open_deck(TABLE_1, all_positions(), all_ciphertexts(), proof());
+    game.open_deck(TABLE_1, all_ciphertexts(), proof());
     stop_cheat_caller_address(game.contract_address);
     assert(game.get_deck_opened(TABLE_1), 'deck not opened');
 }
@@ -168,7 +168,7 @@ fn test_open_deck_before_shuffle_complete_rejected() {
     stop_cheat_caller_address(game.contract_address);
 
     let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
-    let outcome = safe.open_deck(TABLE_1, all_positions(), all_ciphertexts(), proof());
+    let outcome = safe.open_deck(TABLE_1, all_ciphertexts(), proof());
     match outcome {
         Result::Ok(_) => panic!("opened a deck before the shuffle finished"),
         Result::Err(panic_data) => assert(
@@ -182,7 +182,7 @@ fn test_open_deck_before_shuffle_complete_rejected() {
 fn test_open_deck_twice_rejected() {
     let (game, _v) = setup_opened();
     let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
-    let outcome = safe.open_deck(TABLE_1, all_positions(), all_ciphertexts(), proof());
+    let outcome = safe.open_deck(TABLE_1, all_ciphertexts(), proof());
     match outcome {
         Result::Ok(_) => panic!("reopened the deck"),
         Result::Err(panic_data) => assert(
@@ -198,10 +198,9 @@ fn test_open_deck_twice_rejected() {
 fn test_open_deck_mismatched_lengths_rejected() {
     let (game, _v) = setup_shuffled();
     let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
-    let outcome = safe
-        .open_deck(TABLE_1, array![0_u32, 1_u32].span(), ct('X').span(), proof());
+    let outcome = safe.open_deck(TABLE_1, ct('X').span(), proof());
     match outcome {
-        Result::Ok(_) => panic!("accepted 2 positions with 1 ciphertext"),
+        Result::Ok(_) => panic!("accepted a short ciphertext array"),
         Result::Err(panic_data) => assert(
             *panic_data.at(0) == 'BAD_OPENING_LENGTH', 'wrong error',
         ),
@@ -214,7 +213,7 @@ fn test_open_deck_rejected_proof() {
     let (game, verifier) = setup_shuffled();
     verifier.set_reject_opening(true);
     let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
-    let outcome = safe.open_deck(TABLE_1, all_positions(), all_ciphertexts(), proof());
+    let outcome = safe.open_deck(TABLE_1, all_ciphertexts(), proof());
     match outcome {
         Result::Ok(_) => panic!("accepted a rejected opening proof"),
         Result::Err(panic_data) => assert(
@@ -552,7 +551,7 @@ fn setup_preflop_done() -> zkpoker::IPokerGameDispatcher {
     game.submit_shuffle(TABLE_1, DECK_2, proof());
     stop_cheat_caller_address(game.contract_address);
 
-    game.open_deck(TABLE_1, all_positions(), all_ciphertexts(), proof());
+    game.open_deck(TABLE_1, all_ciphertexts(), proof());
 
     game
 }
@@ -741,4 +740,66 @@ fn test_settle_from_reveals_before_showdown_rejected() {
         Result::Ok(_) => panic!("settled before showdown"),
         Result::Err(panic_data) => assert(*panic_data.at(0) == 'NOT_SHOWDOWN', 'wrong error'),
     }
+}
+
+// ─── AUDIT: proof-of-concept for suspected findings ─────────────────────
+
+// AUDIT FINDING 1, fixed. open_deck is one-shot and callable by anyone, and
+// the deck travels in public calldata, so any observer can build a valid
+// opening proof. When positions were caller-supplied, opening one irrelevant
+// position flipped deck_opened and left every later reveal failing
+// POSITION_NOT_OPENED -- the hand was permanently unplayable and the pot
+// stuck until the reclaim timeout. Positions are now derived on-chain, so a
+// partial open cannot be expressed at all.
+#[test]
+#[feature("safe_dispatcher")]
+fn test_open_deck_partial_open_is_unexpressible() {
+    let (game, _v) = setup_shuffled();
+    let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
+    start_cheat_caller_address(game.contract_address, MALLORY());
+    let outcome = safe.open_deck(TABLE_1, ct('X').span(), proof());
+    stop_cheat_caller_address(game.contract_address);
+    match outcome {
+        Result::Ok(_) => panic!("griefer opened a partial deck"),
+        Result::Err(p) => assert(*p.at(0) == 'BAD_OPENING_LENGTH', 'must cover every slot'),
+    }
+    assert(!game.get_deck_opened(TABLE_1), 'deck must stay unopened');
+
+    // And a full, honest open still covers every in-play position.
+    game.open_deck(TABLE_1, all_ciphertexts(), proof());
+    game.reveal_community_card(TABLE_1, 0, SHARE_X, SHARE_Y, 7, proof());
+    assert(game.get_community_revealed(TABLE_1, 0), 'board still revealable');
+}
+
+// AUDIT FINDING 2, fixed. The last player in the hand has already won it.
+// Letting them fold dropped the contender count to zero, after which
+// settle_from_reveals reverts NO_CONTENDERS and the pot is stranded until
+// the reclaim timeout -- a way to burn a pot nobody could collect.
+#[test]
+#[feature("safe_dispatcher")]
+fn test_last_player_cannot_fold() {
+    let game = setup_preflop_done();
+    advance(game); // PreFlop -> Flop
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.check(TABLE_1, SEAT_0);
+    stop_cheat_caller_address(game.contract_address);
+    start_cheat_caller_address(game.contract_address, BOB());
+    game.fold(TABLE_1, SEAT_1);
+    stop_cheat_caller_address(game.contract_address);
+    // ALICE has won and must not be able to fold it away.
+    let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
+    start_cheat_caller_address(game.contract_address, ALICE());
+    let outcome = safe.fold(TABLE_1, SEAT_0);
+    stop_cheat_caller_address(game.contract_address);
+    match outcome {
+        Result::Ok(_) => panic!("last player folded and stranded the pot"),
+        Result::Err(p) => assert(*p.at(0) == 'LAST_PLAYER_CANNOT_FOLD', 'wrong error'),
+    }
+
+    // The pot is still collectable.
+    advance(game);
+    advance(game);
+    advance(game);
+    game.settle_from_reveals(TABLE_1);
+    assert(game.get_pending_payout(NOTE_A) == 2_000, 'alice collects');
 }
