@@ -107,7 +107,14 @@ def prove(x: int, h: G1Point, rng: random.Random):
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--corrupt", action="store_true",
-                    help="flip one felt of the proof, for the on-chain negative test")
+                    help="flip one felt mid-proof. NOTE: this lands in the MSM hint, so "
+                         "Garaga panics on 'Wrong FakeGLV decomposition' rather than the "
+                         "DLEQ equation failing -- it tests hint integrity, not soundness")
+    ap.add_argument("--wrong-share", action="store_true",
+                    help="the attack that matters: a decryption share computed with a "
+                         "DIFFERENT secret than the registered key, everything else "
+                         "internally consistent. This is a dishonest player trying to make "
+                         "their card decrypt to something they prefer")
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
 
@@ -117,7 +124,30 @@ def main() -> int:
     # known multiple of G keeps this reproducible.
     h = G.scalar_mul(rng.randrange(1, N))
 
-    proof, public_inputs, dbg = prove(x, h, rng)
+    if args.wrong_share:
+        # Prove honestly for x' != x, then publish it against x's public key.
+        # Only the DLEQ relation between PK and D is false.
+        #
+        # The MSM hints must be REGENERATED for the substituted PK. Hints are
+        # public computational aids, not secrets, so a real attacker computes
+        # them freely -- leaving the stale ones in place would only trip
+        # Garaga's "wrong FakeGLV result" assertion and prove nothing about
+        # soundness. With consistent hints the MSM runs cleanly and the
+        # challenge comparison is what has to catch this.
+        x_other = rng.randrange(1, N)
+        proof, public_inputs, dbg = prove(x_other, h, rng)
+        pk_honest = G.scalar_mul(x)
+        public_inputs[0:4] = u256_pair(pk_honest.x) + u256_pair(pk_honest.y)
+
+        s, e = dbg["s"], dbg["e"]
+        e_neg = (-e) % N
+        proof[4:24] = msm_hint([G, pk_honest], [s, e_neg])
+        print("# substituted PK of a different secret, hints regenerated to match",
+              file=sys.stderr)
+        print("# log_G(PK) != log_H(D); only the challenge check can catch this",
+              file=sys.stderr)
+    else:
+        proof, public_inputs, dbg = prove(x, h, rng)
 
     if args.corrupt:
         proof[len(proof) // 2] += 1

@@ -247,26 +247,55 @@ shown at showdown.
 
 ## 6. Cost
 
-**Measured** (real receipts, `docs/V2-SPIKE-RESULTS.md` §7–§8):
+All three primitives are now measured on devnet from real transaction receipts,
+positive and negative cases both.
 
-| | Value |
-|---|---|
-| Shuffle proof generation | 5.67 s (bb.js WASM) |
-| Shuffle proof size | 14,656 bytes / 458 fields |
-| **On-chain verification** | **811,907,200 L2 gas** |
-| L1 data gas | 128 |
-| Garaga calldata | 3,053 felts |
+| | Shuffle proof | Deck opening | **DLEQ share** |
+|---|---|---|---|
+| Proof generation | 7,209 ms | 764 ms | **~instant (Sigma)** |
+| Calldata | 3,053 felts | 2,989 felts | **58 felts** |
+| **L2 gas to verify** | **811,907,200** | **772,299,520** | **64,607,680** |
+| L1 data gas | 128 | 128 | 128 |
 
-**Estimated, not measured** — flagged because this project's standard is
-verify-don't-assume:
+A DLEQ costs **12.6× less** than a SNARK verification, and its calldata is
+**53× smaller**. That gap is the whole reason only the shuffle needs a circuit.
 
-- Poseidon-transcript Honk landing in the 200–400M range (§2.2)
-- DLEQ verification cost (~63 per hand)
-- Public-input cost of exposing 417 values instead of 4 (§7)
+### 6.1 Per hand at n=6 — and the surprise
 
-Those three measurements would firm up the entire gas picture and are the
-cheapest available de-risking. The shuffle chain dominates everything else
-combined; if it got cheaper, this protocol would be nearly free.
+| Phase | Count | L2 gas |
+|---|---:|---:|
+| Shuffle chain (k=6) | 6 | 4,871,443,200 |
+| **Community DLEQ** (5 cards × 7 shares) | 35 | **2,261,268,800** |
+| **Showdown DLEQ** (2 players × 2 cards × 7) | 28 | **1,809,015,040** |
+| Deck opening | 1 | 772,299,520 |
+| Schnorr registration | 7 | *(per table, not per hand)* |
+| **Total** | | **≈ 9.7 billion** |
+
+**DLEQ verification is 42% of the hand — more than the entire shuffle chain.**
+That inverts the assumption this protocol was designed around. Individually a
+DLEQ is cheap; there are just 63 of them, and `n`-of-`n` threshold decryption
+means the count grows with players *and* with cards.
+
+Two levers, neither built:
+
+- **Batch the `n+1` shares of one card into a single check.** Verify
+  `Σ ρ^i · (equations)` with Fiat-Shamir coefficients `ρ` — one MSM of size
+  ~2(n+1) instead of `n+1` separate MSMs of size 2. Should cut the 4.07B DLEQ
+  total by roughly 3–4×. This is the single highest-value optimisation
+  available and it changes no security property, only the arithmetic.
+- **Cap the shuffle chain at `k < n`** (§9). Security needs one honest
+  shuffler, not all of them; `k=3` halves the shuffle term.
+
+Cheap hands are already cheap: everyone folding pre-flop reveals no community
+cards and reaches no showdown, so it costs **zero** proof verifications beyond
+the shuffle.
+
+### 6.2 Still estimated
+
+- Poseidon-transcript Honk (`ultra_starknet_zk_honk`) landing in the 200–400M
+  range (§2.2). Unverified, and now clearly worth doing — it would cut the
+  largest remaining term.
+- Browser proving (§9).
 
 ---
 
