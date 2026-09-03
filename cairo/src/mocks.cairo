@@ -183,6 +183,8 @@ pub mod MockShuffleVerifier {
     struct Storage {
         reject: bool,
         reject_key: bool,
+        reject_opening: bool,
+        reject_reveal: bool,
     }
 
     #[abi(embed_v0)]
@@ -200,6 +202,27 @@ pub mod MockShuffleVerifier {
         ) -> bool {
             !self.reject_key.read()
         }
+
+        fn verify_deck_opening(
+            self: @ContractState, proof: Span<felt252>, public_inputs: Span<felt252>,
+        ) -> bool {
+            !self.reject_opening.read()
+        }
+
+        // Accepts any card the caller names unless set_reject_reveal(true).
+        // A test that needs "this specific card is wrong" should use the
+        // real verifier -- a mock cannot distinguish cards without doing the
+        // curve arithmetic it exists to avoid.
+        fn verify_card_reveal(
+            self: @ContractState,
+            proof: Span<felt252>,
+            public_inputs: Span<felt252>,
+            c2_x: u256,
+            c2_y: u256,
+            claimed_card: u8,
+        ) -> bool {
+            claimed_card < 52 && !self.reject_reveal.read()
+        }
     }
 
     #[abi(embed_v0)]
@@ -211,6 +234,14 @@ pub mod MockShuffleVerifier {
         fn set_reject_key(ref self: ContractState, reject: bool) {
             self.reject_key.write(reject);
         }
+
+        fn set_reject_opening(ref self: ContractState, reject: bool) {
+            self.reject_opening.write(reject);
+        }
+
+        fn set_reject_reveal(ref self: ContractState, reject: bool) {
+            self.reject_reveal.write(reject);
+        }
     }
 }
 
@@ -218,4 +249,6 @@ pub mod MockShuffleVerifier {
 pub trait IMockVerifierAdminTrait<TState> {
     fn set_reject(ref self: TState, reject: bool);
     fn set_reject_key(ref self: TState, reject: bool);
+    fn set_reject_opening(ref self: TState, reject: bool);
+    fn set_reject_reveal(ref self: TState, reject: bool);
 }

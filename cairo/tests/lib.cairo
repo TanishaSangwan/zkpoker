@@ -7,3 +7,4 @@ mod test_betting;
 mod test_settlement;
 mod test_hand_eval;
 mod test_shuffle;
+mod test_dealing;

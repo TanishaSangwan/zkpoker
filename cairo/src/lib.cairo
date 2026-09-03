@@ -48,6 +48,36 @@ pub trait IShuffleVerifier<TState> {
     //
     // public_inputs = [pk_x, pk_y]
     fn verify_key_ownership(self: @TState, proof: Span<felt252>, public_inputs: Span<felt252>) -> bool;
+
+    // Proves specific ciphertexts sit at specific positions of the deck the
+    // shuffle chain committed to. The contract cannot check this itself:
+    // the commitment is a Poseidon2 hash over BN254, while Cairo's Poseidon
+    // is over the STARK field, and re-deriving one from the other needs
+    // emulated 254-bit arithmetic. So the hash is only ever COMPARED here,
+    // never computed — see docs/PROTOCOL.md §7.
+    //
+    // Without this binding the protocol is completely broken: the joint key
+    // is public, so anyone can encrypt any card and hand over a fabricated
+    // ciphertext that every later decryption proof then verifies honestly.
+    //
+    // public_inputs = [deck_hash, positions.., ciphertexts..]
+    fn verify_deck_opening(self: @TState, proof: Span<felt252>, public_inputs: Span<felt252>) -> bool;
+
+    // Verifies a decryption share against the joint key AND that removing
+    // it from the ciphertext yields `claimed_card`. The card index is
+    // checked, not trusted. One call settles a card no matter how many
+    // players sit at the table, because the shares aggregate into a single
+    // proof over the joint key (docs/PROTOCOL.md §6.2).
+    //
+    // public_inputs = [joint_pk, c1, aggregate_share]
+    fn verify_card_reveal(
+        self: @TState,
+        proof: Span<felt252>,
+        public_inputs: Span<felt252>,
+        c2_x: u256,
+        c2_y: u256,
+        claimed_card: u8,
+    ) -> bool;
 }
 
 // Test-only mock ERC20 (configurable failure/fee/reentrancy behavior) used
@@ -546,6 +576,69 @@ pub trait IPokerGame<TState> {
     // immediate reclaim.
     fn claim_shuffle_timeout(ref self: TState, table_id: felt252);
 
+    // ── Dealing (docs/PROTOCOL.md §4 phases 2-4) ─────────────────────────
+
+    // Binds the in-play ciphertexts to the deck the shuffle chain produced.
+    // `ciphertexts` is flat, four u256 per position: c1.x, c1.y, c2.x, c2.y.
+    // The contract supplies the deck hash to the verifier from its OWN
+    // storage rather than trusting the caller, so a proof about any other
+    // deck simply fails to verify. Callable once, by anyone -- the proof is
+    // self-authenticating, so who submits it does not matter.
+    fn open_deck(
+        ref self: TState,
+        table_id: felt252,
+        positions: Span<u32>,
+        ciphertexts: Span<u256>,
+        proof: Span<felt252>,
+    );
+
+    // Reveals community card `index` (0-4: flop, flop, flop, turn, river).
+    // `share` is the AGGREGATE of every party's decryption share and the
+    // proof is a single DLEQ against the table's joint key, so this costs
+    // the same regardless of how many players are seated (§6.2).
+    //
+    // The contract recomputes the card rather than believing `claimed_card`:
+    // the verifier derives m = c2 - share and compares it to the encoding
+    // table. A malicious submitter can only fail, never lie.
+    fn reveal_community_card(
+        ref self: TState,
+        table_id: felt252,
+        index: u32,
+        share_x: u256,
+        share_y: u256,
+        claimed_card: u8,
+        proof: Span<felt252>,
+    );
+
+    // Commits to the decryption shares this seat received privately for one
+    // of its two hole cards. Must happen before betting on that card: the
+    // commitment is what stops the player choosing a different share set
+    // after seeing the board.
+    fn commit_hole_shares(
+        ref self: TState, table_id: felt252, seat: felt252, slot: u32, commitment: felt252,
+    );
+
+    // Showdown. Opens the commitment, proves the share, and recovers the
+    // card. Voluntary: a player who declines simply cannot win the pot, so
+    // mucking stays legal and costs nothing.
+    fn reveal_hole_card(
+        ref self: TState,
+        table_id: felt252,
+        seat: felt252,
+        slot: u32,
+        share_x: u256,
+        share_y: u256,
+        blinding: felt252,
+        claimed_card: u8,
+        proof: Span<felt252>,
+    );
+
+    fn get_community_card(self: @TState, table_id: felt252, index: u32) -> u8;
+    fn get_community_revealed(self: @TState, table_id: felt252, index: u32) -> bool;
+    fn get_hole_card(self: @TState, table_id: felt252, seat: felt252, slot: u32) -> u8;
+    fn get_hole_revealed(self: @TState, table_id: felt252, seat: felt252, slot: u32) -> bool;
+    fn get_deck_opened(self: @TState, table_id: felt252) -> bool;
+
     // ── Views ───────────────────────────────────────────────────────────
     fn get_shuffle_commitment(self: @TState, table_id: felt252) -> u256;
     fn get_shuffle_turn(self: @TState, table_id: felt252) -> u32;
@@ -636,6 +729,19 @@ pub mod PokerGame {
         pub const NOT_YOUR_TURN: felt252 = 'NOT_YOUR_SHUFFLE_TURN';
         pub const BAD_PROOF: felt252 = 'SHUFFLE_PROOF_REJECTED';
         pub const NO_PARTICIPANTS: felt252 = 'NO_SHUFFLE_PARTICIPANTS';
+        pub const SHUFFLE_INCOMPLETE: felt252 = 'SHUFFLE_NOT_COMPLETE';
+        pub const DECK_OPENED: felt252 = 'DECK_ALREADY_OPENED';
+        pub const DECK_NOT_OPENED: felt252 = 'DECK_NOT_OPENED';
+        pub const BAD_OPENING: felt252 = 'DECK_OPENING_REJECTED';
+        pub const BAD_OPENING_LEN: felt252 = 'BAD_OPENING_LENGTH';
+        pub const POSITION_NOT_OPENED: felt252 = 'POSITION_NOT_OPENED';
+        pub const BAD_COMMUNITY_INDEX: felt252 = 'BAD_COMMUNITY_INDEX';
+        pub const CARD_REVEALED: felt252 = 'CARD_ALREADY_REVEALED';
+        pub const BAD_REVEAL: felt252 = 'CARD_REVEAL_REJECTED';
+        pub const BAD_SLOT: felt252 = 'BAD_HOLE_SLOT';
+        pub const HOLE_COMMITTED: felt252 = 'HOLE_ALREADY_COMMITTED';
+        pub const NO_HOLE_COMMITMENT: felt252 = 'NO_HOLE_COMMITMENT';
+        pub const BAD_OPENING_HASH: felt252 = 'COMMITMENT_MISMATCH';
         pub const DEADLINE_PASSED: felt252 = 'SHUFFLE_DEADLINE_PASSED';
         pub const DEADLINE_NOT_PASSED: felt252 = 'DEADLINE_NOT_PASSED';
         pub const TABLE_VOIDED: felt252 = 'TABLE_VOIDED';
@@ -764,6 +870,26 @@ pub mod PokerGame {
         // permanently unopenable and the only coherent outcome is to void
         // and refund — see reclaim_stalled_bet.
         table_voided: Map<felt252, bool>,
+
+        // ── Dealing (docs/PROTOCOL.md §4 phases 2-4) ──────────────────
+        // Ciphertexts bound to deck positions by the opening proof. Only
+        // in-play positions are ever opened: 2*seat and 2*seat+1 for hole
+        // cards, 2*max_seats + k for community card k.
+        opened_c1_x: Map<(felt252, u32), u256>,
+        opened_c1_y: Map<(felt252, u32), u256>,
+        opened_c2_x: Map<(felt252, u32), u256>,
+        opened_c2_y: Map<(felt252, u32), u256>,
+        position_opened: Map<(felt252, u32), bool>,
+        deck_opened: Map<felt252, bool>,
+        // Community cards, plaintext once revealed.
+        community_card: Map<(felt252, u32), u8>,
+        community_revealed: Map<(felt252, u32), bool>,
+        // Hole cards. The commitment is posted during dealing, BEFORE any
+        // betting on it, which is what stops a player shopping for a
+        // friendlier share set after seeing the board.
+        hole_commitment: Map<(felt252, felt252, u32), felt252>,
+        hole_card: Map<(felt252, felt252, u32), u8>,
+        hole_revealed: Map<(felt252, felt252, u32), bool>,
     }
 
     #[constructor]
@@ -802,6 +928,10 @@ pub mod PokerGame {
         Shuffled: Shuffled,
         ShuffleComplete: ShuffleComplete,
         TableVoided: TableVoided,
+        DeckOpened: DeckOpened,
+        CommunityCardRevealed: CommunityCardRevealed,
+        HoleSharesCommitted: HoleSharesCommitted,
+        HoleCardRevealed: HoleCardRevealed,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -942,6 +1072,40 @@ pub mod PokerGame {
         pub stalled_seat: felt252,
     }
 
+    #[derive(Drop, starknet::Event)]
+    pub struct DeckOpened {
+        #[key]
+        pub table_id: felt252,
+        pub positions: u32,
+        pub deck_hash: u256,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    pub struct CommunityCardRevealed {
+        #[key]
+        pub table_id: felt252,
+        pub index: u32,
+        pub card: u8,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    pub struct HoleSharesCommitted {
+        #[key]
+        pub table_id: felt252,
+        pub seat: felt252,
+        pub slot: u32,
+        pub commitment: felt252,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    pub struct HoleCardRevealed {
+        #[key]
+        pub table_id: felt252,
+        pub seat: felt252,
+        pub slot: u32,
+        pub card: u8,
+    }
+
     // Internal (not embedded — no #[abi(embed_v0)], not part of
     // IPokerGame) helper shared by join_table and register_payout_note:
     // both bind a caller-supplied note_id to a caller in note_id_owner,
@@ -950,6 +1114,47 @@ pub mod PokerGame {
     // Finding 1). Factored out in round 9 rather than duplicated.
     #[generate_trait]
     impl InternalImpl of InternalTrait {
+        // Shared by reveal_community_card and reveal_hole_card. Builds the
+        // DLEQ public inputs from STORED state -- joint key and the
+        // ciphertext bound by the opening proof -- so the only thing the
+        // caller controls is the share and the proof over it. Returns the
+        // card only if the verifier confirms m = c2 - share matches it.
+        fn verify_reveal_at(
+            ref self: ContractState,
+            table_id: felt252,
+            pos: u32,
+            share_x: u256,
+            share_y: u256,
+            claimed_card: u8,
+            proof: Span<felt252>,
+        ) -> u8 {
+            let c1_x = self.opened_c1_x.entry((table_id, pos)).read();
+            let c1_y = self.opened_c1_y.entry((table_id, pos)).read();
+            let c2_x = self.opened_c2_x.entry((table_id, pos)).read();
+            let c2_y = self.opened_c2_y.entry((table_id, pos)).read();
+
+            let joint_x = self.joint_pk_x.entry(table_id).read();
+            let joint_y = self.joint_pk_y.entry(table_id).read();
+
+            let inputs = array![
+                joint_x.low.into(), joint_x.high.into(),
+                joint_y.low.into(), joint_y.high.into(),
+                c1_x.low.into(), c1_x.high.into(),
+                c1_y.low.into(), c1_y.high.into(),
+                share_x.low.into(), share_x.high.into(),
+                share_y.low.into(), share_y.high.into(),
+            ];
+
+            let verifier = IShuffleVerifierDispatcher {
+                contract_address: self.shuffle_verifier.read(),
+            };
+            assert(
+                verifier.verify_card_reveal(proof, inputs.span(), c2_x, c2_y, claimed_card),
+                errors::BAD_REVEAL,
+            );
+            claimed_card
+        }
+
         fn register_note_id_owner(
             ref self: ContractState, note_id: felt252, caller: ContractAddress,
         ) {
@@ -1679,6 +1884,195 @@ pub mod PokerGame {
             // hand is unrecoverable. Void it and let every seat reclaim.
             self.table_voided.entry(table_id).write(true);
             self.emit(TableVoided { table_id, stalled_seat });
+        }
+
+        // ── Dealing (docs/PROTOCOL.md §4 phases 2-4) ──────────────────
+
+        fn open_deck(
+            ref self: ContractState,
+            table_id: felt252,
+            positions: Span<u32>,
+            ciphertexts: Span<u256>,
+            proof: Span<felt252>,
+        ) {
+            assert(self.table_exists.entry(table_id).read(), errors::NO_TABLE);
+            assert(!self.table_voided.entry(table_id).read(), errors::TABLE_VOIDED);
+            assert(!self.table_settled.entry(table_id).read(), errors::ALREADY_SETTLED);
+            assert(self.shuffle_complete.entry(table_id).read(), errors::SHUFFLE_INCOMPLETE);
+            assert(!self.deck_opened.entry(table_id).read(), errors::DECK_OPENED);
+
+            let k = positions.len();
+            assert(k != 0 && ciphertexts.len() == k * 4, errors::BAD_OPENING_LEN);
+
+            // The deck hash comes from STORAGE, never from the caller. That
+            // is the whole binding: a proof about any other deck cannot
+            // verify against the commitment the shuffle chain left here.
+            let deck_hash = self.deck_commitment.entry(table_id).read();
+            let mut inputs: Array<felt252> = array![];
+            inputs.append(deck_hash.low.into());
+            inputs.append(deck_hash.high.into());
+            let mut i: u32 = 0;
+            while i != k {
+                let pos: u256 = (*positions.at(i)).into();
+                inputs.append(pos.low.into());
+                inputs.append(pos.high.into());
+                i += 1;
+            }
+            let mut j: u32 = 0;
+            while j != ciphertexts.len() {
+                let v = *ciphertexts.at(j);
+                inputs.append(v.low.into());
+                inputs.append(v.high.into());
+                j += 1;
+            }
+
+            let verifier = IShuffleVerifierDispatcher {
+                contract_address: self.shuffle_verifier.read(),
+            };
+            assert(verifier.verify_deck_opening(proof, inputs.span()), errors::BAD_OPENING);
+
+            let mut n: u32 = 0;
+            while n != k {
+                let pos = *positions.at(n);
+                let b = n * 4;
+                self.opened_c1_x.entry((table_id, pos)).write(*ciphertexts.at(b));
+                self.opened_c1_y.entry((table_id, pos)).write(*ciphertexts.at(b + 1));
+                self.opened_c2_x.entry((table_id, pos)).write(*ciphertexts.at(b + 2));
+                self.opened_c2_y.entry((table_id, pos)).write(*ciphertexts.at(b + 3));
+                self.position_opened.entry((table_id, pos)).write(true);
+                n += 1;
+            }
+            self.deck_opened.entry(table_id).write(true);
+            self.emit(DeckOpened { table_id, positions: k, deck_hash });
+        }
+
+        fn reveal_community_card(
+            ref self: ContractState,
+            table_id: felt252,
+            index: u32,
+            share_x: u256,
+            share_y: u256,
+            claimed_card: u8,
+            proof: Span<felt252>,
+        ) {
+            assert(self.table_exists.entry(table_id).read(), errors::NO_TABLE);
+            assert(!self.table_voided.entry(table_id).read(), errors::TABLE_VOIDED);
+            assert(!self.table_settled.entry(table_id).read(), errors::ALREADY_SETTLED);
+            assert(self.deck_opened.entry(table_id).read(), errors::DECK_NOT_OPENED);
+            assert(index < 5, errors::BAD_COMMUNITY_INDEX);
+            assert(
+                !self.community_revealed.entry((table_id, index)).read(), errors::CARD_REVEALED,
+            );
+
+            let max_seats = self.table_max_seats.entry(table_id).read();
+            let pos = 2 * max_seats + index;
+            assert(self.position_opened.entry((table_id, pos)).read(), errors::POSITION_NOT_OPENED);
+
+            let card = self.verify_reveal_at(table_id, pos, share_x, share_y, claimed_card, proof);
+            self.community_card.entry((table_id, index)).write(card);
+            self.community_revealed.entry((table_id, index)).write(true);
+            self.emit(CommunityCardRevealed { table_id, index, card });
+        }
+
+        fn commit_hole_shares(
+            ref self: ContractState,
+            table_id: felt252,
+            seat: felt252,
+            slot: u32,
+            commitment: felt252,
+        ) {
+            assert(self.table_exists.entry(table_id).read(), errors::NO_TABLE);
+            assert(!self.table_voided.entry(table_id).read(), errors::TABLE_VOIDED);
+            assert(!self.table_settled.entry(table_id).read(), errors::ALREADY_SETTLED);
+            assert(
+                get_caller_address() == self.seat_owner.entry((table_id, seat)).read(),
+                errors::NOT_SEAT_OWNER,
+            );
+            assert(slot < 2, errors::BAD_SLOT);
+            // Zero doubles as "no commitment", so it cannot be a real one.
+            assert(commitment != 0, errors::NO_HOLE_COMMITMENT);
+            // Immutable once set. A replaceable commitment binds nothing:
+            // the player could wait for the board and then commit to
+            // whichever share set suits them.
+            assert(
+                self.hole_commitment.entry((table_id, seat, slot)).read() == 0,
+                errors::HOLE_COMMITTED,
+            );
+            self.hole_commitment.entry((table_id, seat, slot)).write(commitment);
+            self.emit(HoleSharesCommitted { table_id, seat, slot, commitment });
+        }
+
+        fn reveal_hole_card(
+            ref self: ContractState,
+            table_id: felt252,
+            seat: felt252,
+            slot: u32,
+            share_x: u256,
+            share_y: u256,
+            blinding: felt252,
+            claimed_card: u8,
+            proof: Span<felt252>,
+        ) {
+            assert(self.table_exists.entry(table_id).read(), errors::NO_TABLE);
+            assert(!self.table_voided.entry(table_id).read(), errors::TABLE_VOIDED);
+            assert(!self.table_settled.entry(table_id).read(), errors::ALREADY_SETTLED);
+            assert(self.deck_opened.entry(table_id).read(), errors::DECK_NOT_OPENED);
+            assert(slot < 2, errors::BAD_SLOT);
+            assert(
+                !self.hole_revealed.entry((table_id, seat, slot)).read(), errors::CARD_REVEALED,
+            );
+
+            let committed = self.hole_commitment.entry((table_id, seat, slot)).read();
+            assert(committed != 0, errors::NO_HOLE_COMMITMENT);
+
+            // Reopen the dealing-time commitment. Without this the player
+            // could substitute a different share set after seeing the
+            // board -- the shares are what determine the card, so that
+            // would be free choice of hand.
+            let recomputed = core::poseidon::poseidon_hash_span(
+                array![
+                    share_x.low.into(),
+                    share_x.high.into(),
+                    share_y.low.into(),
+                    share_y.high.into(),
+                    blinding,
+                ]
+                    .span(),
+            );
+            assert(recomputed == committed, errors::BAD_OPENING_HASH);
+
+            let seat_u32: u32 = seat.try_into().expect(errors::BAD_SEAT);
+            let pos = 2 * seat_u32 + slot;
+            assert(self.position_opened.entry((table_id, pos)).read(), errors::POSITION_NOT_OPENED);
+
+            let card = self.verify_reveal_at(table_id, pos, share_x, share_y, claimed_card, proof);
+            self.hole_card.entry((table_id, seat, slot)).write(card);
+            self.hole_revealed.entry((table_id, seat, slot)).write(true);
+            self.emit(HoleCardRevealed { table_id, seat, slot, card });
+        }
+
+        fn get_community_card(self: @ContractState, table_id: felt252, index: u32) -> u8 {
+            self.community_card.entry((table_id, index)).read()
+        }
+
+        fn get_community_revealed(self: @ContractState, table_id: felt252, index: u32) -> bool {
+            self.community_revealed.entry((table_id, index)).read()
+        }
+
+        fn get_hole_card(
+            self: @ContractState, table_id: felt252, seat: felt252, slot: u32,
+        ) -> u8 {
+            self.hole_card.entry((table_id, seat, slot)).read()
+        }
+
+        fn get_hole_revealed(
+            self: @ContractState, table_id: felt252, seat: felt252, slot: u32,
+        ) -> bool {
+            self.hole_revealed.entry((table_id, seat, slot)).read()
+        }
+
+        fn get_deck_opened(self: @ContractState, table_id: felt252) -> bool {
+            self.deck_opened.entry(table_id).read()
         }
 
         fn get_shuffle_commitment(self: @ContractState, table_id: felt252) -> u256 {
