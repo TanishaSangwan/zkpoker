@@ -16,6 +16,7 @@
 
 // Chaum-Pedersen DLEQ verifier for threshold decryption shares. Separate
 // contract, same package -- keeps every Garaga dependency in one crate.
+pub mod adapter;
 pub mod card_table;
 pub mod dleq;
 

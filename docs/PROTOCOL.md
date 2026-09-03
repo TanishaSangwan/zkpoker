@@ -589,15 +589,22 @@ but "should be" is not "measured," and the entire client-side story rests on it.
   bijection check. Real witness, real proof.
 - `circuits/shuffle_verifier/` — Garaga-generated Cairo verifier, deployed to devnet,
   genuinely accepted a real proof and rejected a corrupted one.
+- `cairo-verifier/src/adapter.cairo` — **the single contract `PokerGame` talks to.**
+  Routes all four checks to their real verifiers and, for the two Garaga ones,
+  binds the returned public inputs to what `PokerGame` asked about. Measured
+  overhead: **271,360 L2 gas, 0.04%**. A valid proof replayed against a
+  different deck hash is rejected (`false`), which is the point.
 - `scripts/dealer_bot.mjs` — off-chain dealer skeleton (drives the *old* flow).
 
 **Not built:**
 - The §7 circuit change (public-input decks) and re-measurement.
-- DLEQ prover (client) and DLEQ verifier (Cairo).
-- Joint-key accumulation on-chain.
-- Phase 2–4 state machine: hole commitments, share submission, showdown opening.
+- Joint-key accumulation on-chain — `begin_shuffle` still takes `joint_pk` as a
+  dealer-supplied parameter and never checks it equals `Σ seat_pk`. Players are
+  expected to verify off-chain. It cannot be fixed inside `PokerGame` (no EC
+  arithmetic there by design); it belongs in the adapter.
+- Showdown scoring: revealed cards land in storage but `settle_table_by_hand`
+  still uses the V1 seed path.
 - The accusation path (§8) and the threshold decision.
-- Adapter between the generated verifier's interface and `IShuffleVerifier`.
 - Any client UI for the above; browser proving.
 - **Bet-matching and turn-order enforcement** — `advance_street` still lets anyone
   advance at any time, and bet/fold is always open. A perfect shuffle on a game
