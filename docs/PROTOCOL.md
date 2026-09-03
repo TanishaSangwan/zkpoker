@@ -371,18 +371,20 @@ Two things this costs, both real:
 Down from 9.7B. DLEQ falls from **42% of the hand to 9%**, and the shuffle
 chain is decisively dominant again at 78%.
 
-The remaining lever is therefore the shuffle — and the easy version of it is
-now closed off. Swapping the transcript to Poseidon was worth ~4.8%, and the
-variant does not exist in Garaga 1.1.0 anyway (§2.2). What is left:
+The remaining lever is the shuffle, and both cheap versions of it are now
+closed off. Swapping the transcript to Poseidon is worth ~4.8% and does not
+exist in Garaga 1.1.0 (§2.2). Capping the chain below `n` is **rejected on
+security grounds** (§9.1). What is left:
 
-- **Cap the chain at `k < n`** (§9). Security needs one honest shuffler, not
-  all of them, so this is a straight linear cut with no cryptographic cost:
-  `k=3` removes ~2.4B L2 gas, taking the hand to ~3.8B. **The best lever
-  available, and it is a parameter choice, not an implementation.**
 - **Shuffle the next hand's deck during the current hand's betting** (§9).
   Does not reduce gas, but removes the latency entirely from the critical path.
 - **Groth16**, if per-hand gas ever becomes genuinely binding — structurally
   cheaper verification, paid for with a per-circuit trusted setup (§2.2).
+
+**~6.2B L2 gas per hand is the honest number for a fully trustless hand**, and
+it does not currently go lower without giving something up. That is the
+correct trade for this project: the shuffle chain is the guarantee, not an
+overhead to be optimised away.
 
 Cheap hands stay cheap: everyone folding pre-flop reveals no community cards
 and reaches no showdown, costing **zero** verifications beyond the shuffle.
@@ -538,13 +540,38 @@ The shuffle chain is sequential: 6 rounds of (prove → submit → confirm), rou
 **34 s of pure proving** plus block confirmations — 1–3 minutes before the first
 card is dealt.
 
-Two mitigations, neither built:
+One mitigation, not built:
 
-- **Shuffle the next hand's deck during the current hand's betting.** Pipelines the
-  cost away entirely.
-- **Cap the chain at `k < n` shufflers.** The security property is "unbiased as
-  long as ≥1 shuffler is honest," which does not require all `n`. `k = 3` cuts
-  proving to ~17 s. Choosing `k` is an **open decision**.
+- **Shuffle the next hand's deck during the current hand's betting.** Pipelines
+  the cost away entirely, changes no security property, and is the right fix.
+
+### 9.1 Why the chain is NOT capped at `k < n` — rejected
+
+Capping the chain looks like free money: "unbiased as long as ≥1 shuffler is
+honest" does not obviously require all `n`, and `k=3` would cut ~2.4B L2 gas
+and ~17 s of proving. It was implemented and then **reverted**, because the
+premise is wrong.
+
+If every seat in the chain colludes, they know the composed permutation
+`π₁∘…∘π_k`. `a_0` is canonical and public, so knowing the composition tells
+them exactly which card sits at every position of the final deck — and seat
+`i`'s hole cards are always at positions `2i` and `2i+1`. **They read the
+entire table without decrypting anything.** The joint key does not help here;
+no decryption is involved.
+
+So a player outside the chain gets **no protection from it at all**. "Cap at
+`k=3`" means seats 3…n−1 are trusting seats 0…2 — structurally the same
+trusted-dealer arrangement this protocol exists to remove, just with a
+different set of trustees.
+
+A voluntary opt-in variant was also built and reverted. It is sound for anyone
+who opts in — your own permutation stays secret, so you are protected no matter
+who else cheats — but opting *out* still means trusting, and a player saving
+gas without understanding they have surrendered the guarantee is a footgun in a
+game with money on the table. Given the choice between a cheaper hand and a
+hand nobody has to trust anyone for, this project takes the second.
+
+**Every player shuffles. `k = n`. The cost stands.**
 
 Also unverified: the 5.67 s was measured with the WASM backend *server-side*.
 **Browser proving has never been tested.** Same WASM, so it should be comparable —
