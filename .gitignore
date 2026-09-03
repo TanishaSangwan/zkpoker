@@ -56,3 +56,11 @@ A1priv/A1priv.ts
 # for cross-session continuity notes.
 /CLAUDE.md
 /AGENTS.md
+
+# Cairo/Noir build output outside the root and cairo/ (added when
+# cairo-verifier/ and circuits/ appeared -- the bare /target rule does not
+# reach them, and they are ~70MB of regenerable artifacts).
+cairo-verifier/target/
+circuits/*/target/
+circuits/*/*/target/
+**/.snfoundry_cache/
