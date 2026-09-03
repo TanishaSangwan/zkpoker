@@ -93,9 +93,10 @@ Historical (Windows):
     `evals/` and `website/` subdirs are gitignored — ~2.4MB nothing in this
     repo reads. Contains `cairo-auditor`,
     `cairo-contract-authoring`, `cairo-testing`, `cairo-optimization`,
-    `cairo-toolchain`, `account-abstraction`, `starknet-network-facts`. It
-    was installed on the old Windows machine, was never committed, and is
-    gone. **§5's audit procedure reads files out of
+    `cairo-toolchain`, `account-abstraction`, `starknet-network-facts`.
+    (History: it was installed on the old Windows machine, never committed,
+    and lost in the move — that is what the lock entry now prevents.)
+    **§5's audit procedure reads files out of
     `.agents/skills/starknet-skills/cairo-auditor/` and RUNS AGAIN** — it
     was used for the 2026-09-04 review of the dealing/betting surface.
   - Skills installed mid-conversation don't show up in that session's
