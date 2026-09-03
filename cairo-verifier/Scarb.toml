@@ -1,0 +1,18 @@
+[package]
+name = "zkpoker_verifier"
+version = "0.1.0"
+edition = "2024_07"
+
+[dependencies]
+starknet = "2.18.0"
+garaga = "1.1.0"
+
+[dev-dependencies]
+snforge_std = "0.63.0"
+
+[[target.starknet-contract]]
+sierra = true
+casm = true
+
+[tool.scarb]
+allow-prebuilt-plugins = ["snforge_std"]
