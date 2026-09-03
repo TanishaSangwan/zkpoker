@@ -602,8 +602,11 @@ but "should be" is not "measured," and the entire client-side story rests on it.
   dealer-supplied parameter and never checks it equals `Σ seat_pk`. Players are
   expected to verify off-chain. It cannot be fixed inside `PokerGame` (no EC
   arithmetic there by design); it belongs in the adapter.
-- Showdown scoring: revealed cards land in storage but `settle_table_by_hand`
-  still uses the V1 seed path.
+- **Showdown scoring** — `settle_from_reveals` scores from cards the contract
+  itself proved and pays out. Takes **no caller input beyond the table**: every
+  card comes from storage a reveal proof bound, every payout note from
+  `join_table`'s binding, so anyone may settle and nobody can steer it. An
+  uncontested pot needs no cards shown at all.
 - The accusation path (§8) and the threshold decision.
 - Any client UI for the above; browser proving.
 - **Bet-matching and turn-order enforcement** — `advance_street` still lets anyone

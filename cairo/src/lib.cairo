@@ -639,6 +639,19 @@ pub trait IPokerGame<TState> {
     fn get_hole_revealed(self: @TState, table_id: felt252, seat: felt252, slot: u32) -> bool;
     fn get_deck_opened(self: @TState, table_id: felt252) -> bool;
 
+    // Settles from cards the contract itself proved, taking NO caller input
+    // beyond the table. Every card comes from storage that a reveal proof
+    // already bound, and every payout note from the binding join_table made,
+    // so there is nothing for a caller to steer -- which is why anyone may
+    // call this rather than only the dealer.
+    //
+    // Contenders are the non-folded seats. If exactly one remains everyone
+    // else folded and it wins uncontested with no cards shown. Otherwise
+    // every contender must have revealed both hole cards; a player who
+    // declines has mucked and simply cannot win, which is how mucking stays
+    // legal without a separate entrypoint.
+    fn settle_from_reveals(ref self: TState, table_id: felt252);
+
     // ── Views ───────────────────────────────────────────────────────────
     fn get_shuffle_commitment(self: @TState, table_id: felt252) -> u256;
     fn get_shuffle_turn(self: @TState, table_id: felt252) -> u32;
@@ -742,6 +755,9 @@ pub mod PokerGame {
         pub const HOLE_COMMITTED: felt252 = 'HOLE_ALREADY_COMMITTED';
         pub const NO_HOLE_COMMITMENT: felt252 = 'NO_HOLE_COMMITMENT';
         pub const BAD_OPENING_HASH: felt252 = 'COMMITMENT_MISMATCH';
+        pub const COMMUNITY_INCOMPLETE: felt252 = 'COMMUNITY_NOT_REVEALED';
+        pub const HOLE_NOT_REVEALED: felt252 = 'HOLE_NOT_REVEALED';
+        pub const NO_CONTENDERS: felt252 = 'NO_CONTENDERS';
         pub const DEADLINE_PASSED: felt252 = 'SHUFFLE_DEADLINE_PASSED';
         pub const DEADLINE_NOT_PASSED: felt252 = 'DEADLINE_NOT_PASSED';
         pub const TABLE_VOIDED: felt252 = 'TABLE_VOIDED';
@@ -1153,6 +1169,42 @@ pub mod PokerGame {
                 errors::BAD_REVEAL,
             );
             claimed_card
+        }
+
+        // Splits the pot across `winners`, reusing settle_table's exact
+        // token-binding and remainder rules. Payout notes come from
+        // seat_note, bound at join_table, so no caller can redirect one.
+        fn award(ref self: ContractState, table_id: felt252, winners: Span<felt252>) {
+            let token = self.table_token.entry(table_id).read();
+            let pot = self.table_pot.entry(table_id).read();
+            let num: u128 = winners.len().into();
+            let share: u128 = pot / num;
+            let remainder: u128 = pot - share * num;
+            let mut w: u32 = 0;
+            loop {
+                if w == winners.len() {
+                    break;
+                }
+                let seat = *winners.at(w);
+                let note_id = self.seat_note.entry((table_id, seat)).read();
+                let existing_pending = self.pending_payout.entry(note_id).read();
+                let existing_token = self.payout_token.entry(note_id).read();
+                assert(existing_pending == 0 || existing_token == token, errors::BAD_TOKEN);
+                self.payout_token.entry(note_id).write(token);
+                // The remainder of an uneven split goes to the first
+                // winner rather than being stranded (round 1, finding 4).
+                let bump = if w == 0 {
+                    share + remainder
+                } else {
+                    share
+                };
+                let entry = self.pending_payout.entry(note_id);
+                entry.write(entry.read() + bump);
+                w += 1;
+            };
+            self.table_pot.entry(table_id).write(0);
+            self.table_settled.entry(table_id).write(true);
+            self.emit(Settled { table_id, winner_count: winners.len() });
         }
 
         fn register_note_id_owner(
@@ -2073,6 +2125,136 @@ pub mod PokerGame {
 
         fn get_deck_opened(self: @ContractState, table_id: felt252) -> bool {
             self.deck_opened.entry(table_id).read()
+        }
+
+        fn settle_from_reveals(ref self: ContractState, table_id: felt252) {
+            assert(self.table_exists.entry(table_id).read(), errors::NO_TABLE);
+            assert(!self.table_voided.entry(table_id).read(), errors::TABLE_VOIDED);
+            assert(!self.table_settled.entry(table_id).read(), errors::ALREADY_SETTLED);
+            assert(!self.reentrancy_lock.read(), errors::REENTRANCY);
+            assert(
+                self.table_street.entry(table_id).read() == SHOWDOWN_STREET,
+                errors::NOT_SHOWDOWN,
+            );
+
+            let max_seats = self.table_max_seats.entry(table_id).read();
+
+            // Gather contenders: seats that joined and did not fold.
+            let mut contenders: Array<felt252> = array![];
+            let mut s: u32 = 0;
+            loop {
+                if s == max_seats {
+                    break;
+                }
+                let seat: felt252 = s.into();
+                let owner = self.seat_owner.entry((table_id, seat)).read();
+                if owner.is_non_zero() && !self.seat_folded.entry((table_id, seat)).read() {
+                    contenders.append(seat);
+                }
+                s += 1;
+            };
+            let cs = contenders.span();
+            assert(cs.len() != 0, errors::NO_CONTENDERS);
+
+            // Uncontested: everyone else folded, so no cards are needed and
+            // none should be demanded. Showing a winning hand nobody
+            // contested would leak it for free.
+            if cs.len() == 1 {
+                self.award(table_id, array![*cs.at(0)].span());
+                return;
+            }
+
+            // Contested: the board must be complete before anything can be
+            // scored against it.
+            let mut k: u32 = 0;
+            loop {
+                if k == 5 {
+                    break;
+                }
+                assert(
+                    self.community_revealed.entry((table_id, k)).read(),
+                    errors::COMMUNITY_INCOMPLETE,
+                );
+                k += 1;
+            };
+
+            // Score every contender from cards this contract proved. No
+            // provenance check is needed here: each value arrived through
+            // reveal_hole_card / reveal_community_card, which only write
+            // after the verifier recomputed m = c2 - share and matched it
+            // against the encoding table. That is a strictly stronger
+            // binding than settle_table_by_hand's seed comparison.
+            let mut all_cards: Array<u8> = array![];
+            let mut cc: u32 = 0;
+            loop {
+                if cc == 5 {
+                    break;
+                }
+                all_cards.append(self.community_card.entry((table_id, cc)).read());
+                cc += 1;
+            };
+
+            let mut scores: Array<u64> = array![];
+            let mut i: u32 = 0;
+            loop {
+                if i == cs.len() {
+                    break;
+                }
+                let seat = *cs.at(i);
+                assert(
+                    self.hole_revealed.entry((table_id, seat, 0)).read()
+                        && self.hole_revealed.entry((table_id, seat, 1)).read(),
+                    errors::HOLE_NOT_REVEALED,
+                );
+                let h1 = self.hole_card.entry((table_id, seat, 0)).read();
+                let h2 = self.hole_card.entry((table_id, seat, 1)).read();
+                all_cards.append(h1);
+                all_cards.append(h2);
+
+                let mut seven: Array<u8> = array![h1, h2];
+                let mut c: u32 = 0;
+                loop {
+                    if c == 5 {
+                        break;
+                    }
+                    seven.append(self.community_card.entry((table_id, c)).read());
+                    c += 1;
+                };
+                scores.append(super::poker_hand::best_of_7(seven.span()));
+                i += 1;
+            };
+
+            // Defence in depth. The shuffle proof already makes the deck a
+            // genuine permutation and the reveal proofs tie each card to a
+            // deck position, so duplicates should be unreachable -- but this
+            // is the check that would catch a break in either of those, and
+            // it is cheap.
+            super::poker_hand::assert_valid_deck_cards(all_cards.span());
+
+            let sp = scores.span();
+            let mut best: u64 = 0;
+            let mut j: u32 = 0;
+            loop {
+                if j == sp.len() {
+                    break;
+                }
+                if *sp.at(j) > best {
+                    best = *sp.at(j);
+                }
+                j += 1;
+            };
+            let mut winners: Array<felt252> = array![];
+            let mut m: u32 = 0;
+            loop {
+                if m == sp.len() {
+                    break;
+                }
+                if *sp.at(m) == best {
+                    winners.append(*cs.at(m));
+                }
+                m += 1;
+            };
+            self.award(table_id, winners.span());
         }
 
         fn get_shuffle_commitment(self: @ContractState, table_id: felt252) -> u256 {

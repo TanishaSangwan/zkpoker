@@ -491,3 +491,213 @@ fn test_reveal_hole_card_twice_rejected() {
         ),
     }
 }
+
+// ─── showdown scoring ───────────────────────────────────────────────────
+//
+// settle_from_reveals takes NO caller input beyond the table: every card
+// comes from storage a reveal proof already bound, and every payout note
+// from the binding join_table made. So these tests drive it purely by
+// changing what has been revealed.
+//
+// card = suit * 13 + rank, rank 0='2'..12='A'. The board below is
+// deliberately mixed-suit and non-consecutive so the tie case is a real
+// tie on ranks rather than an accidental flush or straight.
+
+fn card(rank: u8, suit: u8) -> u8 {
+    suit * 13 + rank
+}
+
+// 2♠ 5♥ 7♦ 9♣ J♠ — no flush draw, no straight
+fn board() -> Array<u8> {
+    array![card(0, 0), card(3, 1), card(5, 2), card(7, 3), card(9, 0)]
+}
+
+fn setup_showdown() -> zkpoker::IPokerGameDispatcher {
+    let (game, _v) = deploy_pokergame_with_verifier(POOL());
+    let (token_addr, token, admin) = deploy_mock_token();
+    super::helpers::fund_and_approve(token, admin, ALICE(), game.contract_address, 10_000);
+    super::helpers::fund_and_approve(token, admin, BOB(), game.contract_address, 10_000);
+
+    start_cheat_caller_address(game.contract_address, DEALER());
+    game.create_table(TABLE_1, token_addr, 0, TWO_SEATS);
+    stop_cheat_caller_address(game.contract_address);
+
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.join_table(TABLE_1, SEAT_0, NOTE_A);
+    game.register_shuffle_key(TABLE_1, SEAT_0, PK_A_X, PK_A_Y, key_proof());
+    game.bet(TABLE_1, SEAT_0, 1_000);
+    stop_cheat_caller_address(game.contract_address);
+
+    start_cheat_caller_address(game.contract_address, BOB());
+    game.join_table(TABLE_1, SEAT_1, NOTE_B);
+    game.register_shuffle_key(TABLE_1, SEAT_1, PK_B_X, PK_B_Y, key_proof());
+    game.bet(TABLE_1, SEAT_1, 1_000);
+    stop_cheat_caller_address(game.contract_address);
+
+    start_cheat_caller_address(game.contract_address, DEALER());
+    game.begin_shuffle(TABLE_1, JOINT_X, JOINT_Y, DECK_0);
+    stop_cheat_caller_address(game.contract_address);
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.submit_shuffle(TABLE_1, DECK_1, proof());
+    stop_cheat_caller_address(game.contract_address);
+    start_cheat_caller_address(game.contract_address, BOB());
+    game.submit_shuffle(TABLE_1, DECK_2, proof());
+    stop_cheat_caller_address(game.contract_address);
+
+    game.open_deck(TABLE_1, all_positions(), all_ciphertexts(), proof());
+
+    start_cheat_caller_address(game.contract_address, DEALER());
+    game.advance_street(TABLE_1);
+    game.advance_street(TABLE_1);
+    game.advance_street(TABLE_1);
+    game.advance_street(TABLE_1);
+    stop_cheat_caller_address(game.contract_address);
+    game
+}
+
+fn reveal_board(game: zkpoker::IPokerGameDispatcher) {
+    let b = board();
+    let mut k: u32 = 0;
+    while k != 5 {
+        game.reveal_community_card(TABLE_1, k, SHARE_X, SHARE_Y, *b.at(k), proof());
+        k += 1;
+    }
+}
+
+fn reveal_hole(
+    game: zkpoker::IPokerGameDispatcher, who: starknet::ContractAddress, seat: felt252, a: u8, b: u8,
+) {
+    start_cheat_caller_address(game.contract_address, who);
+    game.commit_hole_shares(TABLE_1, seat, 0, commitment_for(SHARE_X, SHARE_Y, 'R0'));
+    game.commit_hole_shares(TABLE_1, seat, 1, commitment_for(SHARE_X, SHARE_Y, 'R1'));
+    stop_cheat_caller_address(game.contract_address);
+    game.reveal_hole_card(TABLE_1, seat, 0, SHARE_X, SHARE_Y, 'R0', a, proof());
+    game.reveal_hole_card(TABLE_1, seat, 1, SHARE_X, SHARE_Y, 'R1', b, proof());
+}
+
+#[test]
+fn test_settle_from_reveals_best_hand_wins() {
+    let game = setup_showdown();
+    reveal_board(game);
+    // ALICE: pair of aces. BOB: K-Q high.
+    reveal_hole(game, ALICE(), SEAT_0, card(12, 0), card(12, 1));
+    reveal_hole(game, BOB(), SEAT_1, card(11, 0), card(10, 1));
+
+    let mut spy = spy_events();
+    game.settle_from_reveals(TABLE_1);
+    assert(game.get_pending_payout(NOTE_A) == 2_000, 'alice should win whole pot');
+    assert(game.get_pending_payout(NOTE_B) == 0, 'bob should win nothing');
+    spy
+        .assert_emitted(
+            @array![
+                (
+                    game.contract_address,
+                    PokerGame::Event::Settled(
+                        PokerGame::Settled { table_id: TABLE_1, winner_count: 1 },
+                    ),
+                ),
+            ],
+        );
+}
+
+#[test]
+fn test_settle_from_reveals_tie_splits_pot() {
+    let game = setup_showdown();
+    reveal_board(game);
+    // Same ranks, different suits, on a board with no flush or straight.
+    reveal_hole(game, ALICE(), SEAT_0, card(12, 0), card(11, 1));
+    reveal_hole(game, BOB(), SEAT_1, card(12, 2), card(11, 3));
+
+    game.settle_from_reveals(TABLE_1);
+    assert(game.get_pending_payout(NOTE_A) == 1_000, 'alice half');
+    assert(game.get_pending_payout(NOTE_B) == 1_000, 'bob half');
+}
+
+// Everyone folded to one player: no cards are needed and none should be
+// demanded. Making them show would leak a hand nobody contested.
+#[test]
+fn test_settle_from_reveals_uncontested_needs_no_cards() {
+    let game = setup_showdown();
+    start_cheat_caller_address(game.contract_address, BOB());
+    game.fold(TABLE_1, SEAT_1);
+    stop_cheat_caller_address(game.contract_address);
+
+    game.settle_from_reveals(TABLE_1);
+    assert(game.get_pending_payout(NOTE_A) == 2_000, 'alice takes it uncontested');
+}
+
+// Anyone may settle: the contract reads every card and note from its own
+// storage, so there is nothing a caller could steer.
+#[test]
+fn test_settle_from_reveals_callable_by_anyone() {
+    let game = setup_showdown();
+    reveal_board(game);
+    reveal_hole(game, ALICE(), SEAT_0, card(12, 0), card(12, 1));
+    reveal_hole(game, BOB(), SEAT_1, card(11, 0), card(10, 1));
+
+    start_cheat_caller_address(game.contract_address, MALLORY());
+    game.settle_from_reveals(TABLE_1);
+    stop_cheat_caller_address(game.contract_address);
+    assert(game.get_pending_payout(NOTE_A) == 2_000, 'alice still wins');
+}
+
+#[test]
+#[feature("safe_dispatcher")]
+fn test_settle_from_reveals_incomplete_board_rejected() {
+    let game = setup_showdown();
+    let b = board();
+    game.reveal_community_card(TABLE_1, 0, SHARE_X, SHARE_Y, *b.at(0), proof());
+    reveal_hole(game, ALICE(), SEAT_0, card(12, 0), card(12, 1));
+    reveal_hole(game, BOB(), SEAT_1, card(11, 0), card(10, 1));
+
+    let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
+    match safe.settle_from_reveals(TABLE_1) {
+        Result::Ok(_) => panic!("settled on a 1-card board"),
+        Result::Err(panic_data) => assert(
+            *panic_data.at(0) == 'COMMUNITY_NOT_REVEALED', 'wrong error',
+        ),
+    }
+}
+
+// A contender who never opened cannot be scored. They have effectively
+// mucked -- but the hand cannot be settled while they are still in it.
+#[test]
+#[feature("safe_dispatcher")]
+fn test_settle_from_reveals_unrevealed_contender_rejected() {
+    let game = setup_showdown();
+    reveal_board(game);
+    reveal_hole(game, ALICE(), SEAT_0, card(12, 0), card(12, 1));
+
+    let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
+    match safe.settle_from_reveals(TABLE_1) {
+        Result::Ok(_) => panic!("scored a seat that never revealed"),
+        Result::Err(panic_data) => assert(*panic_data.at(0) == 'HOLE_NOT_REVEALED', 'wrong error'),
+    }
+}
+
+#[test]
+#[feature("safe_dispatcher")]
+fn test_settle_from_reveals_twice_rejected() {
+    let game = setup_showdown();
+    reveal_board(game);
+    reveal_hole(game, ALICE(), SEAT_0, card(12, 0), card(12, 1));
+    reveal_hole(game, BOB(), SEAT_1, card(11, 0), card(10, 1));
+    game.settle_from_reveals(TABLE_1);
+
+    let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
+    match safe.settle_from_reveals(TABLE_1) {
+        Result::Ok(_) => panic!("settled twice"),
+        Result::Err(panic_data) => assert(*panic_data.at(0) == 'ALREADY_SETTLED', 'wrong error'),
+    }
+}
+
+#[test]
+#[feature("safe_dispatcher")]
+fn test_settle_from_reveals_before_showdown_rejected() {
+    let (game, _v) = setup_opened();
+    let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
+    match safe.settle_from_reveals(TABLE_1) {
+        Result::Ok(_) => panic!("settled before showdown"),
+        Result::Err(panic_data) => assert(*panic_data.at(0) == 'NOT_SHOWDOWN', 'wrong error'),
+    }
+}
