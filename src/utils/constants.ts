@@ -7,12 +7,26 @@ import { ProviderInterface, RpcProvider } from "starknet";
 export const addrSTRK = "0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d";
 
 // Frontend RPC providers, indexed. The STRK20 privacy pool lives on Mainnet (0)
-// and Sepolia (2); index 1 is a spare public testnet endpoint. NEXT_PUBLIC_PROVIDER_URL
-// is your Alchemy key (see .env.example).
+// and Sepolia (2); index 1 is a spare public testnet endpoint; index 3 is a
+// local `starknet-devnet` instance (no STRK20 pool there — see Strk20Networks
+// below — but PokerGame's own entrypoints work fine against it). Point
+// NEXT_PUBLIC_DEVNET_RPC_URL at a non-default devnet host/port if needed;
+// defaults to `starknet-devnet`'s own default (127.0.0.1:5050).
+// NEXT_PUBLIC_PROVIDER_URL is your Alchemy key (see .env.example).
+export const devnetRpcUrl = process.env.NEXT_PUBLIC_DEVNET_RPC_URL ?? "http://127.0.0.1:5050";
+export const DEVNET_PROVIDER_INDEX = 3;
+
 export const myFrontendProviders: ProviderInterface[] = [
     new RpcProvider({ nodeUrl: "https://starknet-mainnet.g.alchemy.com/starknet/version/rpc/v0_10/" + process.env.NEXT_PUBLIC_PROVIDER_URL }),
     new RpcProvider({ nodeUrl: "https://starknet-testnet.public.blastapi.io/rpc/v0_7" }),
-    new RpcProvider({ nodeUrl: "https://starknet-sepolia.g.alchemy.com/starknet/version/rpc/v0_10/" + process.env.NEXT_PUBLIC_PROVIDER_URL })];
+    new RpcProvider({ nodeUrl: "https://starknet-sepolia.g.alchemy.com/starknet/version/rpc/v0_10/" + process.env.NEXT_PUBLIC_PROVIDER_URL }),
+    new RpcProvider({ nodeUrl: devnetRpcUrl })];
+
+// Display label for every provider index, including ones with no STRK20 pool
+// (unlike Strk20Networks below, which is deliberately only 0/2). Used purely
+// for UI text — "which network am I looking at" — never for gating STRK20
+// actions.
+export const NetworkLabels: Record<number, string> = { 0: "MAINNET", 2: "SEPOLIA", 3: "DEVNET" };
 
 // ─── Example anonymizer (echo helper) ───────────────────────────────────────
 // DEMO CONTRACT: StrkInvokeHelper (cairo/src/lib.cairo) just round-trips STRK
@@ -53,11 +67,12 @@ export const PokerGameMainnet = process.env.NEXT_PUBLIC_POKERGAME_MAINNET ?? "0x
 export const PokerGameSepolia = process.env.NEXT_PUBLIC_POKERGAME_SEPOLIA ?? "0x0";
 
 // Resolve PokerGame's address for a frontend provider index (0 = Mainnet, 2 =
-// Sepolia — same indices as echoHelperForIndex above). Returns "0x0" when
-// nothing is configured for that network.
+// Sepolia, 3 = local devnet — same indices as myFrontendProviders above).
+// Returns "0x0" when nothing is configured for that network.
 export function pokerGameAddressForIndex(index: number): string {
   if (index === 0) return PokerGameMainnet;
   if (index === 2) return PokerGameSepolia;
+  if (index === 3) return PokerGameDevnet;
   return "0x0";
 }
 
@@ -68,3 +83,17 @@ export function pokerGameAddressForIndex(index: number): string {
 // necessarily the STRK20-shielded asset. Swap for whatever token you're
 // actually testing with.
 export const defaultPokerToken = addrSTRK;
+
+// PokerGame deployed on a local `starknet-devnet` (see "Local devnet" in
+// PokerPanel.tsx). "0x0" = not deployed there — same pattern as Mainnet/
+// Sepolia above. There's no real STRK20 pool on devnet, so `pool` at
+// deploy time is typically some other funded devnet account, not a real
+// pool — only PokerGame's own entrypoints (not the STRK20-gated sections)
+// are expected to work against it.
+export const PokerGameDevnet = process.env.NEXT_PUBLIC_POKERGAME_DEVNET ?? "0x0";
+
+// A MockErc20 (cairo/src/mocks.cairo, `testing` feature) deployed on that
+// same devnet, pre-filling the Create Table / Bet token fields there — devnet
+// has no real STRK/addrSTRK deployment to point at instead. mint(to, amount)
+// on it is open to anyone, which is exactly what local testing wants.
+export const defaultDevnetToken = process.env.NEXT_PUBLIC_DEVNET_TOKEN ?? "0x0";

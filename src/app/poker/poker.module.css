@@ -178,3 +178,144 @@
   align-items: flex-end;
 }
 .tableIdRow .field { flex: 1; margin-bottom: 0; }
+
+/* ── Play/Verify mode toggle ─────────────────────────────────────────── */
+.modeToggle {
+  display: inline-flex;
+  padding: 4px;
+  background: var(--inset);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  margin-bottom: 16px;
+  gap: 2px;
+}
+.modeBtn {
+  font-family: var(--font-body), sans-serif;
+  font-size: 13.5px;
+  font-weight: 600;
+  padding: 8px 18px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.modeBtnActive { background: var(--card); color: var(--ink); box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08); }
+
+/* ── Visual table (Play mode) ────────────────────────────────────────── */
+.felt {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  min-height: 280px;
+  border-radius: 50% / 45%;
+  background: radial-gradient(circle at 50% 42%, #1c6b4d, #0e4a34 72%, #0a3a29);
+  border: 10px solid #5c3a22;
+  box-shadow:
+    inset 0 0 40px rgba(0, 0, 0, 0.45),
+    0 6px 18px rgba(0, 0, 0, 0.18);
+  margin-bottom: 18px;
+}
+.feltCenter {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  text-align: center;
+  color: #eafff4;
+}
+.feltPot { font-size: 15px; font-weight: 700; letter-spacing: -0.01em; }
+.feltStreet { font-size: 11.5px; opacity: 0.75; margin-top: 2px; text-transform: uppercase; letter-spacing: 0.04em; }
+.feltCards { display: flex; gap: 4px; margin-top: 10px; justify-content: center; }
+
+.cardBack {
+  width: 22px;
+  height: 30px;
+  border-radius: 4px;
+  background: repeating-linear-gradient(135deg, #b0491f, #b0491f 3px, #e56b43 3px, #e56b43 6px);
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  flex: none;
+}
+.cardFace {
+  width: 22px;
+  height: 30px;
+  border-radius: 4px;
+  background: #fff;
+  border: 1px solid var(--line);
+  color: var(--ink);
+  font-size: 10px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+}
+
+.seat {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  min-width: 92px;
+  max-width: 130px;
+  padding: 8px 10px;
+  border-radius: 12px;
+  background: rgba(13, 14, 14, 0.72);
+  color: #f2f2f0;
+  text-align: center;
+  font-size: 11.5px;
+  line-height: 1.4;
+  backdrop-filter: blur(2px);
+}
+.seatEmpty { background: rgba(13, 14, 14, 0.35); color: rgba(242, 242, 240, 0.6); font-style: italic; }
+.seatYou { outline: 2px solid var(--pink); outline-offset: 2px; }
+.seatAddr { font-family: var(--font-mono-ui, monospace); font-weight: 600; }
+.seatChips { color: #b7f3d6; font-weight: 700; margin-top: 2px; }
+.seatBadges { display: flex; gap: 4px; justify-content: center; margin-top: 3px; }
+.seatBadge {
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--pink);
+  color: #fff;
+  letter-spacing: 0.03em;
+}
+
+/* ── Bottom action bar (your seat, Play mode) ────────────────────────── */
+.actionBar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.chipBtn {
+  font-family: var(--font-mono-ui, monospace);
+  font-size: 12.5px;
+  font-weight: 700;
+  padding: 7px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--inset);
+  color: var(--ink);
+  cursor: pointer;
+}
+.chipBtn:hover { background: var(--inset-2); }
+
+/* ── Fairness check grid (Verify mode) ───────────────────────────────── */
+.deckGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(64px, 1fr));
+  gap: 6px;
+  margin-top: 10px;
+}
+.deckCell {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px 4px;
+  text-align: center;
+  background: var(--inset);
+}
+.deckCellSelf { background: var(--pink-soft); border-color: var(--pink-soft-2); }
+.deckCellCommunity { background: var(--green-soft); border-color: #cdeede; }
+.deckPos { font-size: 9.5px; color: var(--muted); }
+.deckCard { font-family: var(--font-mono-ui, monospace); font-weight: 700; font-size: 13px; margin-top: 2px; }
+.deckWho { font-size: 9px; color: var(--muted); margin-top: 1px; }

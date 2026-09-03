@@ -1,15 +1,18 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import { num } from "starknet";
+import { useEffect, useMemo, useState } from "react";
+import { num, type AccountInterface } from "starknet";
 import type { WALLET_API } from "@starknet-io/types-js";
 import styles from "./poker.module.css";
 import uni from "../uni.module.css";
 import * as constants from "@/utils/constants";
 import { useStoreWallet } from "../components/Wallet/walletContext";
 import { useFrontendProvider } from "../components/client/provider/providerContext";
+import { useDevnetAccount } from "../components/client/provider/devnetAccountContext";
 import SelectWallet from "../components/client/WalletHandle/SelectWallet";
+import ConnectDevnet from "../components/client/WalletHandle/ConnectDevnet";
 import {
+  SHOWDOWN_STREET,
   STREET_NAMES,
   cardToName,
   erc20ApproveCall,
@@ -21,6 +24,7 @@ import {
   seedHashOf,
   toFelt,
 } from "./pokerActions";
+import { communityPosition, seatHolePositions, shuffledDeckFromSeed } from "./fairness";
 
 // ─── shared result-card plumbing (mirrors WalletAccountV6Tag.tsx's, kept
 // local to this file since the two pages' CSS modules differ) ────────────
@@ -89,12 +93,14 @@ function ResultCard({ r, explorerTxUrl }: { r: ActionResult; explorerTxUrl: (h: 
           {r.rows.map((row) => (
             <div key={row.label} className={uni.receiptRow}>
               <span className={uni.receiptLabel}>{row.label}</span>
-              {row.label === "Transaction" ? (
+              {row.label === "Transaction" && explorerTxUrl(row.value) ? (
                 <a className={uni.receiptLink} href={explorerTxUrl(row.value)} target="_blank" rel="noreferrer">
                   {shortHex(row.value)} ↗
                 </a>
               ) : (
-                <span className={uni.receiptValue}>{row.value}</span>
+                <span className={uni.receiptValue}>
+                  {row.label === "Transaction" ? shortHex(row.value) : row.value}
+                </span>
               )}
             </div>
           ))}
@@ -125,8 +131,48 @@ export default function PokerPanel() {
   const connectedAddress = useStoreWallet((s) => s.address);
   const isConnected = useStoreWallet((s) => s.isConnected);
 
+  // A local devnet account (see ConnectDevnet.tsx) is a second, independent
+  // way to sign PokerGame calls — no browser wallet extension needed. It
+  // takes priority once connected (an explicit "use devnet" choice), and it
+  // can drive every PokerGame entrypoint that just needs `.execute()` — the
+  // STRK20-gated sections below (Deal hole cards, Reserve/Claim payout)
+  // still require a real wallet's strk20InvokeTransaction, which a plain
+  // devnet Account doesn't implement and devnet has no pool to talk to
+  // anyway; those keep reading `myWalletAccount`/`connectedAddress` directly.
+  const devnetAccount = useDevnetAccount((s) => s.account);
+  const devnetAddress = useDevnetAccount((s) => s.address);
+  const devnetConnected = useDevnetAccount((s) => s.connected);
+  const activeAccount: AccountInterface | undefined = devnetConnected ? devnetAccount : myWalletAccount;
+  const activeAddress = devnetConnected ? devnetAddress : connectedAddress;
+  const activeConnected = devnetConnected || isConnected;
+
+  // "Play": a guided visual table, sensible defaults, no raw-felt typing —
+  // for trying the game with no prior context. "Verify": every raw
+  // entrypoint/read this page has always had, plus a fairness-check panel
+  // that independently recomputes a revealed deal — for someone who wants
+  // to check the contract's claims directly rather than trust the UI.
+  // Persisted locally purely as a per-browser convenience.
+  const [mode, setMode] = useState<"play" | "verify">("play");
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem("pokerUiMode");
+      if (saved === "play" || saved === "verify") setMode(saved);
+    } catch {
+      /* private browsing / storage blocked — default stands */
+    }
+  }, []);
+  function setModeAndPersist(m: "play" | "verify") {
+    setMode(m);
+    try {
+      localStorage.setItem("pokerUiMode", m);
+    } catch {
+      /* ignore */
+    }
+  }
+
   const networkName = constants.Strk20Networks[myFrontendProviderIndex];
   const isStrk20Network = networkName !== undefined;
+  const networkLabel = constants.NetworkLabels[myFrontendProviderIndex] ?? "this network";
   const pokerGameAddr = constants.pokerGameAddressForIndex(myFrontendProviderIndex);
   const deployed = (() => {
     try {
@@ -138,14 +184,21 @@ export default function PokerPanel() {
   const provider = constants.myFrontendProviders[myFrontendProviderIndex];
   const reader = useMemo(() => (deployed ? pokerGameReader(pokerGameAddr, provider) : null), [deployed, pokerGameAddr, provider]);
 
+  // No block explorer exists for a local devnet — ResultCard falls back to
+  // plain (unlinked) text whenever this returns "".
   const explorerTxUrl = (h: string) =>
-    myFrontendProviderIndex === 0 ? `https://voyager.online/tx/${h}` : `https://sepolia.voyager.online/tx/${h}`;
+    myFrontendProviderIndex === constants.DEVNET_PROVIDER_INDEX
+      ? ""
+      : myFrontendProviderIndex === 0
+        ? `https://voyager.online/tx/${h}`
+        : `https://sepolia.voyager.online/tx/${h}`;
 
   // ── table state ──────────────────────────────────────────────────────
   const [tableIdText, setTableIdText] = useState("TABLE_1");
   const [loadedTableId, setLoadedTableId] = useState<string | null>(null);
   const [tableState, setTableState] = useState<TableState | null>(null);
   const [loadResult, setLoadResult] = useState<ActionResult | null>(null);
+  const [seatState, setSeatState] = useState<{ seat: number; owner: string; contributed: bigint }[] | null>(null);
 
   async function loadTable() {
     setLoadResult(null);
@@ -186,6 +239,20 @@ export default function PokerPanel() {
         createdAt: BigInt(createdAt),
         poolFromContract: num.toHex(poolFromContract),
       });
+      // Per-seat state, for the visual table (Play mode) — who's sitting
+      // where and how much they've put in. Not part of the original admin
+      // panel's reads; used only to render the seat ring.
+      const maxSeatsNum = Number(maxSeats);
+      const seats = await Promise.all(
+        Array.from({ length: maxSeatsNum }, (_, seat) => seat).map(async (seat) => {
+          const [owner, contributed] = await Promise.all([
+            reader.get_seat_owner(tableId, seat),
+            reader.get_seat_contributed(tableId, seat),
+          ]);
+          return { seat, owner: num.toHex(owner), contributed: BigInt(contributed) };
+        }),
+      );
+      setSeatState(seats);
       setLoadResult(null);
     } catch (e) {
       setLoadResult(errorResult(e));
@@ -194,24 +261,50 @@ export default function PokerPanel() {
 
   const tableExists = tableState !== null && tableState.dealer !== "0x0";
   const isDealer =
-    isConnected &&
+    activeConnected &&
     tableExists &&
-    connectedAddress &&
+    activeAddress &&
     (() => {
       try {
-        return num.toBigInt(connectedAddress) === num.toBigInt(tableState!.dealer);
+        return num.toBigInt(activeAddress) === num.toBigInt(tableState!.dealer);
       } catch {
         return false;
       }
     })();
+
+  // Which loaded seat (if any) is you, and the first open one if you don't
+  // have one yet — drives the visual table's "sit down" prompt and action
+  // bar (Play mode). addrEq guards every compare the same way isDealer does
+  // above: an unparseable address (e.g. "0x0") just means "not a match".
+  function addrEq(a: string, b: string): boolean {
+    try {
+      return num.toBigInt(a) === num.toBigInt(b);
+    } catch {
+      return false;
+    }
+  }
+  const mySeat =
+    activeConnected && activeAddress && seatState
+      ? seatState.find((s) => s.owner !== "0x0" && addrEq(s.owner, activeAddress))?.seat
+      : undefined;
+  const firstOpenSeat = seatState?.find((s) => s.owner === "0x0")?.seat;
 
   // ── Create table ──────────────────────────────────────────────────────
   const [createResult, setCreateResult] = useState<ActionResult | null>(null);
   const [ctToken, setCtToken] = useState(constants.defaultPokerToken);
   const [ctBuyIn, setCtBuyIn] = useState("0");
   const [ctMaxSeats, setCtMaxSeats] = useState("6");
+  // Devnet has no real STRK deployment — swap the Token field's default to
+  // the devnet MockErc20 once devnet connects, but only if the field is
+  // still untouched (don't clobber something the user typed).
+  useEffect(() => {
+    if (devnetConnected && ctToken === constants.defaultPokerToken && constants.defaultDevnetToken !== "0x0") {
+      setCtToken(constants.defaultDevnetToken);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [devnetConnected]);
   async function handleCreateTable() {
-    await runAction(setCreateResult, "Create table", myWalletAccount, deployed, async () => {
+    await runAction(setCreateResult, "Create table", activeAccount, deployed, async () => {
       const tableId = toFelt(tableIdText);
       const call = pgCall(pokerGameAddr, "create_table", {
         table_id: tableId,
@@ -219,7 +312,7 @@ export default function PokerPanel() {
         buy_in: BigInt(ctBuyIn || "0"),
         max_seats: Number(ctMaxSeats),
       });
-      const { txHash } = await executeAndWait(myWalletAccount!, provider, [call]);
+      const { txHash } = await executeAndWait(activeAccount!, provider, [call]);
       return { txHash };
     }, () => { if (loadedTableId) loadTable(); });
   }
@@ -294,13 +387,13 @@ export default function PokerPanel() {
   const [jtSeat, setJtSeat] = useState("0");
   const [jtNoteId, setJtNoteId] = useState("");
   async function handleJoinTable() {
-    await runAction(setJoinResult, "Join table", myWalletAccount, deployed, async () => {
+    await runAction(setJoinResult, "Join table", activeAccount, deployed, async () => {
       const call = pgCall(pokerGameAddr, "join_table", {
         table_id: toFelt(tableIdText),
         seat: jtSeat,
         hole_card_note_id: toFelt(jtNoteId),
       });
-      const { txHash } = await executeAndWait(myWalletAccount!, provider, [call]);
+      const { txHash } = await executeAndWait(activeAccount!, provider, [call]);
       return { txHash };
     }, () => { if (loadedTableId) loadTable(); });
   }
@@ -310,8 +403,12 @@ export default function PokerPanel() {
   const [foldResult, setFoldResult] = useState<ActionResult | null>(null);
   const [betSeat, setBetSeat] = useState("0");
   const [betAmount, setBetAmount] = useState("0");
-  async function handleBet() {
-    await runAction(setBetResult, "Bet", myWalletAccount, deployed, async () => {
+  // seatOverride: Play mode's action bar drives this for "your" seat
+  // directly, rather than going through setBetSeat + a synchronous call —
+  // React state updates aren't visible to a function invoked in the same
+  // tick, so that pattern would read the stale seat.
+  async function handleBet(seatOverride?: string) {
+    await runAction(setBetResult, "Bet", activeAccount, deployed, async () => {
       const tableId = toFelt(tableIdText);
       const amount = BigInt(betAmount || "0");
       // Approve + bet in ONE multicall. PokerGame has no get_table_token
@@ -322,9 +419,9 @@ export default function PokerPanel() {
       const tokenAddr = toFelt(ctToken);
       const calls = [
         erc20ApproveCall(tokenAddr, pokerGameAddr, amount),
-        pgCall(pokerGameAddr, "bet", { table_id: tableId, seat: betSeat, amount }),
+        pgCall(pokerGameAddr, "bet", { table_id: tableId, seat: seatOverride ?? betSeat, amount }),
       ];
-      const { txHash } = await executeAndWait(myWalletAccount!, provider, calls);
+      const { txHash } = await executeAndWait(activeAccount!, provider, calls);
       return { txHash };
     }, () => { if (loadedTableId) loadTable(); });
   }
@@ -343,55 +440,122 @@ export default function PokerPanel() {
       return "";
     }
   })();
-  async function handleCommitDeal() {
-    await runAction(setCommitResult, "Commit deal", myWalletAccount, deployed, async () => {
+  async function handleCommitDeal(seedOverride?: string) {
+    await runAction(setCommitResult, "Commit deal", activeAccount, deployed, async () => {
+      const seed = seedOverride ?? seedText;
       const call = pgCall(pokerGameAddr, "commit_deal", {
         table_id: toFelt(tableIdText),
-        seed_hash: seedHashOf(toFelt(seedText)),
+        seed_hash: seedHashOf(toFelt(seed)),
       });
-      const { txHash } = await executeAndWait(myWalletAccount!, provider, [call]);
+      const { txHash } = await executeAndWait(activeAccount!, provider, [call]);
       return { txHash };
     }, () => { if (loadedTableId) loadTable(); });
   }
   async function handleMarkDealt() {
-    await runAction(setMarkDealtResult, "Mark dealt", myWalletAccount, deployed, async () => {
+    await runAction(setMarkDealtResult, "Mark dealt", activeAccount, deployed, async () => {
       const call = pgCall(pokerGameAddr, "mark_dealt", { table_id: toFelt(tableIdText) });
-      const { txHash } = await executeAndWait(myWalletAccount!, provider, [call]);
+      const { txHash } = await executeAndWait(activeAccount!, provider, [call]);
       return { txHash };
     }, () => { if (loadedTableId) loadTable(); });
   }
-  async function handleRevealSeed() {
-    await runAction(setRevealResult, "Reveal seed", myWalletAccount, deployed, async () => {
-      const call = pgCall(pokerGameAddr, "reveal_seed", { table_id: toFelt(tableIdText), seed: toFelt(seedText) });
-      const { txHash } = await executeAndWait(myWalletAccount!, provider, [call]);
+  async function handleRevealSeed(seedOverride?: string) {
+    await runAction(setRevealResult, "Reveal seed", activeAccount, deployed, async () => {
+      const call = pgCall(pokerGameAddr, "reveal_seed", {
+        table_id: toFelt(tableIdText),
+        seed: toFelt(seedOverride ?? seedText),
+      });
+      const { txHash } = await executeAndWait(activeAccount!, provider, [call]);
       return { txHash };
     }, () => { if (loadedTableId) loadTable(); });
   }
   async function handleAdvanceStreet() {
-    await runAction(setAdvanceResult, "Advance street", myWalletAccount, deployed, async () => {
+    await runAction(setAdvanceResult, "Advance street", activeAccount, deployed, async () => {
       const call = pgCall(pokerGameAddr, "advance_street", { table_id: toFelt(tableIdText) });
-      const { txHash } = await executeAndWait(myWalletAccount!, provider, [call]);
+      const { txHash } = await executeAndWait(activeAccount!, provider, [call]);
       return { txHash };
     }, () => { if (loadedTableId) loadTable(); });
   }
 
   // ── Fold / reclaim ────────────────────────────────────────────────────
   const [foldSeat, setFoldSeat] = useState("0");
-  async function handleFold() {
-    await runAction(setFoldResult, "Fold", myWalletAccount, deployed, async () => {
-      const call = pgCall(pokerGameAddr, "fold", { table_id: toFelt(tableIdText), seat: foldSeat });
-      const { txHash } = await executeAndWait(myWalletAccount!, provider, [call]);
+  async function handleFold(seatOverride?: string) {
+    await runAction(setFoldResult, "Fold", activeAccount, deployed, async () => {
+      const call = pgCall(pokerGameAddr, "fold", { table_id: toFelt(tableIdText), seat: seatOverride ?? foldSeat });
+      const { txHash } = await executeAndWait(activeAccount!, provider, [call]);
       return { txHash };
     }, () => { if (loadedTableId) loadTable(); });
   }
   const [reclaimResult, setReclaimResult] = useState<ActionResult | null>(null);
   const [reclaimSeat, setReclaimSeat] = useState("0");
   async function handleReclaim() {
-    await runAction(setReclaimResult, "Reclaim stalled bet", myWalletAccount, deployed, async () => {
+    await runAction(setReclaimResult, "Reclaim stalled bet", activeAccount, deployed, async () => {
       const call = pgCall(pokerGameAddr, "reclaim_stalled_bet", { table_id: toFelt(tableIdText), seat: reclaimSeat });
-      const { txHash } = await executeAndWait(myWalletAccount!, provider, [call]);
+      const { txHash } = await executeAndWait(activeAccount!, provider, [call]);
       return { txHash };
     }, () => { if (loadedTableId) loadTable(); });
+  }
+
+  // ── Play mode: quick actions ──────────────────────────────────────────
+  // Everything below wraps the SAME entrypoints/state above with sensible
+  // defaults and no raw-felt typing, for the visual table view. Nothing new
+  // is added to the contract surface.
+  const [quickStartResult, setQuickStartResult] = useState<ActionResult | null>(null);
+
+  // A random felt, good enough for a devnet/test hole_card_note_id where
+  // there's no real STRK20 note behind it — NOT a substitute for the real
+  // "Deal hole cards" flow above, which is what actually needs to happen
+  // before join_table on a real network.
+  function randomFelt(): string {
+    return num.toHex(BigInt(Date.now()) * 1_000_000n + BigInt(Math.floor(Math.random() * 1_000_000)));
+  }
+
+  async function handleQuickStart() {
+    await runAction(setQuickStartResult, "Create table & sit down", activeAccount, deployed, async () => {
+      const tableId = toFelt(tableIdText);
+      const calls = [
+        pgCall(pokerGameAddr, "create_table", {
+          table_id: tableId,
+          token: toFelt(ctToken),
+          buy_in: BigInt(ctBuyIn || "0"),
+          max_seats: Number(ctMaxSeats),
+        }),
+        pgCall(pokerGameAddr, "join_table", {
+          table_id: tableId,
+          seat: "0",
+          hole_card_note_id: jtNoteId.trim() ? toFelt(jtNoteId) : randomFelt(),
+        }),
+      ];
+      const { txHash } = await executeAndWait(activeAccount!, provider, calls);
+      return { txHash };
+    }, () => loadTable());
+  }
+
+  async function handleQuickJoin(seat: number) {
+    await runAction(setJoinResult, "Join table", activeAccount, deployed, async () => {
+      const call = pgCall(pokerGameAddr, "join_table", {
+        table_id: toFelt(tableIdText),
+        seat: seat.toString(),
+        hole_card_note_id: randomFelt(),
+      });
+      const { txHash } = await executeAndWait(activeAccount!, provider, [call]);
+      return { txHash };
+    }, () => loadTable());
+  }
+
+  // One click: generate a seed nobody's seen yet, commit its hash, and
+  // remember the seed locally so "Reveal" (below) is also one click. The
+  // Verify-mode Seed field (seedText) is kept in sync so an expert can see
+  // exactly what got committed, not a hidden value.
+  const [autoSeed, setAutoSeed] = useState<string | null>(null);
+  async function handleQuickCommit() {
+    const seed = randomFelt();
+    setAutoSeed(seed);
+    setSeedText(seed);
+    await handleCommitDeal(seed);
+  }
+  async function handleQuickReveal() {
+    if (!autoSeed) return;
+    await handleRevealSeed(autoSeed);
   }
 
   // ── Settle (trusted winner list) ─────────────────────────────────────
@@ -399,7 +563,7 @@ export default function PokerPanel() {
   const [settleWinners, setSettleWinners] = useState("0");
   const [settleNoteIds, setSettleNoteIds] = useState("");
   async function handleSettleTable() {
-    await runAction(setSettleResult, "Settle table", myWalletAccount, deployed, async () => {
+    await runAction(setSettleResult, "Settle table", activeAccount, deployed, async () => {
       const winners = settleWinners.split(",").map((s) => s.trim()).filter(Boolean);
       const noteIds = settleNoteIds.split(",").map((s) => toFelt(s.trim())).filter(Boolean);
       const call = pgCall(pokerGameAddr, "settle_table", {
@@ -407,7 +571,7 @@ export default function PokerPanel() {
         winners,
         payout_note_ids: noteIds,
       });
-      const { txHash } = await executeAndWait(myWalletAccount!, provider, [call]);
+      const { txHash } = await executeAndWait(activeAccount!, provider, [call]);
       return { txHash };
     }, () => { if (loadedTableId) loadTable(); });
   }
@@ -419,7 +583,7 @@ export default function PokerPanel() {
   const [sbhCommunity, setSbhCommunity] = useState("Qh,Tc,5h,3d,Ac");
   const [sbhNoteIds, setSbhNoteIds] = useState("");
   async function handleSettleByHand() {
-    await runAction(setSettleHandResult, "Settle table by hand", myWalletAccount, deployed, async () => {
+    await runAction(setSettleHandResult, "Settle table by hand", activeAccount, deployed, async () => {
       const seats = sbhSeats.split(",").map((s) => s.trim()).filter(Boolean);
       const holeLines = sbhHoleCards.split("\n").map((l) => l.trim()).filter(Boolean);
       const holeCards = holeLines.map((line) => {
@@ -440,7 +604,7 @@ export default function PokerPanel() {
         community_cards: community,
         payout_note_ids: noteIds,
       });
-      const { txHash } = await executeAndWait(myWalletAccount!, provider, [call]);
+      const { txHash } = await executeAndWait(activeAccount!, provider, [call]);
       return { txHash };
     }, () => { if (loadedTableId) loadTable(); });
   }
@@ -493,9 +657,9 @@ export default function PokerPanel() {
   const [registerNoteResult, setRegisterNoteResult] = useState<ActionResult | null>(null);
   const [reserveNoteId, setReserveNoteId] = useState("");
   async function handleRegisterPayoutNote() {
-    await runAction(setRegisterNoteResult, "Register payout note", myWalletAccount, deployed, async () => {
+    await runAction(setRegisterNoteResult, "Register payout note", activeAccount, deployed, async () => {
       const call = pgCall(pokerGameAddr, "register_payout_note", { note_id: toFelt(reserveNoteId) });
-      const { txHash } = await executeAndWait(myWalletAccount!, provider, [call]);
+      const { txHash } = await executeAndWait(activeAccount!, provider, [call]);
       return { txHash };
     });
   }
@@ -543,22 +707,48 @@ export default function PokerPanel() {
   }
 
   // ── render ────────────────────────────────────────────────────────────
-  const disabledReason = !isConnected ? "Connect a wallet." : !deployed ? `PokerGame not deployed on ${networkName ?? "this network"}.` : "";
+  const disabledReason = !activeConnected ? "Connect a wallet." : !deployed ? `PokerGame not deployed on ${networkLabel}.` : "";
 
   return (
     <div className={styles.wrap}>
+      <div className={styles.section}>
+        <div className={styles.sectionTitle}>Network</div>
+        <p className={styles.sectionHint}>
+          {networkLabel}
+          {isStrk20Network ? "" : " — no STRK20 pool here, so the STRK20-gated sections below stay disabled."}
+          {" "}Switch by connecting a real wallet on Mainnet/Sepolia, or use a local{" "}
+          <span className={styles.bannerCode}>starknet-devnet</span> account below.
+        </p>
+        <ConnectDevnet />
+      </div>
+
+      <div className={styles.modeToggle}>
+        <button
+          className={`${styles.modeBtn} ${mode === "play" ? styles.modeBtnActive : ""}`}
+          onClick={() => setModeAndPersist("play")}
+        >
+          Play
+        </button>
+        <button
+          className={`${styles.modeBtn} ${mode === "verify" ? styles.modeBtnActive : ""}`}
+          onClick={() => setModeAndPersist("verify")}
+        >
+          Verify
+        </button>
+      </div>
+
       {!deployed && (
         <div className={styles.banner}>
-          <b>PokerGame isn&apos;t deployed on {networkName ?? "this network"} yet.</b> Set{" "}
+          <b>PokerGame isn&apos;t deployed on {networkLabel} yet.</b> Set{" "}
           <span className={styles.bannerCode}>
-            NEXT_PUBLIC_POKERGAME_{networkName ?? "SEPOLIA"}
+            NEXT_PUBLIC_POKERGAME_{networkLabel}
           </span>{" "}
           in <span className={styles.bannerCode}>.env.local</span> once it is (see cairo/address.md) — every
           action below is wired and ready, it just has nowhere to send a transaction yet.
         </div>
       )}
 
-      {!isConnected && (
+      {!activeConnected && (
         <div className={styles.section}>
           <div className={styles.sectionTitle}>Connect a wallet to get started</div>
           <div className={styles.actionsRow}>
@@ -631,6 +821,239 @@ export default function PokerPanel() {
         )}
       </div>
 
+      {/* ── Play mode: visual table ── */}
+      {mode === "play" && (
+        <>
+          {!tableExists ? (
+            <div className={styles.section}>
+              <div className={styles.sectionTitle}>Get started</div>
+              <p className={styles.sectionHint}>
+                One click: creates a table (buy-in 0, 6 seats) and sits you down at seat 0 as its dealer. Or type
+                an existing table_id above, hit Load, then use the sit-down prompt that appears below.
+              </p>
+              <div className={styles.actionsRow}>
+                <button
+                  className={`${uni.btn} ${uni.btnGreen}`}
+                  onClick={handleQuickStart}
+                  disabled={!activeConnected || !deployed}
+                >
+                  Create table &amp; sit down
+                </button>
+              </div>
+              {quickStartResult ? <ResultCard r={quickStartResult} explorerTxUrl={explorerTxUrl} /> : null}
+            </div>
+          ) : (
+            <div className={styles.section}>
+              <div className={styles.sectionHead}>
+                <span className={styles.sectionTitle}>At the table</span>
+                <span className={`${styles.chip} ${styles.chipMuted}`}>table_id: {tableIdText}</span>
+              </div>
+
+              <div className={styles.felt}>
+                <div className={styles.feltCenter}>
+                  <div className={styles.feltPot}>Pot: {tableState!.pot.toString()}</div>
+                  <div className={styles.feltStreet}>
+                    {STREET_NAMES[tableState!.street] ?? tableState!.street}
+                    {tableState!.settled ? " · settled" : ""}
+                  </div>
+                  <div className={styles.feltCards}>
+                    {Array.from({ length: 5 }).map((_, i) => (
+                      <div
+                        key={i}
+                        className={styles.cardBack}
+                        title="Community cards stay hidden until showdown in this contract — see Verify mode's Fairness check once revealed."
+                      />
+                    ))}
+                  </div>
+                </div>
+                {seatState?.map((s) => {
+                  const empty = s.owner === "0x0";
+                  const angle = (2 * Math.PI * s.seat) / tableState!.maxSeats - Math.PI / 2;
+                  const left = `${50 + 42 * Math.cos(angle)}%`;
+                  const top = `${50 + 40 * Math.sin(angle)}%`;
+                  const seatIsDealer = !empty && addrEq(s.owner, tableState!.dealer);
+                  const seatIsYou = mySeat === s.seat;
+                  return (
+                    <div
+                      key={s.seat}
+                      className={`${styles.seat} ${empty ? styles.seatEmpty : ""} ${seatIsYou ? styles.seatYou : ""}`}
+                      style={{ left, top }}
+                    >
+                      <div>Seat {s.seat}</div>
+                      {empty ? <div>open</div> : <div className={styles.seatAddr}>{shortHex(s.owner)}</div>}
+                      {!empty && <div className={styles.seatChips}>{s.contributed.toString()}</div>}
+                      {(seatIsDealer || seatIsYou) && (
+                        <div className={styles.seatBadges}>
+                          {seatIsDealer && <span className={styles.seatBadge}>DEALER</span>}
+                          {seatIsYou && <span className={styles.seatBadge}>YOU</span>}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+
+              {mySeat === undefined && firstOpenSeat !== undefined && (
+                <div className={styles.actionsRow}>
+                  <button
+                    className={`${uni.btn} ${uni.btnGreen}`}
+                    onClick={() => handleQuickJoin(firstOpenSeat)}
+                    disabled={!activeConnected || !deployed}
+                  >
+                    Sit down at seat {firstOpenSeat}
+                  </button>
+                </div>
+              )}
+              {mySeat === undefined && firstOpenSeat === undefined && seatState && (
+                <p className={styles.sectionHint}>Table&apos;s full — every seat is taken.</p>
+              )}
+
+              {mySeat !== undefined && (
+                <div className={styles.actionBar} style={{ marginTop: 14 }}>
+                  <input
+                    className={styles.input}
+                    style={{ maxWidth: 120 }}
+                    value={betAmount}
+                    onChange={(e) => setBetAmount(e.target.value)}
+                  />
+                  {[10, 25, 50].map((v) => (
+                    <button key={v} className={styles.chipBtn} onClick={() => setBetAmount(v.toString())}>
+                      +{v}
+                    </button>
+                  ))}
+                  <button
+                    className={`${uni.btn} ${uni.btnGreen}`}
+                    onClick={() => handleBet(String(mySeat))}
+                    disabled={!deployed}
+                  >
+                    Bet
+                  </button>
+                  <button className={uni.btn} onClick={() => handleFold(String(mySeat))} disabled={!deployed}>
+                    Fold
+                  </button>
+                </div>
+              )}
+              {betResult ? <ResultCard r={betResult} explorerTxUrl={explorerTxUrl} /> : null}
+              {foldResult ? <ResultCard r={foldResult} explorerTxUrl={explorerTxUrl} /> : null}
+              {joinResult ? <ResultCard r={joinResult} explorerTxUrl={explorerTxUrl} /> : null}
+
+              {isDealer && (
+                <div style={{ marginTop: 16 }}>
+                  <div className={styles.sectionTitle} style={{ fontSize: 13 }}>
+                    Dealer
+                  </div>
+                  <p className={styles.sectionHint}>
+                    Commit a fresh seed now, advance streets as betting rounds finish, reveal that same seed at
+                    showdown. Check the math behind this yourself in Verify mode&apos;s Fairness check.
+                  </p>
+                  <div className={styles.actionsRow}>
+                    <button
+                      className={uni.btn}
+                      onClick={handleQuickCommit}
+                      disabled={!deployed || tableState!.seedHash !== "0x0"}
+                    >
+                      Commit deal (random seed)
+                    </button>
+                    <button
+                      className={uni.btn}
+                      onClick={handleAdvanceStreet}
+                      disabled={!deployed || tableState!.street >= SHOWDOWN_STREET}
+                    >
+                      Advance street
+                    </button>
+                    <button
+                      className={uni.btn}
+                      onClick={handleQuickReveal}
+                      disabled={!deployed || !autoSeed || tableState!.revealedSeed !== "0x0"}
+                    >
+                      Reveal seed
+                    </button>
+                  </div>
+                  {commitResult ? <ResultCard r={commitResult} explorerTxUrl={explorerTxUrl} /> : null}
+                  {advanceResult ? <ResultCard r={advanceResult} explorerTxUrl={explorerTxUrl} /> : null}
+                  {revealResult ? <ResultCard r={revealResult} explorerTxUrl={explorerTxUrl} /> : null}
+                </div>
+              )}
+            </div>
+          )}
+        </>
+      )}
+
+      {/* ── Verify mode: fairness check ── */}
+      {mode === "verify" && tableState && (
+        <div className={styles.section}>
+          <div className={styles.sectionTitle}>Fairness check</div>
+          <p className={styles.sectionHint}>
+            Recomputes this table&apos;s deal in your browser from the revealed seed — the same check
+            scripts/deal_verify.py does from a terminal, and the exact algorithm cairo/src/shuffle.cairo runs
+            on-chain (this port is checked against cairo/src/shuffle_vector_check.cairo&apos;s own pinned vector,
+            not assumed equivalent). Every value below comes from the contract reads above, or is computed from
+            them right here — nothing is trusted from the UI itself.
+          </p>
+          {tableState.revealedSeed === "0x0" ? (
+            <p className={styles.sectionHint}>Seed not revealed yet — nothing to check until reveal_seed runs.</p>
+          ) : (
+            (() => {
+              const computedHashFromSeed = seedHashOf(tableState.revealedSeed);
+              const matches = computedHashFromSeed === tableState.seedHash;
+              const deck = shuffledDeckFromSeed(tableState.revealedSeed);
+              const maxSeats = tableState.maxSeats;
+              function deckPositionLabel(pos: number): string | null {
+                for (let s = 0; s < maxSeats; s++) {
+                  const [a, b] = seatHolePositions(s);
+                  if (pos === a || pos === b) return `Seat ${s}`;
+                }
+                for (let k = 0; k < 5; k++) {
+                  if (pos === communityPosition(k, maxSeats)) return `Community ${k + 1}`;
+                }
+                return null;
+              }
+              return (
+                <>
+                  <div className={styles.stateGrid}>
+                    <div className={styles.stateItem}>
+                      <span className={styles.stateLabel}>seed_hash (on-chain)</span>
+                      <span className={styles.stateValue}>{shortHex(tableState.seedHash)}</span>
+                    </div>
+                    <div className={styles.stateItem}>
+                      <span className={styles.stateLabel}>poseidon(revealed_seed) — computed here</span>
+                      <span className={styles.stateValue}>{shortHex(computedHashFromSeed)}</span>
+                    </div>
+                    <div className={styles.stateItem}>
+                      <span className={styles.stateLabel}>Match</span>
+                      <span className={styles.stateValue}>{matches ? "✓ matches" : "✗ MISMATCH"}</span>
+                    </div>
+                  </div>
+                  <p className={styles.sectionHint} style={{ marginTop: 12 }}>
+                    Full recomputed deck (deck position → card). Highlighted cells are exactly what
+                    settle_table_by_hand requires each seat&apos;s hole cards / each community card to equal.
+                  </p>
+                  <div className={styles.deckGrid}>
+                    {deck.map((card, pos) => {
+                      const label = deckPositionLabel(pos);
+                      return (
+                        <div
+                          key={pos}
+                          className={`${styles.deckCell} ${
+                            label?.startsWith("Seat") ? styles.deckCellSelf : ""
+                          } ${label?.startsWith("Community") ? styles.deckCellCommunity : ""}`}
+                        >
+                          <div className={styles.deckPos}>#{pos}</div>
+                          <div className={styles.deckCard}>{cardToName(card)}</div>
+                          {label && <div className={styles.deckWho}>{label}</div>}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </>
+              );
+            })()
+          )}
+        </div>
+      )}
+
+      {mode === "verify" && (
+        <>
       {/* ── Create table ── */}
       <div className={styles.section}>
         <div className={styles.sectionTitle}>Create table</div>
@@ -653,7 +1076,7 @@ export default function PokerPanel() {
           </div>
         </div>
         <div className={styles.actionsRow}>
-          <button className={`${uni.btn} ${uni.btnGreen}`} onClick={handleCreateTable} disabled={!isConnected || !deployed}>
+          <button className={`${uni.btn} ${uni.btnGreen}`} onClick={handleCreateTable} disabled={!activeConnected || !deployed}>
             Create table
           </button>
         </div>
@@ -718,7 +1141,7 @@ export default function PokerPanel() {
           </div>
         </div>
         <div className={styles.actionsRow}>
-          <button className={`${uni.btn} ${uni.btnGreen}`} onClick={handleJoinTable} disabled={!isConnected || !deployed}>
+          <button className={`${uni.btn} ${uni.btnGreen}`} onClick={handleJoinTable} disabled={!activeConnected || !deployed}>
             Join table
           </button>
         </div>
@@ -749,7 +1172,7 @@ export default function PokerPanel() {
           </div>
         </div>
         <div className={styles.actionsRow}>
-          <button className={`${uni.btn} ${uni.btnGreen}`} onClick={handleBet} disabled={!isConnected || !deployed}>
+          <button className={`${uni.btn} ${uni.btnGreen}`} onClick={() => handleBet()} disabled={!activeConnected || !deployed}>
             Approve + Bet
           </button>
         </div>
@@ -761,7 +1184,7 @@ export default function PokerPanel() {
             <input className={styles.input} type="number" min={0} value={foldSeat} onChange={(e) => setFoldSeat(e.target.value)} />
           </div>
           <div className={styles.field} style={{ justifyContent: "flex-end" }}>
-            <button className={uni.btn} onClick={handleFold} disabled={!isConnected || !deployed}>
+            <button className={uni.btn} onClick={() => handleFold()} disabled={!activeConnected || !deployed}>
               Fold
             </button>
           </div>
@@ -786,13 +1209,13 @@ export default function PokerPanel() {
           {computedHash && <span className={styles.fieldHint}>seed_hash = {computedHash}</span>}
         </div>
         <div className={styles.actionsRow}>
-          <button className={uni.btn} onClick={handleCommitDeal} disabled={!isDealer || !deployed}>
+          <button className={uni.btn} onClick={() => handleCommitDeal()} disabled={!isDealer || !deployed}>
             Commit deal
           </button>
           <button className={uni.btn} onClick={handleMarkDealt} disabled={!isDealer || !deployed}>
             Mark dealt
           </button>
-          <button className={uni.btn} onClick={handleRevealSeed} disabled={!isDealer || !deployed}>
+          <button className={uni.btn} onClick={() => handleRevealSeed()} disabled={!isDealer || !deployed}>
             Reveal seed
           </button>
           <button className={uni.btn} onClick={handleAdvanceStreet} disabled={!isDealer || !deployed}>
@@ -875,7 +1298,7 @@ export default function PokerPanel() {
             <input className={styles.input} type="number" min={0} value={reclaimSeat} onChange={(e) => setReclaimSeat(e.target.value)} />
           </div>
           <div className={styles.field} style={{ justifyContent: "flex-end" }}>
-            <button className={uni.btn} onClick={handleReclaim} disabled={!isConnected || !deployed}>
+            <button className={uni.btn} onClick={handleReclaim} disabled={!activeConnected || !deployed}>
               Reclaim
             </button>
           </div>
@@ -909,7 +1332,7 @@ export default function PokerPanel() {
             <input className={styles.input} value={reserveNoteId} onChange={(e) => setReserveNoteId(e.target.value)} />
           </div>
           <div className={styles.field} style={{ justifyContent: "flex-end" }}>
-            <button className={`${uni.btn} ${uni.btnGreen}`} onClick={handleRegisterPayoutNote} disabled={!isConnected || !deployed}>
+            <button className={`${uni.btn} ${uni.btnGreen}`} onClick={handleRegisterPayoutNote} disabled={!activeConnected || !deployed}>
               2. Register with PokerGame
             </button>
           </div>
@@ -949,6 +1372,8 @@ export default function PokerPanel() {
         </div>
         {claimResult ? <ResultCard r={claimResult} explorerTxUrl={explorerTxUrl} /> : null}
       </div>
+        </>
+      )}
 
       {disabledReason && <p className={styles.sectionHint} style={{ textAlign: "center" }}>{disabledReason}</p>}
     </div>
