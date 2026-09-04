@@ -586,6 +586,40 @@ What remains genuinely open is **not** the threshold: it is that a dropout ends
 the hand at all. Nothing in this trust model can produce a share its owner never
 computed. Improving that means changing the trust model, and the answer is no.
 
+### 8.0 What happens when a player leaves, by phase
+
+| Phase | Mechanism | Outcome |
+|---|---|---|
+| Shuffle chain | `claim_shuffle_timeout`, 10 min | hand voided, walker named, **stake forfeited** to the others |
+| Betting round | `claim_action_timeout`, 10 min | walker **folded**, hand continues; their chips stay in the pot |
+| Decryption / reveals | `accuse_share` → `claim_share_timeout`, 1 h | hand voided, walker named, **stake forfeited** |
+| Showdown | none needed | mucking forfeits rather than blocks; everyone else settles |
+
+The betting row is the only *recoverable* stall, and it is handled
+differently for that reason. A missing decryption share can never be produced
+by anybody else, so those paths end the hand. A missing **bet** costs nothing
+to supply — folding is a perfectly good answer — so the seat is folded and
+play goes on.
+
+It also needs no forfeit bolted on: a folded seat's contribution stays in the
+pot and goes to whoever wins it. Walking away already hands your money to the
+players who stayed.
+
+Two guards keep the clock from misfiring. It is refused while `table_pot` is
+zero, because before the first bet of a hand every seat technically owes a
+check and a clock that bit then would let seats be folded out during setup;
+and it is refused once `round_complete` is true, because then the seat on turn
+owes nothing and what the table is waiting on is `advance_street`.
+
+**Known gap, not closed:** `advance_street` is dealer-only. If the *dealer*
+walks away once a round is complete, streets stop advancing and no timeout
+covers it — the action clock does not fire, correctly, because no player owes
+anything. Making `advance_street` permissionless would close it: its
+precondition (`round_complete`) is fully checked on-chain and it takes no
+caller input, so it is the same argument that makes `settle_from_reveals` safe
+for anyone to call. Not done, because it reverses an explicit access-control
+decision that has a test asserting it.
+
 ### 8.1 The accusation path — built
 
 A party who never delivers a share deadlocked the table with nothing on-chain

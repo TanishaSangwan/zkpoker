@@ -1,0 +1,10 @@
+{
+  "name": "zkpoker-browser-proving",
+  "private": true,
+  "type": "module",
+  "description": "Measures shuffle-proof generation in a real browser. See README.md.",
+  "dependencies": {
+    "@aztec/bb.js": "3.0.0-nightly.20251104",
+    "@noir-lang/noir_js": "1.0.0-beta.16"
+  }
+}

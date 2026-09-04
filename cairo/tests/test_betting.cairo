@@ -545,3 +545,165 @@ fn test_advance_street_during_bet_blocked() {
     start_cheat_caller_address(game.contract_address, token_addr);
     game.bet(TABLE_1, SEAT_0, BET);
 }
+
+// ─── the action clock ────────────────────────────────────────────────────
+//
+// A player who joins and then walks away mid-betting-round used to stall
+// the hand indefinitely. round_complete() stays false while any active
+// seat has not acted, so advance_street reverted forever; nobody else
+// could fold them, because fold() is seat-owner-only by design; and the
+// only exit was the 24h reclaim, by which point everyone had their money
+// back but the walker had paid nothing. Free griefing, at the one phase
+// that never got a deadline.
+
+const ACTION_SECS: u64 = 600;
+
+#[test]
+#[feature("safe_dispatcher")]
+fn test_a_walkaway_stalls_the_round_until_the_clock_runs_out() {
+    let game = seated();
+    let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
+    start_cheat_block_timestamp(game.contract_address, T0);
+
+    // ALICE bets. BOB never responds.
+    act_bet(game, ALICE(), SEAT_0, BET);
+    assert(!game.get_round_complete(TABLE_1), 'bob still owes an action');
+    // The hand is stuck: the street cannot advance..
+    start_cheat_caller_address(game.contract_address, DEALER());
+    let blocked = safe.advance_street(TABLE_1);
+    stop_cheat_caller_address(game.contract_address);
+    match blocked {
+        Result::Ok(_) => panic!("advanced with a player yet to act"),
+        Result::Err(p) => assert(*p.at(0) == 'BETTING_ROUND_INCOMPLETE', 'wrong error'),
+    }
+    // ..and nobody else can fold BOB for him.
+    start_cheat_caller_address(game.contract_address, ALICE());
+    let cannot = safe.fold(TABLE_1, SEAT_1);
+    stop_cheat_caller_address(game.contract_address);
+    match cannot {
+        Result::Ok(_) => panic!("folded someone else's seat"),
+        Result::Err(p) => assert(*p.at(0) == 'NOT_SEAT_OWNER', 'wrong error'),
+    }
+
+    // Too early to time him out.
+    let early = safe.claim_action_timeout(TABLE_1);
+    match early {
+        Result::Ok(_) => panic!("timed out before the clock ran"),
+        Result::Err(p) => assert(*p.at(0) == 'DEADLINE_NOT_PASSED', 'wrong error'),
+    }
+    stop_cheat_block_timestamp(game.contract_address);
+
+    // Once it does, anyone may fold him and the hand goes on.
+    start_cheat_block_timestamp(game.contract_address, T0 + ACTION_SECS + 1);
+    let mut spy = spy_events();
+    start_cheat_caller_address(game.contract_address, MALLORY());
+    game.claim_action_timeout(TABLE_1);
+    stop_cheat_caller_address(game.contract_address);
+    stop_cheat_block_timestamp(game.contract_address);
+
+    assert(game.get_round_complete(TABLE_1), 'round can finish now');
+    spy
+        .assert_emitted(
+            @array![
+                (
+                    game.contract_address,
+                    PokerGame::Event::ActionTimedOut(
+                        PokerGame::ActionTimedOut { table_id: TABLE_1, seat: SEAT_1 },
+                    ),
+                ),
+            ],
+        );
+
+    // And BOB's money stays in the pot for whoever wins it -- that is the
+    // penalty, and it needs no extra machinery.
+    assert(game.get_seat_contributed(TABLE_1, SEAT_1) == 0, 'bob put in nothing');
+    start_cheat_caller_address(game.contract_address, DEALER());
+    game.advance_street(TABLE_1);
+    stop_cheat_caller_address(game.contract_address);
+    assert(game.get_table_street(TABLE_1) == 1, 'street advanced');
+}
+
+// The clock is rewritten every time the turn moves, so it always
+// describes whoever is actually on it -- not whoever was on it first.
+#[test]
+fn test_the_clock_follows_the_turn() {
+    let game = seated();
+    start_cheat_block_timestamp(game.contract_address, T0);
+    let first = game.get_action_deadline(TABLE_1);
+    act_bet(game, ALICE(), SEAT_0, BET);
+    stop_cheat_block_timestamp(game.contract_address);
+
+    start_cheat_block_timestamp(game.contract_address, T0 + 100);
+    act_bet(game, BOB(), SEAT_1, BET); // calls, turn moves on
+    let second = game.get_action_deadline(TABLE_1);
+    stop_cheat_block_timestamp(game.contract_address);
+    assert(second > first, 'clock must be reset');
+    assert(second == T0 + 100 + ACTION_SECS, 'from the moment of the action');
+}
+
+// Nothing at stake, no clock. Before the first bet of a hand every seat
+// technically owes a check, so a clock that bit then would let seats be
+// folded out during setup, before anyone agreed to play for anything.
+#[test]
+#[feature("safe_dispatcher")]
+fn test_no_timeout_while_the_pot_is_empty() {
+    let game = seated();
+    let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
+    start_cheat_block_timestamp(game.contract_address, T0 + ACTION_SECS + 1);
+    let outcome = safe.claim_action_timeout(TABLE_1);
+    stop_cheat_block_timestamp(game.contract_address);
+    match outcome {
+        Result::Ok(_) => panic!("folded a seat before the hand was played for anything"),
+        Result::Err(p) => assert(*p.at(0) == 'NO_STAKE', 'wrong error'),
+    }
+}
+
+// When the round is already complete the seat on turn owes nothing --
+// what the table is waiting on is advance_street, not this player.
+#[test]
+#[feature("safe_dispatcher")]
+fn test_no_timeout_once_the_round_is_complete() {
+    let game = seated();
+    start_cheat_block_timestamp(game.contract_address, T0);
+    act_bet(game, ALICE(), SEAT_0, BET);
+    act_bet(game, BOB(), SEAT_1, BET);
+    assert(game.get_round_complete(TABLE_1), 'round is done');
+    stop_cheat_block_timestamp(game.contract_address);
+
+    let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
+    start_cheat_block_timestamp(game.contract_address, T0 + ACTION_SECS + 1);
+    let outcome = safe.claim_action_timeout(TABLE_1);
+    stop_cheat_block_timestamp(game.contract_address);
+    match outcome {
+        Result::Ok(_) => panic!("timed out a seat that owed nothing"),
+        Result::Err(p) => assert(*p.at(0) == 'ROUND_ALREADY_COMPLETE', 'wrong error'),
+    }
+}
+
+// The last player in a hand has already won it, and folding them on a
+// timeout would strand the pot exactly as letting them fold voluntarily
+// did (round 8 finding 2). Two guards stop that, and the round_complete
+// one fires first: with a single active seat the round IS complete, so
+// nobody owes an action. claim_action_timeout's own active_count > 1
+// check sits behind it as belt-and-braces, matching fold's -- it is not
+// reachable while round_complete keeps that invariant.
+#[test]
+#[feature("safe_dispatcher")]
+fn test_timeout_cannot_fold_the_last_player() {
+    let game = seated();
+    start_cheat_block_timestamp(game.contract_address, T0);
+    act_bet(game, ALICE(), SEAT_0, BET);
+    start_cheat_caller_address(game.contract_address, BOB());
+    game.fold(TABLE_1, SEAT_1);
+    stop_cheat_caller_address(game.contract_address);
+    stop_cheat_block_timestamp(game.contract_address);
+
+    let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
+    start_cheat_block_timestamp(game.contract_address, T0 + ACTION_SECS + 1);
+    let outcome = safe.claim_action_timeout(TABLE_1);
+    stop_cheat_block_timestamp(game.contract_address);
+    match outcome {
+        Result::Ok(_) => panic!("folded the only player left"),
+        Result::Err(p) => assert(*p.at(0) == 'ROUND_ALREADY_COMPLETE', 'wrong error'),
+    }
+}

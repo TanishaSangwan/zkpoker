@@ -619,6 +619,28 @@ pub trait IPokerGame<TState> {
     // immediate reclaim.
     fn claim_shuffle_timeout(ref self: TState, table_id: felt252);
 
+    // Folds the seat that let its action clock run out, so a player who
+    // walks away mid-betting-round cannot stall the hand.
+    //
+    // This is the one stall that is RECOVERABLE, and it is handled
+    // differently for that reason. A missing decryption share can never be
+    // produced by anyone else, so `claim_share_timeout` voids the hand; a
+    // missing *bet* costs nothing to supply — folding is a perfectly good
+    // answer — so this folds the seat and play continues.
+    //
+    // The penalty is already the right size and needs no extra machinery:
+    // a folded seat's contribution stays in the pot and goes to whoever
+    // wins it. Walking away hands your money to the players who stayed.
+    //
+    // Callable by anyone, like the other timeouts: the absent seat will
+    // not fold itself and everyone else is frozen until someone acts.
+    //
+    // Refused unless the table actually has money on it. Before the first
+    // bet of a hand every seat technically "owes" a check, so a clock that
+    // bit then would let seats be folded out during setup, before anyone
+    // has agreed to play for anything.
+    fn claim_action_timeout(ref self: TState, table_id: felt252);
+
     // ── Accusations (docs/PROTOCOL.md §8) ────────────────────────────────
     //
     // FIRST, THE THING NOT TO ADD HERE. Decryption is strictly `n`-of-`n`
@@ -810,6 +832,9 @@ pub trait IPokerGame<TState> {
 
     // Seat index whose turn it is to act.
     fn get_action_turn(self: @TState, table_id: felt252) -> felt252;
+
+    // When the seat currently on turn must have acted by.
+    fn get_action_deadline(self: @TState, table_id: felt252) -> u64;
     // What this seat must add to call. 0 means it may check.
     fn get_amount_to_call(self: @TState, table_id: felt252, seat: felt252) -> u128;
     fn get_street_contributed(self: @TState, table_id: felt252, seat: felt252) -> u128;
@@ -929,6 +954,10 @@ pub mod PokerGame {
         pub const BAD_SHARE_PROOF: felt252 = 'BAD_SHARE_PROOF';
         // Distinct from DEADLINE_PASSED, which reads SHUFFLE_DEADLINE_PASSED.
         pub const ANSWER_LATE: felt252 = 'ANSWER_DEADLINE_PASSED';
+        // claim_action_timeout: nobody owes an action right now.
+        pub const ROUND_IS_COMPLETE: felt252 = 'ROUND_ALREADY_COMPLETE';
+        // .. and nothing is at stake, so the clock means nothing yet.
+        pub const NO_STAKE: felt252 = 'NO_STAKE';
         pub const SHUFFLE_INCOMPLETE: felt252 = 'SHUFFLE_NOT_COMPLETE';
         pub const DECK_OPENED: felt252 = 'DECK_ALREADY_OPENED';
         pub const DECK_NOT_OPENED: felt252 = 'DECK_NOT_OPENED';
@@ -1024,6 +1053,19 @@ pub mod PokerGame {
     // SETTLE_TIMEOUT_SECS (24h) because the whole table is frozen while
     // the clock runs.
     const ACCUSATION_SECS: u64 = 3600;
+
+    // How long the seat holding the action has to act. A player who walks
+    // away mid-betting-round used to stall the hand indefinitely:
+    // round_complete() stays false while any active seat has not acted, so
+    // advance_street reverted forever, and nobody else could fold them
+    // because fold() is seat-owner-only by design. The only exit was the
+    // 24h reclaim, and the walker paid nothing.
+    //
+    // Same length as a shuffle turn. Unlike the shuffle and share
+    // deadlines this one does NOT void the hand -- a missing bet is
+    // recoverable in a way a missing decryption share is not, so the seat
+    // is folded and play continues.
+    const ACTION_SECS: u64 = 600;
 
     #[storage]
     struct Storage {
@@ -1154,6 +1196,9 @@ pub mod PokerGame {
         street_high: Map<(felt252, u8), u128>,
         // Seat index whose turn it is to act.
         action_turn: Map<felt252, u32>,
+        // .. and when that action is due. Rewritten every time the turn
+        // moves, so it always describes the seat currently on the clock.
+        action_deadline: Map<felt252, u64>,
         // A raise reopens the action: everyone who already acted must act
         // again. Bumping an epoch does that without touching per-seat
         // state. Stored 0 means "never bumped" and reads as 1, so a seat's
@@ -1231,6 +1276,7 @@ pub mod PokerGame {
         ShareAnswered: ShareAnswered,
         ShareDefaulted: ShareDefaulted,
         StakeForfeited: StakeForfeited,
+        ActionTimedOut: ActionTimedOut,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -1402,6 +1448,16 @@ pub mod PokerGame {
         #[key]
         pub seat: felt252,
         pub position: u32,
+    }
+
+    // Emitted alongside Fold, so a client can tell a deliberate fold from
+    // a seat that simply stopped responding.
+    #[derive(Drop, starknet::Event)]
+    pub struct ActionTimedOut {
+        #[key]
+        pub table_id: felt252,
+        #[key]
+        pub seat: felt252,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -1586,6 +1642,10 @@ pub mod PokerGame {
         // Move to the next seat still in the hand, wrapping. Bounded by
         // max_seats so a table of all-folded seats cannot spin.
         fn advance_turn(ref self: ContractState, table_id: felt252) {
+            // Every path that moves the turn goes through here or
+            // reset_turn, so setting the clock in both is what guarantees
+            // it always describes whoever is actually on it.
+            self.action_deadline.entry(table_id).write(get_block_timestamp() + ACTION_SECS);
             let max_seats = self.table_max_seats.entry(table_id).read();
             let start = self.action_turn.entry(table_id).read();
             let mut step: u32 = 1;
@@ -1647,6 +1707,7 @@ pub mod PokerGame {
         // Start-of-street: action begins with the lowest-numbered seat
         // still in the hand.
         fn reset_turn(ref self: ContractState, table_id: felt252) {
+            self.action_deadline.entry(table_id).write(get_block_timestamp() + ACTION_SECS);
             let max_seats = self.table_max_seats.entry(table_id).read();
             let mut i: u32 = 0;
             loop {
@@ -2721,6 +2782,46 @@ pub mod PokerGame {
             self.emit(TableVoided { table_id, stalled_seat });
         }
 
+        fn claim_action_timeout(ref self: ContractState, table_id: felt252) {
+            assert(self.table_exists.entry(table_id).read(), errors::NO_TABLE);
+            assert(!self.table_settled.entry(table_id).read(), errors::ALREADY_SETTLED);
+            assert(!self.table_voided.entry(table_id).read(), errors::TABLE_VOIDED);
+            assert(
+                self.table_street.entry(table_id).read() != SHOWDOWN_STREET,
+                errors::BETTING_CLOSED,
+            );
+            // Mutates the same street/turn/epoch state bet() writes under
+            // its lock -- round 8 finding F applies here too.
+            assert(!self.reentrancy_lock.read(), errors::REENTRANCY);
+
+            // Only bites when there is something to protect. See the
+            // interface comment: before the first bet everyone owes a
+            // check, and a clock that bit then would let seats be folded
+            // out during setup.
+            assert(self.table_pot.entry(table_id).read() != 0, errors::NO_STAKE);
+            // If the round is already complete the seat on turn owes
+            // nothing -- what the table is waiting on is advance_street,
+            // not this player.
+            assert(!self.round_complete(table_id), errors::ROUND_IS_COMPLETE);
+            // The last player in a hand has already won it; folding them
+            // would strand the pot (round 8 finding 2, same rule as fold).
+            assert(self.active_count(table_id) > 1, errors::LAST_PLAYER);
+
+            let deadline = self.action_deadline.entry(table_id).read();
+            assert(deadline != 0 && get_block_timestamp() > deadline, errors::DEADLINE_NOT_PASSED);
+
+            let turn = self.action_turn.entry(table_id).read();
+            let seat: felt252 = turn.into();
+            // Pass the turn BEFORE folding, for the reason fold() gives:
+            // advance_turn skips inactive seats, so folding first would
+            // make this seat un-skippable as the search start and could
+            // land the turn back on itself.
+            self.advance_turn(table_id);
+            self.seat_folded.entry((table_id, seat)).write(true);
+            self.emit(ActionTimedOut { table_id, seat });
+            self.emit(Fold { table_id, seat });
+        }
+
         // ── Accusations (docs/PROTOCOL.md section 8) ──────────────────
 
         fn accuse_share(
@@ -3145,6 +3246,10 @@ pub mod PokerGame {
 
         fn get_action_turn(self: @ContractState, table_id: felt252) -> felt252 {
             self.action_turn.entry(table_id).read().into()
+        }
+
+        fn get_action_deadline(self: @ContractState, table_id: felt252) -> u64 {
+            self.action_deadline.entry(table_id).read()
         }
 
         fn get_amount_to_call(
