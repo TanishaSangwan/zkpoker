@@ -10,13 +10,15 @@
 // Grumpkin proofs).
 
 use snforge_std::{
-    EventSpyAssertionsTrait, spy_events, start_cheat_caller_address, stop_cheat_caller_address,
+    EventSpyAssertionsTrait, spy_events, start_cheat_block_timestamp, start_cheat_caller_address,
+    stop_cheat_block_timestamp, stop_cheat_caller_address,
 };
 use zkpoker::mocks::IMockVerifierAdminTraitDispatcherTrait;
-use zkpoker::{IPokerGameDispatcherTrait, IPokerGameSafeDispatcherTrait, PokerGame};
+use zkpoker::{IErc20DispatcherTrait, IPokerGameDispatcherTrait, IPokerGameSafeDispatcherTrait, PokerGame};
 use super::helpers::{
-    ALICE, BOB, DEALER, MALLORY, NOTE_A, NOTE_B, POOL, SEAT_0, SEAT_1, TABLE_1, TWO_SEATS,
-    deploy_mock_token, deploy_pokergame_with_verifier,
+    ALICE, BOB, CAROL, DEALER, MALLORY, NOTE_A, NOTE_B, NOTE_C, POOL, SEAT_0, SEAT_1, SEAT_2,
+    TABLE_1, THREE_SEATS, TWO_SEATS, deploy_mock_token, deploy_pokergame_with_verifier,
+    fund_and_approve,
 };
 
 const PK_A_X: u256 = u256 { low: 'PKAX', high: 1 };
@@ -862,4 +864,350 @@ fn test_last_player_cannot_fold() {
     advance(game);
     game.settle_from_reveals(TABLE_1);
     assert(game.get_pending_payout(NOTE_A) == 2_000, 'alice collects');
+}
+
+// ─── the accusation path (docs/PROTOCOL.md §8) ──────────────────────────
+//
+// Decryption is n-of-n, so a party who simply never sends their share
+// freezes the table. Before this existed there was nothing on-chain
+// saying who -- and the reveal path cannot tell you either, because it
+// verifies the AGGREGATE share against the joint key (that is what makes
+// it O(1) in players), and an aggregate that fails proves someone cheated
+// but not which someone.
+
+const T0: u64 = 5_000_000;
+const ACCUSATION_SECS: u64 = 3600;
+
+fn accuse(
+    game: zkpoker::IPokerGameDispatcher,
+    who: starknet::ContractAddress,
+    seat: felt252,
+    pos: u32,
+) {
+    start_cheat_caller_address(game.contract_address, who);
+    game.accuse_share(TABLE_1, seat, pos);
+    stop_cheat_caller_address(game.contract_address);
+}
+
+#[test]
+fn test_accuse_then_answer_clears_it() {
+    let (game, _v) = setup_opened();
+    start_cheat_block_timestamp(game.contract_address, T0);
+
+    // ALICE accuses BOB of withholding his share for a community card.
+    let mut spy = spy_events();
+    accuse(game, ALICE(), SEAT_1, community_pos(0));
+    assert(
+        game.get_accusation_deadline(TABLE_1, SEAT_1, community_pos(0)) == T0 + ACCUSATION_SECS,
+        'clock should be running',
+    );
+    spy
+        .assert_emitted(
+            @array![
+                (
+                    game.contract_address,
+                    PokerGame::Event::ShareAccused(
+                        PokerGame::ShareAccused {
+                            table_id: TABLE_1,
+                            seat: SEAT_1,
+                            position: community_pos(0),
+                            deadline: T0 + ACCUSATION_SECS,
+                        },
+                    ),
+                ),
+            ],
+        );
+
+    // BOB answers in time. The share lands on-chain, so the hand can go on.
+    game.answer_accusation(TABLE_1, SEAT_1, community_pos(0), SHARE_X, SHARE_Y, proof());
+    assert(game.get_accusation_deadline(TABLE_1, SEAT_1, community_pos(0)) == 0, 'accusation cleared');
+    assert(game.get_share_posted(TABLE_1, SEAT_1, community_pos(0)), 'share recorded');
+    assert(game.get_share_defaulter_plus_one(TABLE_1) == 0, 'nobody convicted');
+    stop_cheat_block_timestamp(game.contract_address);
+}
+
+#[test]
+#[feature("safe_dispatcher")]
+fn test_answered_accusation_cannot_be_reraised() {
+    // Otherwise a seat could be ground down by paying gas to answer the
+    // same accusation over and over.
+    let (game, _v) = setup_opened();
+    start_cheat_block_timestamp(game.contract_address, T0);
+    accuse(game, ALICE(), SEAT_1, community_pos(0));
+    game.answer_accusation(TABLE_1, SEAT_1, community_pos(0), SHARE_X, SHARE_Y, proof());
+
+    let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
+    start_cheat_caller_address(game.contract_address, ALICE());
+    let again = safe.accuse_share(TABLE_1, SEAT_1, community_pos(0));
+    stop_cheat_caller_address(game.contract_address);
+    match again {
+        Result::Ok(_) => panic!("re-accused an answered position"),
+        Result::Err(p) => assert(*p.at(0) == 'SHARE_ALREADY_POSTED', 'wrong error'),
+    }
+    stop_cheat_block_timestamp(game.contract_address);
+}
+
+#[test]
+#[feature("safe_dispatcher")]
+fn test_answer_with_a_bad_proof_is_not_an_answer() {
+    let (game, verifier) = setup_opened();
+    start_cheat_block_timestamp(game.contract_address, T0);
+    accuse(game, ALICE(), SEAT_1, community_pos(0));
+    verifier.set_reject_share(true);
+
+    let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
+    let outcome = safe
+        .answer_accusation(TABLE_1, SEAT_1, community_pos(0), SHARE_X, SHARE_Y, proof());
+    match outcome {
+        Result::Ok(_) => panic!("accepted a bogus share"),
+        Result::Err(p) => assert(*p.at(0) == 'BAD_SHARE_PROOF', 'wrong error'),
+    }
+    assert(!game.get_share_posted(TABLE_1, SEAT_1, community_pos(0)), 'nothing recorded');
+    assert(
+        game.get_accusation_deadline(TABLE_1, SEAT_1, community_pos(0)) != 0,
+        'accusation still stands',
+    );
+    stop_cheat_block_timestamp(game.contract_address);
+}
+
+#[test]
+#[feature("safe_dispatcher")]
+fn test_late_answer_rejected() {
+    // The conviction must not be dodgeable by front-running it with the
+    // share that was owed an hour ago -- the rule submit_shuffle already
+    // applies to its own deadline.
+    let (game, _v) = setup_opened();
+    start_cheat_block_timestamp(game.contract_address, T0);
+    accuse(game, ALICE(), SEAT_1, community_pos(0));
+    stop_cheat_block_timestamp(game.contract_address);
+
+    start_cheat_block_timestamp(game.contract_address, T0 + ACCUSATION_SECS + 1);
+    let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
+    let outcome = safe
+        .answer_accusation(TABLE_1, SEAT_1, community_pos(0), SHARE_X, SHARE_Y, proof());
+    match outcome {
+        Result::Ok(_) => panic!("answered after the deadline"),
+        Result::Err(p) => assert(*p.at(0) == 'ANSWER_DEADLINE_PASSED', 'wrong error'),
+    }
+    stop_cheat_block_timestamp(game.contract_address);
+}
+
+#[test]
+#[feature("safe_dispatcher")]
+fn test_timeout_before_deadline_rejected() {
+    let (game, _v) = setup_opened();
+    start_cheat_block_timestamp(game.contract_address, T0);
+    accuse(game, ALICE(), SEAT_1, community_pos(0));
+    let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
+    let outcome = safe.claim_share_timeout(TABLE_1, SEAT_1, community_pos(0));
+    match outcome {
+        Result::Ok(_) => panic!("convicted before the clock ran out"),
+        Result::Err(p) => assert(*p.at(0) == 'DEADLINE_NOT_PASSED', 'wrong error'),
+    }
+    stop_cheat_block_timestamp(game.contract_address);
+}
+
+#[test]
+fn test_timeout_voids_the_hand_and_names_the_defaulter() {
+    let (game, _v) = setup_opened();
+    start_cheat_block_timestamp(game.contract_address, T0);
+    accuse(game, ALICE(), SEAT_1, community_pos(0));
+    stop_cheat_block_timestamp(game.contract_address);
+
+    let mut spy = spy_events();
+    start_cheat_block_timestamp(game.contract_address, T0 + ACCUSATION_SECS + 1);
+    // Anyone may call it: the stalling seat will not report itself, and
+    // everyone else stays frozen until someone does.
+    start_cheat_caller_address(game.contract_address, MALLORY());
+    game.claim_share_timeout(TABLE_1, SEAT_1, community_pos(0));
+    stop_cheat_caller_address(game.contract_address);
+    stop_cheat_block_timestamp(game.contract_address);
+
+    assert(game.get_table_voided(TABLE_1), 'hand must be void');
+    // The evidence: seat + 1, so 0 can mean nobody.
+    assert(game.get_share_defaulter_plus_one(TABLE_1) == SEAT_1 + 1, 'defaulter recorded');
+    spy
+        .assert_emitted(
+            @array![
+                (
+                    game.contract_address,
+                    PokerGame::Event::ShareDefaulted(
+                        PokerGame::ShareDefaulted {
+                            table_id: TABLE_1, seat: SEAT_1, position: community_pos(0),
+                        },
+                    ),
+                ),
+            ],
+        );
+}
+
+// Only the seat whose card it is may accuse over a hole position.
+// Answering publishes a share, and a hole card needs every party's share,
+// so letting anyone accuse would let anyone strip seat S's cards by
+// accusing each party in turn.
+#[test]
+#[feature("safe_dispatcher")]
+fn test_cannot_accuse_over_someone_elses_hole_card() {
+    let (game, _v) = setup_opened();
+    let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
+
+    // BOB tries to force shares for ALICE's hole card into the open.
+    start_cheat_caller_address(game.contract_address, BOB());
+    let outcome = safe.accuse_share(TABLE_1, SEAT_1, hole_pos(0, 0));
+    stop_cheat_caller_address(game.contract_address);
+    match outcome {
+        Result::Ok(_) => panic!("stripped another player hole card"),
+        Result::Err(p) => assert(*p.at(0) == 'NOT_YOUR_CARD', 'wrong error'),
+    }
+
+    // ALICE may, for her own card -- the exposure is hers to accept, and
+    // she only does it when the alternative is a hand she cannot play.
+    accuse(game, ALICE(), SEAT_1, hole_pos(0, 0));
+    assert(game.get_accusation_deadline(TABLE_1, SEAT_1, hole_pos(0, 0)) != 0, 'owner may accuse');
+}
+
+#[test]
+#[feature("safe_dispatcher")]
+fn test_cannot_accuse_over_an_already_revealed_card() {
+    let (game, _v) = setup_opened();
+    game.reveal_community_card(TABLE_1, 0, SHARE_X, SHARE_Y, 7, proof());
+
+    let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
+    start_cheat_caller_address(game.contract_address, ALICE());
+    let outcome = safe.accuse_share(TABLE_1, SEAT_1, community_pos(0));
+    stop_cheat_caller_address(game.contract_address);
+    match outcome {
+        Result::Ok(_) => panic!("accused over a card already open"),
+        Result::Err(p) => assert(*p.at(0) == 'CARD_ALREADY_REVEALED', 'wrong error'),
+    }
+}
+
+#[test]
+#[feature("safe_dispatcher")]
+fn test_cannot_accuse_a_seat_that_is_not_a_party() {
+    // A seat with no registered key contributes no share, so there is
+    // nothing it could be withholding.
+    let (game, _v) = setup_opened();
+    let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
+    start_cheat_caller_address(game.contract_address, ALICE());
+    let outcome = safe.accuse_share(TABLE_1, 'NOSEAT', community_pos(0));
+    stop_cheat_caller_address(game.contract_address);
+    match outcome {
+        Result::Ok(_) => panic!("accused a non-party"),
+        Result::Err(p) => assert(*p.at(0) == 'SEAT_KEY_NOT_REGISTERED', 'wrong error'),
+    }
+}
+
+// The accusation has to cost the griefer something, or it just names them
+// and the table dies for free -- which is the complaint PROTOCOL.md §8
+// raises in the first place. A convicted seat's stake is redistributed pro
+// rata over everyone else who put money in; the pot total is untouched, so
+// the ordinary reclaim path pays the new amounts out unchanged.
+#[test]
+fn test_conviction_forfeits_the_defaulters_stake() {
+    let (game, _v) = deploy_pokergame_with_verifier(POOL());
+    let (token_addr, token, admin) = deploy_mock_token();
+    let stake: u128 = 999; // odd on purpose: exercises the remainder path
+
+    start_cheat_caller_address(game.contract_address, DEALER());
+    game.create_table(TABLE_1, token_addr, 0, THREE_SEATS);
+    stop_cheat_caller_address(game.contract_address);
+
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.join_table(TABLE_1, SEAT_0, NOTE_A);
+    game.register_shuffle_key(TABLE_1, SEAT_0, PK_A_X, PK_A_Y, key_proof());
+    stop_cheat_caller_address(game.contract_address);
+    start_cheat_caller_address(game.contract_address, BOB());
+    game.join_table(TABLE_1, SEAT_1, NOTE_B);
+    game.register_shuffle_key(TABLE_1, SEAT_1, PK_B_X, PK_B_Y, key_proof());
+    stop_cheat_caller_address(game.contract_address);
+    start_cheat_caller_address(game.contract_address, CAROL());
+    game.join_table(TABLE_1, SEAT_2, NOTE_C);
+    game.register_shuffle_key(TABLE_1, SEAT_2, PK_A_X, PK_A_Y, key_proof());
+    stop_cheat_caller_address(game.contract_address);
+
+    fund_and_approve(token, admin, ALICE(), game.contract_address, 10_000);
+    fund_and_approve(token, admin, BOB(), game.contract_address, 10_000);
+    fund_and_approve(token, admin, CAROL(), game.contract_address, 10_000);
+
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.bet(TABLE_1, SEAT_0, stake);
+    stop_cheat_caller_address(game.contract_address);
+    start_cheat_caller_address(game.contract_address, BOB());
+    game.bet(TABLE_1, SEAT_1, stake);
+    stop_cheat_caller_address(game.contract_address);
+    start_cheat_caller_address(game.contract_address, CAROL());
+    game.bet(TABLE_1, SEAT_2, stake);
+    stop_cheat_caller_address(game.contract_address);
+
+    start_cheat_caller_address(game.contract_address, DEALER());
+    game.begin_shuffle(TABLE_1, JOINT_X, JOINT_Y);
+    stop_cheat_caller_address(game.contract_address);
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.submit_shuffle(TABLE_1, DECK_1, proof());
+    stop_cheat_caller_address(game.contract_address);
+    start_cheat_caller_address(game.contract_address, BOB());
+    game.submit_shuffle(TABLE_1, DECK_2, proof());
+    stop_cheat_caller_address(game.contract_address);
+    start_cheat_caller_address(game.contract_address, CAROL());
+    game.submit_shuffle(TABLE_1, DECK_0, proof());
+    stop_cheat_caller_address(game.contract_address);
+
+    // 3 seats: 6 hole slots then 5 community. 11 positions, 3 chunks of 5.
+    let mut c: u32 = 0;
+    while c != 3 {
+        game.open_deck(TABLE_1, c, chunk_cts(5 * c, 11), proof());
+        c += 1;
+    }
+
+    // BOB stalls on the flop.
+    let flop = 2 * 3;
+    start_cheat_block_timestamp(game.contract_address, T0);
+    accuse(game, ALICE(), SEAT_1, flop);
+    stop_cheat_block_timestamp(game.contract_address);
+
+    start_cheat_block_timestamp(game.contract_address, T0 + ACCUSATION_SECS + 1);
+    game.claim_share_timeout(TABLE_1, SEAT_1, flop);
+    stop_cheat_block_timestamp(game.contract_address);
+
+    // 999 split pro rata over two equal contributors: 499 each, and the
+    // odd 1 to the first of them rather than being dropped on the floor.
+    assert(game.get_seat_contributed(TABLE_1, SEAT_1) == 0, 'defaulter forfeits it all');
+    assert(game.get_seat_contributed(TABLE_1, SEAT_0) == 999 + 499 + 1, 'first also takes remainder');
+    assert(game.get_seat_contributed(TABLE_1, SEAT_2) == 999 + 499, 'split pro rata');
+
+    // The pot is untouched, so the reclaim path pays out exactly what the
+    // seats are now owed and the contract keeps nothing.
+    let total = game.get_seat_contributed(TABLE_1, SEAT_0)
+        + game.get_seat_contributed(TABLE_1, SEAT_1)
+        + game.get_seat_contributed(TABLE_1, SEAT_2);
+    assert(total == 3 * stake, 'pot must be conserved');
+
+    // Voided, so reclaim needs no timeout wait.
+    let before = token.balance_of(ALICE());
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.reclaim_stalled_bet(TABLE_1, SEAT_0);
+    stop_cheat_caller_address(game.contract_address);
+    let owed: u256 = u256 { low: 999 + 499 + 1, high: 0 };
+    assert(token.balance_of(ALICE()) == before + owed, 'paid the larger amount');
+}
+
+// A defaulter nobody else backed keeps their stake: there is no one to
+// compensate, and burning it would strand the tokens here with no owner.
+#[test]
+fn test_sole_contributor_default_strands_nothing() {
+    let (game, _v) = setup_opened();
+    let (_ta, token, admin) = deploy_mock_token();
+    let _ = token;
+    let _ = admin;
+    start_cheat_block_timestamp(game.contract_address, T0);
+    accuse(game, ALICE(), SEAT_1, community_pos(0));
+    stop_cheat_block_timestamp(game.contract_address);
+    start_cheat_block_timestamp(game.contract_address, T0 + ACCUSATION_SECS + 1);
+    game.claim_share_timeout(TABLE_1, SEAT_1, community_pos(0));
+    stop_cheat_block_timestamp(game.contract_address);
+    // Nobody bet at all on this table, so there is nothing to move and
+    // nothing to strand.
+    assert(game.get_seat_contributed(TABLE_1, SEAT_1) == 0, 'nothing to forfeit');
+    assert(game.get_table_voided(TABLE_1), 'still voided');
 }

@@ -91,6 +91,17 @@ pub trait IShuffleVerifier<TState> {
     fn verify_joint_key(
         self: @TState, shares: Span<u256>, joint_x: u256, joint_y: u256,
     ) -> bool;
+
+    // One party's INDIVIDUAL decryption share, proved against that party's
+    // own registered key share rather than the table's joint key. The
+    // normal reveal path verifies the AGGREGATE over the joint key, which
+    // is O(1) in players but says nothing about who did or did not
+    // contribute -- so it cannot settle an accusation. This can.
+    //
+    // public_inputs = [pk, c1, share]
+    fn verify_decryption_share(
+        self: @TState, proof: Span<felt252>, public_inputs: Span<felt252>,
+    ) -> bool;
 }
 
 // Test-only mock ERC20 (configurable failure/fee/reentrancy behavior) used
@@ -608,6 +619,62 @@ pub trait IPokerGame<TState> {
     // immediate reclaim.
     fn claim_shuffle_timeout(ref self: TState, table_id: felt252);
 
+    // ── Accusations (docs/PROTOCOL.md §8) ────────────────────────────────
+    //
+    // Decryption is `n`-of-`n`: every party's share is needed to open any
+    // card. A party who simply never sends theirs freezes the table, and
+    // until this existed there was nothing on-chain saying who — free
+    // griefing, and the reveal path cannot tell you either, because it
+    // verifies the AGGREGATE share against the joint key (that is what
+    // makes it O(1) in players) and an aggregate that fails proves someone
+    // cheated but not which someone.
+    //
+    // So the accusation is made explicit and answerable. `accuse_share`
+    // starts a clock against one seat for one deck position;
+    // `answer_accusation` clears it by posting that seat's individual
+    // share with a DLEQ against the seat's OWN registered key;
+    // `claim_share_timeout` convicts a seat that stayed silent.
+    //
+    // WHO MAY ACCUSE, and why it is not "anyone":
+    //
+    // Answering publishes a share. For a COMMUNITY position that costs
+    // nothing — the card is about to be public anyway — so any seat still
+    // in the hand may accuse.
+    //
+    // For a HOLE position it is different. Seat S's card needs every
+    // party's share, so if all of them were forced onto the chain the card
+    // would become publicly readable mid-hand. Only seat S itself may
+    // accuse for its own two positions (2S and 2S+1). That does not make
+    // the exposure go away — it makes it S's own decision, taken only when
+    // the alternative is a hand S can no longer play, and it stops anyone
+    // else from stripping S's cards by accusing every party in turn.
+    // Verifiable encryption to S's key would remove the trade-off
+    // entirely; that is a circuit this project does not have.
+    fn accuse_share(ref self: TState, table_id: felt252, seat: felt252, position: u32);
+
+    // Clears an accusation. `proof` is a DLEQ that the share was computed
+    // with the same secret behind this seat's registered key share:
+    // log_G(seat_pk) == log_c1(share). Callable by anyone — the proof is
+    // self-authenticating, so a relayer cannot change what it says, and an
+    // accused player who is offline may want a friend to submit for them.
+    fn answer_accusation(
+        ref self: TState,
+        table_id: felt252,
+        seat: felt252,
+        position: u32,
+        share_x: u256,
+        share_y: u256,
+        proof: Span<felt252>,
+    );
+
+    // Convicts a seat that let the clock run out. The hand is
+    // unrecoverable — `n`-of-`n` means the missing share can never be
+    // produced by anyone else — so this voids the table, and the
+    // defaulter's stake is redistributed pro rata to everyone else who
+    // contributed. Without that last part the accusation would name the
+    // griefer and cost them nothing.
+    fn claim_share_timeout(ref self: TState, table_id: felt252, seat: felt252, position: u32);
+
     // ── Dealing (docs/PROTOCOL.md §4 phases 2-4) ─────────────────────────
 
     // Binds the in-play ciphertexts to the deck the shuffle chain produced.
@@ -741,6 +808,15 @@ pub trait IPokerGame<TState> {
     fn get_pot(self: @TState, table_id: felt252) -> u128;
     fn get_seed_hash(self: @TState, table_id: felt252) -> felt252;
     fn get_revealed_seed(self: @TState, table_id: felt252) -> felt252;
+    // 0 when no accusation stands against this (seat, position).
+    fn get_accusation_deadline(self: @TState, table_id: felt252, seat: felt252, position: u32) -> u64;
+
+    fn get_share_posted(self: @TState, table_id: felt252, seat: felt252, position: u32) -> bool;
+
+    // The seat a timed-out accusation convicted, as (seat + 1) so that 0
+    // means nobody -- seat 0 is a real seat.
+    fn get_share_defaulter_plus_one(self: @TState, table_id: felt252) -> felt252;
+
     fn get_seat_note(self: @TState, table_id: felt252, seat: felt252) -> felt252;
 
     // The note this seat's winnings will actually be paid into: the one
@@ -825,6 +901,14 @@ pub mod PokerGame {
         pub const NO_PARTICIPANTS: felt252 = 'NO_SHUFFLE_PARTICIPANTS';
         // joint_pk != sum of the registered seat key shares.
         pub const BAD_JOINT_KEY: felt252 = 'BAD_JOINT_KEY';
+        // Accusations.
+        pub const SHARE_POSTED: felt252 = 'SHARE_ALREADY_POSTED';
+        pub const ALREADY_ACCUSED: felt252 = 'ACCUSATION_PENDING';
+        pub const NO_ACCUSATION: felt252 = 'NO_ACCUSATION';
+        pub const NOT_YOUR_CARD: felt252 = 'NOT_YOUR_CARD';
+        pub const BAD_SHARE_PROOF: felt252 = 'BAD_SHARE_PROOF';
+        // Distinct from DEADLINE_PASSED, which reads SHUFFLE_DEADLINE_PASSED.
+        pub const ANSWER_LATE: felt252 = 'ANSWER_DEADLINE_PASSED';
         pub const SHUFFLE_INCOMPLETE: felt252 = 'SHUFFLE_NOT_COMPLETE';
         pub const DECK_OPENED: felt252 = 'DECK_ALREADY_OPENED';
         pub const DECK_NOT_OPENED: felt252 = 'DECK_NOT_OPENED';
@@ -912,6 +996,14 @@ pub mod PokerGame {
     // measured proving time yet (docs/V2-SPIKE-RESULTS.md §5), so revisit
     // this once it has.
     const SHUFFLE_TURN_SECS: u64 = 600;
+
+    // How long an accused seat has to post the share it is accused of
+    // withholding. Longer than a shuffle turn (600s) because answering may
+    // require a player to come back online rather than merely to finish a
+    // proof they were already computing, and much shorter than
+    // SETTLE_TIMEOUT_SECS (24h) because the whole table is frozen while
+    // the clock runs.
+    const ACCUSATION_SECS: u64 = 3600;
 
     #[storage]
     struct Storage {
@@ -1057,6 +1149,21 @@ pub mod PokerGame {
         hole_commitment: Map<(felt252, felt252, u32), felt252>,
         hole_card: Map<(felt252, felt252, u32), u8>,
         hole_revealed: Map<(felt252, felt252, u32), bool>,
+
+        // ── Accusations (docs/PROTOCOL.md section 8) ─────────────────
+        // (table, accused seat, deck position) -> when the answer is due.
+        // 0 means no accusation stands.
+        accusation_deadline: Map<(felt252, felt252, u32), u64>,
+        // .. and the share, once posted. Answering is permanent: an
+        // answered accusation cannot be re-raised, so a seat cannot be
+        // ground down by repeated accusations for the same position.
+        share_posted: Map<(felt252, felt252, u32), bool>,
+        share_x: Map<(felt252, felt252, u32), u256>,
+        share_y: Map<(felt252, felt252, u32), u256>,
+        // The seat a timed-out accusation convicted, kept as on-chain
+        // evidence after the hand is voided. seat+1 so that 0 reads as
+        // "nobody", since seat 0 is a real seat.
+        share_defaulter_plus_one: Map<felt252, felt252>,
     }
 
     #[constructor]
@@ -1100,6 +1207,10 @@ pub mod PokerGame {
         CommunityCardRevealed: CommunityCardRevealed,
         HoleSharesCommitted: HoleSharesCommitted,
         HoleCardRevealed: HoleCardRevealed,
+        ShareAccused: ShareAccused,
+        ShareAnswered: ShareAnswered,
+        ShareDefaulted: ShareDefaulted,
+        StakeForfeited: StakeForfeited,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -1238,6 +1349,48 @@ pub mod PokerGame {
         #[key]
         pub table_id: felt252,
         pub stalled_seat: felt252,
+    }
+
+    // The accusation record. These four events are the whole point of the
+    // accusation path: before them, a party who withheld a decryption
+    // share froze the table with nothing on-chain saying who.
+    #[derive(Drop, starknet::Event)]
+    pub struct ShareAccused {
+        #[key]
+        pub table_id: felt252,
+        #[key]
+        pub seat: felt252,
+        pub position: u32,
+        pub deadline: u64,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    pub struct ShareAnswered {
+        #[key]
+        pub table_id: felt252,
+        #[key]
+        pub seat: felt252,
+        pub position: u32,
+        pub share_x: u256,
+        pub share_y: u256,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    pub struct ShareDefaulted {
+        #[key]
+        pub table_id: felt252,
+        #[key]
+        pub seat: felt252,
+        pub position: u32,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    pub struct StakeForfeited {
+        #[key]
+        pub table_id: felt252,
+        #[key]
+        pub seat: felt252,
+        pub amount: u128,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -1499,6 +1652,93 @@ pub mod PokerGame {
             } else {
                 self.seat_note.entry((table_id, seat)).read()
             }
+        }
+
+        // Has the card at this deck position already been opened? Maps a
+        // flat position back to the two revealed-flags storage keeps:
+        // hole slots 0..2*max_seats-1, then the five community slots.
+        fn position_revealed(self: @ContractState, table_id: felt252, pos: u32) -> bool {
+            let community_base = 2 * self.table_max_seats.entry(table_id).read();
+            if pos >= community_base {
+                self.community_revealed.entry((table_id, pos - community_base)).read()
+            } else {
+                let seat: felt252 = (pos / 2).into();
+                self.hole_revealed.entry((table_id, seat, pos % 2)).read()
+            }
+        }
+
+        // Takes `seat`'s contribution out of its hands and spreads it over
+        // everyone else who put money in, pro rata, remainder to the first
+        // of them -- the same remainder rule the pot split uses.
+        //
+        // The pot itself is untouched: table_pot stays equal to the sum of
+        // every seat_contributed, so the existing reclaim path pays the
+        // redistributed amounts out with no further changes.
+        //
+        // If nobody else contributed there is nobody to compensate and the
+        // stake is left alone: a player who grieves a table they are the
+        // only backer of has harmed no one, and burning it would strand
+        // the tokens in this contract with no owner.
+        fn forfeit_stake(ref self: ContractState, table_id: felt252, seat: felt252) {
+            let owed = self.seat_contributed.entry((table_id, seat)).read();
+            if owed == 0 {
+                return;
+            }
+            let max_seats = self.table_max_seats.entry(table_id).read();
+
+            let mut total_others: u128 = 0;
+            let mut i: u32 = 0;
+            loop {
+                if i == max_seats {
+                    break;
+                }
+                let s: felt252 = i.into();
+                if s != seat {
+                    total_others += self.seat_contributed.entry((table_id, s)).read();
+                }
+                i += 1;
+            };
+            if total_others == 0 {
+                return;
+            }
+
+            self.seat_contributed.entry((table_id, seat)).write(0);
+
+            let mut distributed: u128 = 0;
+            let mut first: felt252 = 0;
+            let mut found_first = false;
+            let mut j: u32 = 0;
+            loop {
+                if j == max_seats {
+                    break;
+                }
+                let s: felt252 = j.into();
+                if s != seat {
+                    let entry = self.seat_contributed.entry((table_id, s));
+                    let c = entry.read();
+                    if c != 0 {
+                        if !found_first {
+                            first = s;
+                            found_first = true;
+                        }
+                        // u256 intermediate: owed and c are both u128 and
+                        // their product does not fit one. The quotient is
+                        // at most `owed`, so narrowing back is safe.
+                        let bump_u256: u256 = (owed.into() * c.into()) / total_others.into();
+                        let bump: u128 = bump_u256.try_into().expect(errors::AMOUNT_OVERFLOW);
+                        entry.write(c + bump);
+                        distributed += bump;
+                    }
+                }
+                j += 1;
+            };
+
+            let remainder = owed - distributed;
+            if remainder != 0 {
+                let entry = self.seat_contributed.entry((table_id, first));
+                entry.write(entry.read() + remainder);
+            }
+            self.emit(StakeForfeited { table_id, seat, amount: owed });
         }
 
         fn register_note_id_owner(
@@ -2453,7 +2693,154 @@ pub mod PokerGame {
             // decryption share is required to ever open a card, so the
             // hand is unrecoverable. Void it and let every seat reclaim.
             self.table_voided.entry(table_id).write(true);
+            // Same cost the accusation path imposes, for the same reason:
+            // naming a griefer who loses nothing is not a deterrent, and
+            // leaving this path free would just move the griefing one
+            // phase earlier -- stall the shuffle instead of the reveal.
+            self.forfeit_stake(table_id, stalled_seat);
             self.emit(TableVoided { table_id, stalled_seat });
+        }
+
+        // ── Accusations (docs/PROTOCOL.md section 8) ──────────────────
+
+        fn accuse_share(
+            ref self: ContractState, table_id: felt252, seat: felt252, position: u32,
+        ) {
+            assert(self.table_exists.entry(table_id).read(), errors::NO_TABLE);
+            assert(!self.table_settled.entry(table_id).read(), errors::ALREADY_SETTLED);
+            assert(!self.table_voided.entry(table_id).read(), errors::TABLE_VOIDED);
+            // Only a position the deck actually put in play can be owed a
+            // share, and only one that is still sealed: once a card is
+            // open, every share that mattered was delivered.
+            assert(self.position_opened.entry((table_id, position)).read(), errors::POSITION_NOT_OPENED);
+            assert(!self.position_revealed(table_id, position), errors::CARD_REVEALED);
+
+            // The accused must be a party to the decryption at all.
+            assert(self.seat_key_registered.entry((table_id, seat)).read(), errors::NO_KEY);
+
+            // Answered once, answered for good -- otherwise a seat could
+            // be made to pay gas over and over for the same position.
+            assert(!self.share_posted.entry((table_id, seat, position)).read(), errors::SHARE_POSTED);
+            assert(
+                self.accusation_deadline.entry((table_id, seat, position)).read() == 0,
+                errors::ALREADY_ACCUSED,
+            );
+
+            // Standing to accuse. See the interface comment for why hole
+            // positions are restricted to their owner: answering publishes
+            // a share, and a hole card needs every party's share, so
+            // letting anyone accuse would let anyone strip seat S's cards
+            // by accusing each party in turn.
+            let caller = get_caller_address();
+            let community_base = 2 * self.table_max_seats.entry(table_id).read();
+            if position < community_base {
+                let owner_seat: felt252 = (position / 2).into();
+                assert(
+                    caller == self.seat_owner.entry((table_id, owner_seat)).read(),
+                    errors::NOT_YOUR_CARD,
+                );
+            } else {
+                // Community card: any seat still in the hand is harmed by
+                // the stall and may say so.
+                let mut standing = false;
+                let max_seats = self.table_max_seats.entry(table_id).read();
+                let mut i: u32 = 0;
+                loop {
+                    if i == max_seats {
+                        break;
+                    }
+                    let s: felt252 = i.into();
+                    if self.is_active(table_id, s)
+                        && caller == self.seat_owner.entry((table_id, s)).read() {
+                        standing = true;
+                        break;
+                    }
+                    i += 1;
+                };
+                assert(standing, errors::NOT_SEAT_OWNER);
+            }
+
+            let deadline = get_block_timestamp() + ACCUSATION_SECS;
+            self.accusation_deadline.entry((table_id, seat, position)).write(deadline);
+            self.emit(ShareAccused { table_id, seat, position, deadline });
+        }
+
+        fn answer_accusation(
+            ref self: ContractState,
+            table_id: felt252,
+            seat: felt252,
+            position: u32,
+            share_x: u256,
+            share_y: u256,
+            proof: Span<felt252>,
+        ) {
+            assert(self.table_exists.entry(table_id).read(), errors::NO_TABLE);
+            assert(!self.table_voided.entry(table_id).read(), errors::TABLE_VOIDED);
+            let deadline = self.accusation_deadline.entry((table_id, seat, position)).read();
+            assert(deadline != 0, errors::NO_ACCUSATION);
+            // Late answers are refused even before anyone calls
+            // claim_share_timeout, so the conviction cannot be dodged by
+            // front-running it with the share that was owed an hour ago --
+            // the same rule submit_shuffle applies to its own deadline.
+            assert(get_block_timestamp() <= deadline, errors::ANSWER_LATE);
+
+            // The share is proved against this seat's OWN registered key,
+            // not the joint key: log_G(seat_pk) == log_c1(share). That is
+            // what makes it an answer to THIS accusation rather than
+            // evidence that somebody, somewhere, contributed something.
+            let pk_x = self.seat_pk_x.entry((table_id, seat)).read();
+            let pk_y = self.seat_pk_y.entry((table_id, seat)).read();
+            let c1_x = self.opened_c1_x.entry((table_id, position)).read();
+            let c1_y = self.opened_c1_y.entry((table_id, position)).read();
+            let inputs = array![
+                pk_x.low.into(), pk_x.high.into(),
+                pk_y.low.into(), pk_y.high.into(),
+                c1_x.low.into(), c1_x.high.into(),
+                c1_y.low.into(), c1_y.high.into(),
+                share_x.low.into(), share_x.high.into(),
+                share_y.low.into(), share_y.high.into(),
+            ];
+
+            assert(!self.reentrancy_lock.read(), errors::REENTRANCY);
+            self.reentrancy_lock.write(true);
+            let verifier = IShuffleVerifierDispatcher {
+                contract_address: self.shuffle_verifier.read(),
+            };
+            let ok = verifier.verify_decryption_share(proof, inputs.span());
+            self.reentrancy_lock.write(false);
+            assert(ok, errors::BAD_SHARE_PROOF);
+
+            self.share_posted.entry((table_id, seat, position)).write(true);
+            self.share_x.entry((table_id, seat, position)).write(share_x);
+            self.share_y.entry((table_id, seat, position)).write(share_y);
+            // Cleared, and it can never be raised again for this position.
+            self.accusation_deadline.entry((table_id, seat, position)).write(0);
+            self.emit(ShareAnswered { table_id, seat, position, share_x, share_y });
+        }
+
+        fn claim_share_timeout(
+            ref self: ContractState, table_id: felt252, seat: felt252, position: u32,
+        ) {
+            assert(self.table_exists.entry(table_id).read(), errors::NO_TABLE);
+            assert(!self.table_settled.entry(table_id).read(), errors::ALREADY_SETTLED);
+            assert(!self.table_voided.entry(table_id).read(), errors::TABLE_VOIDED);
+            let deadline = self.accusation_deadline.entry((table_id, seat, position)).read();
+            assert(deadline != 0, errors::NO_ACCUSATION);
+            assert(get_block_timestamp() > deadline, errors::DEADLINE_NOT_PASSED);
+
+            // Callable by anyone, like claim_shuffle_timeout: the seat that
+            // stalled will not report itself, and everyone else is frozen
+            // until someone does.
+            //
+            // n-of-n means the missing share can never be produced by
+            // anybody else, so the hand is over however this is handled.
+            // What the accusation adds is that it is now over with a name
+            // attached and a cost attached.
+            self.table_voided.entry(table_id).write(true);
+            self.share_defaulter_plus_one.entry(table_id).write(seat + 1);
+            self.forfeit_stake(table_id, seat);
+            self.emit(ShareDefaulted { table_id, seat, position });
+            self.emit(TableVoided { table_id, stalled_seat: seat });
         }
 
         // ── Dealing (docs/PROTOCOL.md §4 phases 2-4) ──────────────────
@@ -2963,6 +3350,22 @@ pub mod PokerGame {
 
         fn get_payout_note(self: @ContractState, table_id: felt252, seat: felt252) -> felt252 {
             self.payout_note_of(table_id, seat)
+        }
+
+        fn get_accusation_deadline(
+            self: @ContractState, table_id: felt252, seat: felt252, position: u32,
+        ) -> u64 {
+            self.accusation_deadline.entry((table_id, seat, position)).read()
+        }
+
+        fn get_share_posted(
+            self: @ContractState, table_id: felt252, seat: felt252, position: u32,
+        ) -> bool {
+            self.share_posted.entry((table_id, seat, position)).read()
+        }
+
+        fn get_share_defaulter_plus_one(self: @ContractState, table_id: felt252) -> felt252 {
+            self.share_defaulter_plus_one.entry(table_id).read()
         }
 
         fn get_seat_note(self: @ContractState, table_id: felt252, seat: felt252) -> felt252 {

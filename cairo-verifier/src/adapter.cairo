@@ -67,6 +67,17 @@ pub trait IShuffleVerifier<TState> {
     fn verify_joint_key(
         self: @TState, shares: Span<u256>, joint_x: u256, joint_y: u256,
     ) -> bool;
+
+    // One party's INDIVIDUAL decryption share, proved against that party's
+    // own key share rather than the table's joint key: log_G(pk) ==
+    // log_c1(share). This is what an accused player posts to clear
+    // themselves -- the normal reveal path uses the aggregate over the
+    // joint key, which says nothing about who did or did not contribute.
+    //
+    // public_inputs = [pk, c1, share] as u256 low/high pairs.
+    fn verify_decryption_share(
+        self: @TState, proof: Span<felt252>, public_inputs: Span<felt252>,
+    ) -> bool;
 }
 
 // The Garaga-generated verifiers. `full_proof_with_hints` is the whole
@@ -257,6 +268,14 @@ pub mod VerifierAdapter {
             self: @ContractState, shares: Span<u256>, joint_x: u256, joint_y: u256,
         ) -> bool {
             joint_key_matches(shares, joint_x, joint_y)
+        }
+
+        // Straight through: DleqVerifier already exposes exactly this.
+        fn verify_decryption_share(
+            self: @ContractState, proof: Span<felt252>, public_inputs: Span<felt252>,
+        ) -> bool {
+            IDleqVerifierDispatcher { contract_address: self.dleq.read() }
+                .verify_decryption_share(proof, public_inputs)
         }
     }
 }

@@ -616,3 +616,42 @@ fn test_begin_shuffle_rejects_a_joint_key_that_is_not_the_sum() {
     begin(game);
     assert(game.get_shuffle_order_len(TABLE_1) == 2, 'chain starts on a good key');
 }
+
+// A shuffle stall costs the staller their stake, exactly as a withheld
+// decryption share does. Leaving this path free would simply move the
+// griefing one phase earlier: stall the shuffle rather than the reveal,
+// and the hand still dies with the griefer paying nothing.
+#[test]
+fn test_shuffle_timeout_forfeits_the_stalled_seats_stake() {
+    let (game, _v) = deploy_pokergame_with_verifier(POOL());
+    let (token_addr, token, admin) = deploy_mock_token();
+
+    start_cheat_caller_address(game.contract_address, DEALER());
+    game.create_table(TABLE_1, token_addr, 0, TWO_SEATS);
+    stop_cheat_caller_address(game.contract_address);
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.join_table(TABLE_1, SEAT_0, NOTE_A);
+    game.register_shuffle_key(TABLE_1, SEAT_0, PK_A_X, PK_A_Y, key_proof());
+    stop_cheat_caller_address(game.contract_address);
+    start_cheat_caller_address(game.contract_address, BOB());
+    game.join_table(TABLE_1, SEAT_1, NOTE_B);
+    game.register_shuffle_key(TABLE_1, SEAT_1, PK_B_X, PK_B_Y, key_proof());
+    stop_cheat_caller_address(game.contract_address);
+
+    super::helpers::fund_and_approve(token, admin, ALICE(), game.contract_address, 10_000);
+    super::helpers::fund_and_approve(token, admin, BOB(), game.contract_address, 10_000);
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.bet(TABLE_1, SEAT_0, 1_000);
+    stop_cheat_caller_address(game.contract_address);
+    start_cheat_caller_address(game.contract_address, BOB());
+    game.bet(TABLE_1, SEAT_1, 1_000);
+    stop_cheat_caller_address(game.contract_address);
+
+    begin(game);
+    // ALICE is first in the order and never submits.
+    start_cheat_block_timestamp_global(SHUFFLE_TURN_SECS + 2);
+    game.claim_shuffle_timeout(TABLE_1);
+
+    assert(game.get_seat_contributed(TABLE_1, SEAT_0) == 0, 'staller forfeits');
+    assert(game.get_seat_contributed(TABLE_1, SEAT_1) == 2_000, 'the other seat takes it');
+}

@@ -234,7 +234,11 @@ reentrancy locks on the three reveal paths.
   multiset of cards in play is whatever the starting deck held — a dealer
   colluding with the first shuffler could have stacked it. See PROTOCOL.md
   §10.
-- **No accusation path.** A party who withholds a decryption share deadlocks
-  the hand with no on-chain evidence of who did it.
+- ~~**No accusation path.**~~ **CLOSED 2026-09-04, after this review.**
+  `accuse_share` / `answer_accusation` / `claim_share_timeout`; conviction
+  forfeits the defaulter's stake pro rata to the other contributors, and
+  `claim_shuffle_timeout` now does the same so the griefing cannot just move
+  one phase earlier. See PROTOCOL.md §8.1 — including why only the card's own
+  seat may accuse over a hole position.
 - **`n`-of-`n` liveness.** One player disconnecting freezes community
   reveals permanently; timing them out does not produce their share.

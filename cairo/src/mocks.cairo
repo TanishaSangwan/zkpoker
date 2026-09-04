@@ -204,6 +204,7 @@ pub mod MockShuffleVerifier {
         reject_opening: bool,
         reject_reveal: bool,
         reject_joint_key: bool,
+        reject_share: bool,
     }
 
     #[abi(embed_v0)]
@@ -237,6 +238,16 @@ pub mod MockShuffleVerifier {
             self: @ContractState, shares: Span<u256>, joint_x: u256, joint_y: u256,
         ) -> bool {
             !self.reject_joint_key.read()
+        }
+
+        // Same limitation as verify_joint_key: a real DLEQ needs curve
+        // arithmetic these opaque fixtures cannot support, so this
+        // exercises the CONTRACT's handling of an accepted or rejected
+        // share, not the proof itself.
+        fn verify_decryption_share(
+            self: @ContractState, proof: Span<felt252>, public_inputs: Span<felt252>,
+        ) -> bool {
+            !self.reject_share.read()
         }
 
         // Accepts any card the caller names unless set_reject_reveal(true).
@@ -276,6 +287,10 @@ pub mod MockShuffleVerifier {
         fn set_reject_joint_key(ref self: ContractState, reject: bool) {
             self.reject_joint_key.write(reject);
         }
+
+        fn set_reject_share(ref self: ContractState, reject: bool) {
+            self.reject_share.write(reject);
+        }
     }
 }
 
@@ -286,4 +301,5 @@ pub trait IMockVerifierAdminTrait<TState> {
     fn set_reject_opening(ref self: TState, reject: bool);
     fn set_reject_reveal(ref self: TState, reject: bool);
     fn set_reject_joint_key(ref self: TState, reject: bool);
+    fn set_reject_share(ref self: TState, reject: bool);
 }

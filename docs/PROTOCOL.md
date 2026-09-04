@@ -527,10 +527,54 @@ Recommended: `t = n−1` for community cards, strict `n`-of-`n` for hole cards.
 **Open decision** — it changes Phase 0, so it must be settled before the state
 machine is built.
 
-Separately, a party who never delivers a hole-card share deadlocks that player with
-no on-chain evidence of who did it — free griefing. Needs an **accusation path**:
-`accuse(table_id, X)` forces `X` to post their share publicly within a deadline or
-forfeit. Same shape as the existing `claim_shuffle_timeout`.
+### 8.1 The accusation path — built
+
+A party who never delivers a share deadlocked the table with nothing on-chain
+saying who. The reveal path cannot tell you either: it verifies the **aggregate**
+share against the joint key — which is what makes it `O(1)` in players (§6.2) —
+and an aggregate that fails proves someone cheated but not which someone.
+
+Three entrypoints, shaped like `claim_shuffle_timeout`:
+
+| | |
+|---|---|
+| `accuse_share(table, seat, position)` | starts a 1-hour clock against one seat for one deck position |
+| `answer_accusation(table, seat, position, share, proof)` | clears it, posting that seat's **individual** share with a DLEQ against the seat's *own* registered key (`log_G(pk) == log_c1(share)`), not the joint key |
+| `claim_share_timeout(table, seat, position)` | convicts a seat that stayed silent |
+
+An answered accusation can never be re-raised for that position, so a seat cannot
+be ground down by repeated accusations. Late answers are refused even before
+anyone calls the timeout, so a conviction cannot be dodged by front-running it
+with the share that was owed an hour ago — the rule `submit_shuffle` already
+applies to its own deadline.
+
+**Who may accuse is not "anyone".** Answering publishes a share. For a *community*
+position that costs nothing — the card is about to be public anyway — so any seat
+still in the hand may accuse. For a *hole* position it is different: seat `S`'s
+card needs every party's share, so if all of them were forced on-chain the card
+would become publicly readable mid-hand. Only `S` may accuse over positions `2S`
+and `2S+1`. That does not remove the exposure; it makes it `S`'s own decision,
+taken only when the alternative is a hand `S` can no longer play, and it stops
+anyone else from stripping `S`'s cards by accusing each party in turn. Verifiable
+encryption to `S`'s key would remove the trade-off outright — that is a circuit
+this project does not have.
+
+**Conviction costs the griefer their stake.** `n`-of-`n` means the missing share
+can never be produced by anyone else, so the hand is over however this is handled;
+what the accusation adds is a name *and a cost*. The convicted seat's contribution
+is redistributed pro rata over everyone else who put money in, remainder to the
+first of them. `table_pot` is untouched, so the ordinary reclaim path pays the new
+amounts out with no further changes. A defaulter nobody else backed keeps their
+stake — there is no one to compensate, and burning it would strand the tokens in
+the contract with no owner.
+
+`claim_shuffle_timeout` forfeits on the same terms. Leaving that path free would
+simply move the griefing one phase earlier: stall the shuffle instead of the
+reveal, and the hand still dies with the griefer paying nothing.
+
+**What this does not fix:** the `t`-of-`n` decision above. An accusation assigns
+blame and cost; it does not produce the missing share, so a community card still
+cannot be opened after a dropout. That remains open.
 
 ---
 
@@ -647,7 +691,12 @@ but "should be" is not "measured," and the entire client-side story rests on it.
   card comes from storage a reveal proof bound, every payout note from
   `join_table`'s binding, so anyone may settle and nobody can steer it. An
   uncontested pot needs no cards shown at all.
-- The accusation path (§8) and the threshold decision.
+- ~~The accusation path (§8)~~ — **done, 2026-09-04.** `accuse_share` /
+  `answer_accusation` / `claim_share_timeout`, with conviction forfeiting the
+  defaulter's stake pro rata to the other contributors, and
+  `claim_shuffle_timeout` forfeiting on the same terms. See §8.1. The threshold
+  (`t`-of-`n`) decision is still open — an accusation assigns blame and cost, it
+  does not produce the missing share.
 - Any client UI for the above; browser proving.
 - ~~Bet-matching and turn-order enforcement~~ — **done.** `bet`/`fold`/`check`
   are turn-ordered; a street cannot end until every seat still in the hand has
