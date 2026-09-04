@@ -8,12 +8,16 @@ use snforge_std::{
     EventSpyAssertionsTrait, spy_events, start_cheat_caller_address, stop_cheat_caller_address,
 };
 use zkpoker::mocks::{IMockErc20AdminDispatcher, IMockErc20AdminDispatcherTrait};
-use zkpoker::{IPokerGameDispatcherTrait, PokerGame};
+use zkpoker::{IPokerGameDispatcherTrait, IPokerGameSafeDispatcherTrait, PokerGame};
 use super::helpers::{
     ALICE, BOB, CAROL, DEALER, MALLORY, NOTE_A, NOTE_B, NOTE_C, POOL, SEAT_0, SEAT_1, SEAT_2,
     TABLE_1, TABLE_2, THREE_SEATS, TWO_SEATS, deploy_pokergame, deploy_mock_token, fund_and_approve,
     setup_table_with_bets, setup_table_with_two_seats,
 };
+
+// An OPEN note, distinct from the encrypted hole-card note each seat
+// joins with. Round 8 finding E.
+const OPEN_NOTE_A: felt252 = 'OPEN_NOTE_A';
 
 const FUND: u256 = 10_000;
 const BET: u128 = 1_000;
@@ -313,4 +317,80 @@ fn test_privacy_invoke_approve_failure_rejected() {
 
     start_cheat_caller_address(game.contract_address, POOL());
     game.privacy_invoke(token_addr, POOL(), NOTE_A);
+}
+
+// ─── AUDIT: winnings must reach a note that can actually be filled ──────
+
+// AUDIT FINDING E, fixed. Every settlement path paid seat_note -- the
+// note supplied at join_table, which the design documents as the player's
+// *encrypted* hole-card note. Open vs encrypted is fixed when a note is
+// created at the pool layer, and privacy_invoke can only fill an OPEN
+// note, so the pot was credited to a note nothing could ever pay out and
+// stayed locked in this contract. Round 9's register_payout_note existed
+// to fix exactly this, but settle_table and settle_table_by_hand both
+// asserted payout_note_ids[i] == seat_note, so it could never be used.
+// A seat can now bind an open note, and settlement follows the binding.
+#[test]
+fn test_winnings_follow_the_bound_payout_note() {
+    let (game, _token, _admin, _token_addr) = setup_table_with_bets(FUND, BET);
+
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.bind_payout_note(TABLE_1, SEAT_0, OPEN_NOTE_A);
+    stop_cheat_caller_address(game.contract_address);
+    assert(game.get_payout_note(TABLE_1, SEAT_0) == OPEN_NOTE_A, 'binding took effect');
+    assert(game.get_seat_note(TABLE_1, SEAT_0) == NOTE_A, 'hole-card note unchanged');
+
+    start_cheat_caller_address(game.contract_address, DEALER());
+    game.settle_table(TABLE_1, array![SEAT_0].span(), array![OPEN_NOTE_A].span());
+    stop_cheat_caller_address(game.contract_address);
+
+    assert(game.get_pending_payout(OPEN_NOTE_A) == BET * 2, 'paid into the open note');
+    assert(game.get_pending_payout(NOTE_A) == 0, 'not into the encrypted one');
+}
+
+// A seat that never binds one keeps the old behaviour, so nothing that
+// already worked breaks.
+#[test]
+fn test_unbound_seat_still_paid_into_seat_note() {
+    let (game, _token, _admin, _token_addr) = setup_table_with_bets(FUND, BET);
+    assert(game.get_payout_note(TABLE_1, SEAT_0) == NOTE_A, 'falls back to seat_note');
+    start_cheat_caller_address(game.contract_address, DEALER());
+    game.settle_table(TABLE_1, array![SEAT_0].span(), array![NOTE_A].span());
+    stop_cheat_caller_address(game.contract_address);
+    assert(game.get_pending_payout(NOTE_A) == BET * 2, 'paid as before');
+}
+
+#[test]
+#[feature("safe_dispatcher")]
+fn test_bind_payout_note_by_non_seat_owner_rejected() {
+    let (game, _token, _admin, _token_addr) = setup_table_with_bets(FUND, BET);
+    let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
+    start_cheat_caller_address(game.contract_address, MALLORY());
+    let outcome = safe.bind_payout_note(TABLE_1, SEAT_0, OPEN_NOTE_A);
+    stop_cheat_caller_address(game.contract_address);
+    match outcome {
+        Result::Ok(_) => panic!("bound a note to someone else's seat"),
+        Result::Err(p) => assert(*p.at(0) == 'NOT_SEAT_OWNER', 'wrong error'),
+    }
+}
+
+// The note_id ownership rule is the same one join_table and
+// register_payout_note enforce: first registrant owns it, and nobody else
+// may name it. Otherwise a player could bind a note they don't control.
+#[test]
+#[feature("safe_dispatcher")]
+fn test_bind_payout_note_cannot_steal_someone_elses_note() {
+    let (game, _token, _admin, _token_addr) = setup_table_with_bets(FUND, BET);
+    start_cheat_caller_address(game.contract_address, BOB());
+    game.register_payout_note(OPEN_NOTE_A); // BOB registers it first
+    stop_cheat_caller_address(game.contract_address);
+
+    let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
+    start_cheat_caller_address(game.contract_address, ALICE());
+    let outcome = safe.bind_payout_note(TABLE_1, SEAT_0, OPEN_NOTE_A);
+    stop_cheat_caller_address(game.contract_address);
+    match outcome {
+        Result::Ok(_) => panic!("bound a note registered to someone else"),
+        Result::Err(p) => assert(*p.at(0) == 'NOTE_ID_TAKEN', 'wrong error'),
+    }
 }

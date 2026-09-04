@@ -384,6 +384,18 @@ pub trait IPokerGame<TState> {
     // taking a seat.
     fn register_payout_note(ref self: TState, note_id: felt252);
 
+    // Round 8 finding E: binds an OPEN note to this seat, so the seat's
+    // winnings are paid there rather than into the encrypted hole-card
+    // note supplied at join_table. Callable only by the seat's owner, only
+    // before the table settles, and registers the note_id's ownership the
+    // same way join_table and register_payout_note do. Rebinding is
+    // allowed while the hand is live -- the seat owner owns both notes, so
+    // there is nothing to steal -- and settlement reads whatever is bound
+    // at that moment. Without this, register_payout_note above could never
+    // actually be used, because both settle paths required
+    // payout_note_ids[i] to equal seat_note.
+    fn bind_payout_note(ref self: TState, table_id: felt252, seat: felt252, note_id: felt252);
+
     // ── Fairness: commit / deal / reveal ───────────────────────────────
     // Dealer commits hash(seed) before any cards are dealt. `seed` itself
     // must stay secret until reveal_seed. `seed_hash` MUST equal
@@ -685,6 +697,10 @@ pub trait IPokerGame<TState> {
     fn get_seed_hash(self: @TState, table_id: felt252) -> felt252;
     fn get_revealed_seed(self: @TState, table_id: felt252) -> felt252;
     fn get_seat_note(self: @TState, table_id: felt252, seat: felt252) -> felt252;
+
+    // The note this seat's winnings will actually be paid into: the one
+    // bound via bind_payout_note, or seat_note if none was bound.
+    fn get_payout_note(self: @TState, table_id: felt252, seat: felt252) -> felt252;
     fn get_pending_payout(self: @TState, note_id: felt252) -> u128;
     fn get_pool(self: @TState) -> ContractAddress;
     fn get_table_dealer(self: @TState, table_id: felt252) -> ContractAddress;
@@ -845,6 +861,21 @@ pub mod PokerGame {
         dealt: Map<felt252, bool>,
         // (table_id, seat) -> hole_card_note_id, and the reverse seat-taken flag
         seat_note: Map<(felt252, felt252), felt252>,
+        // (table_id, seat) -> the OPEN note this seat wants its winnings
+        // paid into, when that differs from seat_note. Round 8 finding E:
+        // every settlement path used to pay seat_note, the note supplied
+        // at join_table -- which the design documents as the *encrypted*
+        // hole-card note. An encrypted note can never become an open one
+        // (open vs encrypted is fixed at note creation at the pool layer),
+        // and privacy_invoke can only fill an open note, so the pot was
+        // credited to a note nothing could ever pay out and stayed locked
+        // in this contract forever. Round 9's register_payout_note was
+        // added to fix exactly this, but settle_table and
+        // settle_table_by_hand both assert payout_note_ids[i] ==
+        // seat_note, so it could never actually be used. Zero means
+        // unset: fall back to seat_note, which keeps the old flow working
+        // for anyone who joined with an open note in the first place.
+        seat_payout_note: Map<(felt252, felt252), felt252>,
         seat_taken: Map<(felt252, felt252), bool>,
         seat_folded: Map<(felt252, felt252), bool>,
         // (table_id, seat) -> the address that joined it; bet/fold on that
@@ -1234,7 +1265,7 @@ pub mod PokerGame {
                     break;
                 }
                 let seat = *winners.at(w);
-                let note_id = self.seat_note.entry((table_id, seat)).read();
+                let note_id = self.payout_note_of(table_id, seat);
                 let existing_pending = self.pending_payout.entry(note_id).read();
                 let existing_token = self.payout_token.entry(note_id).read();
                 assert(existing_pending == 0 || existing_token == token, errors::BAD_TOKEN);
@@ -1376,6 +1407,19 @@ pub mod PokerGame {
             };
         }
 
+        // Where this seat's winnings go: the open note it bound via
+        // bind_payout_note, or seat_note if it never bound one. Every
+        // settlement path goes through here so the three of them cannot
+        // drift apart. See seat_payout_note's storage comment.
+        fn payout_note_of(self: @ContractState, table_id: felt252, seat: felt252) -> felt252 {
+            let bound = self.seat_payout_note.entry((table_id, seat)).read();
+            if bound != 0 {
+                bound
+            } else {
+                self.seat_note.entry((table_id, seat)).read()
+            }
+        }
+
         fn register_note_id_owner(
             ref self: ContractState, note_id: felt252, caller: ContractAddress,
         ) {
@@ -1482,6 +1526,24 @@ pub mod PokerGame {
         fn register_payout_note(ref self: ContractState, note_id: felt252) {
             let caller = get_caller_address();
             self.register_note_id_owner(note_id, caller);
+            self.emit(PayoutNoteRegistered { note_id, owner: caller });
+        }
+
+        fn bind_payout_note(
+            ref self: ContractState, table_id: felt252, seat: felt252, note_id: felt252,
+        ) {
+            assert(self.table_exists.entry(table_id).read(), errors::NO_TABLE);
+            assert(!self.table_settled.entry(table_id).read(), errors::ALREADY_SETTLED);
+            let caller = get_caller_address();
+            assert(caller == self.seat_owner.entry((table_id, seat)).read(), errors::NOT_SEAT_OWNER);
+            assert(note_id != 0, errors::NO_INPUT);
+            // Same binding rule every other note_id path uses: whoever
+            // registers a note_id first owns it, and nobody else may name
+            // it. Without this a player could bind a note_id belonging to
+            // someone else and have that note's eventual payout land
+            // somewhere they don't control -- or collide with it.
+            self.register_note_id_owner(note_id, caller);
+            self.seat_payout_note.entry((table_id, seat)).write(note_id);
             self.emit(PayoutNoteRegistered { note_id, owner: caller });
         }
 
@@ -1794,7 +1856,7 @@ pub mod PokerGame {
                 // could still pay a seat that had already withdrawn its
                 // contribution from the pot.
                 assert(!self.seat_folded.entry((table_id, seat)).read(), errors::FOLDED);
-                assert(self.seat_note.entry((table_id, seat)).read() == note_id, errors::NO_TABLE);
+                assert(self.payout_note_of(table_id, seat) == note_id, errors::NO_TABLE);
                 // Security review (2026-08-30 re-audit, Finding 1): the
                 // check above only confirms note_id belongs to *some* seat
                 // at *this* table — it doesn't stop an attacker from having
@@ -1920,7 +1982,7 @@ pub mod PokerGame {
                 }
                 let seat = *seats.at(i);
                 let note_id = *payout_note_ids.at(i);
-                assert(self.seat_note.entry((table_id, seat)).read() == note_id, errors::NO_TABLE);
+                assert(self.payout_note_of(table_id, seat) == note_id, errors::NO_TABLE);
                 assert(
                     self.note_id_owner.entry(note_id).read() == self.seat_owner.entry((table_id, seat)).read(),
                     errors::NOTE_ID_TAKEN,
@@ -2727,6 +2789,10 @@ pub mod PokerGame {
 
         fn get_revealed_seed(self: @ContractState, table_id: felt252) -> felt252 {
             self.revealed_seed.entry(table_id).read()
+        }
+
+        fn get_payout_note(self: @ContractState, table_id: felt252, seat: felt252) -> felt252 {
+            self.payout_note_of(table_id, seat)
         }
 
         fn get_seat_note(self: @ContractState, table_id: felt252, seat: felt252) -> felt252 {
