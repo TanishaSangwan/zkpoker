@@ -703,14 +703,36 @@ fn test_settle_from_reveals_incomplete_board_rejected() {
 // mucked -- but the hand cannot be settled while they are still in it.
 #[test]
 #[feature("safe_dispatcher")]
-fn test_settle_from_reveals_unrevealed_contender_rejected() {
+fn test_settle_from_reveals_mucking_forfeits_it_does_not_veto() {
+    // AUDIT FINDING B, fixed. settle_from_reveals used to assert that every
+    // contender had revealed both hole cards, so a seat that simply never
+    // revealed -- mucking, or going offline -- reverted settlement for
+    // everyone and stranded the pot until the reclaim timeout. A losing
+    // player could therefore deny the winner their profit for free. Now a
+    // seat that did not show forfeits: it is skipped, and the pot goes to
+    // the best hand among those who did show.
     let game = setup_showdown();
     reveal_board(game);
     reveal_hole(game, ALICE(), SEAT_0, card(12, 0), card(12, 1));
+    // BOB never reveals.
+
+    game.settle_from_reveals(TABLE_1);
+    assert(game.get_pending_payout(NOTE_A) == 2_000, 'shower takes the whole pot');
+    assert(game.get_pending_payout(NOTE_B) == 0, 'mucker forfeits');
+}
+
+#[test]
+#[feature("safe_dispatcher")]
+fn test_settle_from_reveals_all_muck_rejected() {
+    // The one case that must still revert: nobody showed, so there is no
+    // hand to score. Falling through would award the pot to seat 0 on a
+    // score of zero.
+    let game = setup_showdown();
+    reveal_board(game);
 
     let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
     match safe.settle_from_reveals(TABLE_1) {
-        Result::Ok(_) => panic!("scored a seat that never revealed"),
+        Result::Ok(_) => panic!("settled with no hands shown"),
         Result::Err(panic_data) => assert(*panic_data.at(0) == 'HOLE_NOT_REVEALED', 'wrong error'),
     }
 }

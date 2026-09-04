@@ -11,7 +11,7 @@ use zkpoker::{
     IErc20DispatcherTrait, IPokerGameDispatcherTrait, IPokerGameSafeDispatcherTrait, PokerGame,
 };
 use super::helpers::{
-    ALICE, BOB, DEALER, MALLORY, NOTE_A, SEAT_0, SEAT_1, TABLE_1, TWO_SEATS, deploy_pokergame,
+    ALICE, BOB, DEALER, MALLORY, NOTE_A, NOTE_B, SEAT_0, SEAT_1, TABLE_1, TWO_SEATS, deploy_pokergame,
     deploy_mock_token, fund_and_approve, setup_table_with_two_seats,
 };
 
@@ -402,4 +402,30 @@ fn test_fold_out_of_turn_rejected() {
         Result::Ok(_) => panic!("folded out of turn"),
         Result::Err(p) => assert(*p.at(0) == 'NOT_YOUR_BETTING_TURN', 'wrong error'),
     }
+}
+
+// ─── AUDIT: seats freeze once a hand is underway ────────────────────────
+
+// AUDIT FINDING A, fixed. join_table was ungated on hand state, but every
+// betting-round predicate derives membership from seat_owner: is_active(),
+// round_complete() and settle_from_reveals's contender walk all count any
+// seat with a non-zero owner. A late joiner who simply never acted made
+// round_complete() false forever -- advance_street reverted permanently and
+// showdown became unreachable, so real money already in table_pot could only
+// come out via the dealer's trusted settle_table or the 24h refund. One
+// transaction, no funds, no cards, no key, repeatable on any table with a
+// free seat.
+#[test]
+#[feature("safe_dispatcher")]
+fn test_cannot_join_once_the_pot_is_live() {
+    let (game, _token) = setup_stalled_table(); // ALICE seated and betting, SEAT_1 free
+    let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
+    start_cheat_caller_address(game.contract_address, MALLORY());
+    let outcome = safe.join_table(TABLE_1, SEAT_1, NOTE_B);
+    stop_cheat_caller_address(game.contract_address);
+    match outcome {
+        Result::Ok(_) => panic!("griefer joined a live hand"),
+        Result::Err(p) => assert(*p.at(0) == 'BETTING_CLOSED', 'wrong error'),
+    }
+    assert(game.get_seat_owner(TABLE_1, SEAT_1) == starknet::contract_address_const::<0>(), 'seat must stay empty');
 }

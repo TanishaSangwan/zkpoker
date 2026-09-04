@@ -1418,6 +1418,21 @@ pub mod PokerGame {
             // doesn't even parse as a u32 (negative-looking or too large a
             // felt252) is rejected the same way as one that's in range but
             // >= max_seats; both are BAD_SEAT.
+            assert(!self.table_settled.entry(table_id).read(), errors::ALREADY_SETTLED);
+            assert(!self.table_voided.entry(table_id).read(), errors::TABLE_VOIDED);
+            // Seats freeze once the hand is underway. Joining is free and
+            // ungated by design (no buy-in moves here), but every
+            // betting-round predicate derives membership from seat_owner:
+            // is_active(), round_complete() and settle_from_reveals's
+            // contender walk all count any seat with a non-zero owner. So a
+            // late joiner who simply never acts made round_complete() false
+            // forever -- advance_street reverted permanently, showdown became
+            // unreachable, and real bets already in table_pot could only be
+            // resolved by the dealer's trusted settle_table or the 24h
+            // refund. One transaction, no funds, no cards, no key, repeatable
+            // on any table with a free seat.
+            assert(!self.shuffle_started.entry(table_id).read(), errors::SHUFFLE_STARTED);
+            assert(self.table_pot.entry(table_id).read() == 0, errors::BETTING_CLOSED);
             let seat_u32: u32 = seat.try_into().expect(errors::BAD_SEAT);
             let max_seats = self.table_max_seats.entry(table_id).read();
             assert(seat_u32 < max_seats, errors::BAD_SEAT);
@@ -2488,35 +2503,52 @@ pub mod PokerGame {
                 cc += 1;
             };
 
+            // A contender who did not reveal both hole cards has MUCKED.
+            // They forfeit and cannot win -- but they must not be able to
+            // block settlement either. Asserting here (as an earlier version
+            // did) inverted the payoff of the whole game: a beaten player
+            // simply never revealed, settlement reverted forever,
+            // table_settled was never set, and after SETTLE_TIMEOUT_SECS
+            // every seat including the griefer reclaimed its full stake.
+            // Withholding a reveal strictly dominated revealing whenever you
+            // were behind. Scored and skipped instead.
             let mut scores: Array<u64> = array![];
+            let mut revealed_flags: Array<bool> = array![];
+            let mut any_revealed = false;
             let mut i: u32 = 0;
             loop {
                 if i == cs.len() {
                     break;
                 }
                 let seat = *cs.at(i);
-                assert(
-                    self.hole_revealed.entry((table_id, seat, 0)).read()
-                        && self.hole_revealed.entry((table_id, seat, 1)).read(),
-                    errors::HOLE_NOT_REVEALED,
-                );
-                let h1 = self.hole_card.entry((table_id, seat, 0)).read();
-                let h2 = self.hole_card.entry((table_id, seat, 1)).read();
-                all_cards.append(h1);
-                all_cards.append(h2);
+                let shown = self.hole_revealed.entry((table_id, seat, 0)).read()
+                    && self.hole_revealed.entry((table_id, seat, 1)).read();
+                revealed_flags.append(shown);
+                if shown {
+                    any_revealed = true;
+                    let h1 = self.hole_card.entry((table_id, seat, 0)).read();
+                    let h2 = self.hole_card.entry((table_id, seat, 1)).read();
+                    all_cards.append(h1);
+                    all_cards.append(h2);
 
-                let mut seven: Array<u8> = array![h1, h2];
-                let mut c: u32 = 0;
-                loop {
-                    if c == 5 {
-                        break;
-                    }
-                    seven.append(self.community_card.entry((table_id, c)).read());
-                    c += 1;
-                };
-                scores.append(super::poker_hand::best_of_7(seven.span()));
+                    let mut seven: Array<u8> = array![h1, h2];
+                    let mut c: u32 = 0;
+                    loop {
+                        if c == 5 {
+                            break;
+                        }
+                        seven.append(self.community_card.entry((table_id, c)).read());
+                        c += 1;
+                    };
+                    scores.append(super::poker_hand::best_of_7(seven.span()));
+                } else {
+                    scores.append(0);
+                }
                 i += 1;
             };
+            // Everyone mucked: no hand was proved, so there is nobody to pay.
+            // Deliberately NOT awarding to an arbitrary seat on a 0-0 tie.
+            assert(any_revealed, errors::HOLE_NOT_REVEALED);
 
             // Defence in depth. The shuffle proof already makes the deck a
             // genuine permutation and the reveal proofs tie each card to a
@@ -2525,14 +2557,20 @@ pub mod PokerGame {
             // it is cheap.
             super::poker_hand::assert_valid_deck_cards(all_cards.span());
 
+            // Both passes below consult revealed_flags rather than treating
+            // a zero score as "mucked". A real hand cannot score 0 (that
+            // would need five 2s), but relying on that would make the muck
+            // sentinel an implicit property of poker_hand's scoring rather
+            // than something stated here.
             let sp = scores.span();
+            let rf = revealed_flags.span();
             let mut best: u64 = 0;
             let mut j: u32 = 0;
             loop {
                 if j == sp.len() {
                     break;
                 }
-                if *sp.at(j) > best {
+                if *rf.at(j) && *sp.at(j) > best {
                     best = *sp.at(j);
                 }
                 j += 1;
@@ -2543,7 +2581,7 @@ pub mod PokerGame {
                 if m == sp.len() {
                     break;
                 }
-                if *sp.at(m) == best {
+                if *rf.at(m) && *sp.at(m) == best {
                     winners.append(*cs.at(m));
                 }
                 m += 1;
