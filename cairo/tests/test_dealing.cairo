@@ -67,11 +67,21 @@ fn all_positions() -> Span<u32> {
         .span()
 }
 
-fn all_ciphertexts() -> Span<u256> {
+// One DECK_OPEN_K-sized chunk of ciphertexts, starting at `first`, padded
+// the way the contract pads a final partial chunk: by repeating the last
+// in-play position. Round 8 finding I -- the deck is opened K=5 positions
+// at a time because circuits/deck_open fixes K at compile time.
+fn chunk_cts(first: u32, k_total: u32) -> Span<u256> {
     let mut out: Array<u256> = array![];
     let mut i: u32 = 0;
-    while i != 9 {
-        let c = ct(i.into() + 1);
+    while i != 5 {
+        let raw = first + i;
+        let p = if raw < k_total {
+            raw
+        } else {
+            k_total - 1
+        };
+        let c = ct((p + 1).into());
         out.append(*c.at(0));
         out.append(*c.at(1));
         out.append(*c.at(2));
@@ -80,6 +90,13 @@ fn all_ciphertexts() -> Span<u256> {
     }
     out.span()
 }
+
+// A two-seat table has 2*2 + 5 = 9 in-play positions, so two chunks.
+fn open_all(game: zkpoker::IPokerGameDispatcher) {
+    game.open_deck(TABLE_1, 0, chunk_cts(0, 9), proof());
+    game.open_deck(TABLE_1, 1, chunk_cts(5, 9), proof());
+}
+
 
 // Table with both keys registered, shuffle run to completion.
 fn setup_shuffled() -> (
@@ -122,7 +139,7 @@ fn setup_opened() -> (
     zkpoker::IPokerGameDispatcher, zkpoker::mocks::IMockVerifierAdminTraitDispatcher,
 ) {
     let (game, verifier) = setup_shuffled();
-    game.open_deck(TABLE_1, all_ciphertexts(), proof());
+    open_all(game);
     (game, verifier)
 }
 
@@ -132,7 +149,11 @@ fn setup_opened() -> (
 fn test_open_deck_success_and_event() {
     let (game, _v) = setup_shuffled();
     let mut spy = spy_events();
-    game.open_deck(TABLE_1, all_ciphertexts(), proof());
+    // The first chunk alone must NOT mark the deck open -- a partial open
+    // is what finding 1's griefer wanted.
+    game.open_deck(TABLE_1, 0, chunk_cts(0, 9), proof());
+    assert(!game.get_deck_opened(TABLE_1), 'not opened until complete');
+    game.open_deck(TABLE_1, 1, chunk_cts(5, 9), proof());
     assert(game.get_deck_opened(TABLE_1), 'deck not marked opened');
     spy
         .assert_emitted(
@@ -153,7 +174,7 @@ fn test_open_deck_success_and_event() {
 fn test_open_deck_callable_by_non_participant() {
     let (game, _v) = setup_shuffled();
     start_cheat_caller_address(game.contract_address, MALLORY());
-    game.open_deck(TABLE_1, all_ciphertexts(), proof());
+    open_all(game);
     stop_cheat_caller_address(game.contract_address);
     assert(game.get_deck_opened(TABLE_1), 'deck not opened');
 }
@@ -168,7 +189,7 @@ fn test_open_deck_before_shuffle_complete_rejected() {
     stop_cheat_caller_address(game.contract_address);
 
     let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
-    let outcome = safe.open_deck(TABLE_1, all_ciphertexts(), proof());
+    let outcome = safe.open_deck(TABLE_1, 0, chunk_cts(0, 9), proof());
     match outcome {
         Result::Ok(_) => panic!("opened a deck before the shuffle finished"),
         Result::Err(panic_data) => assert(
@@ -182,7 +203,7 @@ fn test_open_deck_before_shuffle_complete_rejected() {
 fn test_open_deck_twice_rejected() {
     let (game, _v) = setup_opened();
     let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
-    let outcome = safe.open_deck(TABLE_1, all_ciphertexts(), proof());
+    let outcome = safe.open_deck(TABLE_1, 0, chunk_cts(0, 9), proof());
     match outcome {
         Result::Ok(_) => panic!("reopened the deck"),
         Result::Err(panic_data) => assert(
@@ -198,7 +219,7 @@ fn test_open_deck_twice_rejected() {
 fn test_open_deck_mismatched_lengths_rejected() {
     let (game, _v) = setup_shuffled();
     let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
-    let outcome = safe.open_deck(TABLE_1, ct('X').span(), proof());
+    let outcome = safe.open_deck(TABLE_1, 0, ct('X').span(), proof());
     match outcome {
         Result::Ok(_) => panic!("accepted a short ciphertext array"),
         Result::Err(panic_data) => assert(
@@ -213,7 +234,7 @@ fn test_open_deck_rejected_proof() {
     let (game, verifier) = setup_shuffled();
     verifier.set_reject_opening(true);
     let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
-    let outcome = safe.open_deck(TABLE_1, all_ciphertexts(), proof());
+    let outcome = safe.open_deck(TABLE_1, 0, chunk_cts(0, 9), proof());
     match outcome {
         Result::Ok(_) => panic!("accepted a rejected opening proof"),
         Result::Err(panic_data) => assert(
@@ -551,7 +572,7 @@ fn setup_preflop_done() -> zkpoker::IPokerGameDispatcher {
     game.submit_shuffle(TABLE_1, DECK_2, proof());
     stop_cheat_caller_address(game.contract_address);
 
-    game.open_deck(TABLE_1, all_ciphertexts(), proof());
+    open_all(game);
 
     game
 }
@@ -766,20 +787,23 @@ fn test_settle_from_reveals_before_showdown_rejected() {
 
 // ─── AUDIT: proof-of-concept for suspected findings ─────────────────────
 
-// AUDIT FINDING 1, fixed. open_deck is one-shot and callable by anyone, and
-// the deck travels in public calldata, so any observer can build a valid
-// opening proof. When positions were caller-supplied, opening one irrelevant
+// AUDIT FINDING 1, fixed. open_deck is callable by anyone and the deck
+// travels in public calldata, so any observer can build a valid opening
+// proof. When positions were caller-supplied, opening one irrelevant
 // position flipped deck_opened and left every later reveal failing
 // POSITION_NOT_OPENED -- the hand was permanently unplayable and the pot
-// stuck until the reclaim timeout. Positions are now derived on-chain, so a
-// partial open cannot be expressed at all.
+// stuck until the reclaim timeout. Positions are now derived on-chain and
+// deck_opened only flips once the final chunk lands, so a griefer can
+// choose neither which slots get opened nor when to stop.
 #[test]
 #[feature("safe_dispatcher")]
 fn test_open_deck_partial_open_is_unexpressible() {
     let (game, _v) = setup_shuffled();
     let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
+
+    // A short ciphertext array is rejected outright.
     start_cheat_caller_address(game.contract_address, MALLORY());
-    let outcome = safe.open_deck(TABLE_1, ct('X').span(), proof());
+    let outcome = safe.open_deck(TABLE_1, 0, ct('X').span(), proof());
     stop_cheat_caller_address(game.contract_address);
     match outcome {
         Result::Ok(_) => panic!("griefer opened a partial deck"),
@@ -787,8 +811,22 @@ fn test_open_deck_partial_open_is_unexpressible() {
     }
     assert(!game.get_deck_opened(TABLE_1), 'deck must stay unopened');
 
-    // And a full, honest open still covers every in-play position.
-    game.open_deck(TABLE_1, all_ciphertexts(), proof());
+    // Skipping ahead to the last chunk, so the earlier slots are never
+    // opened, is refused too -- chunks are consumed strictly in order.
+    start_cheat_caller_address(game.contract_address, MALLORY());
+    let jumped = safe.open_deck(TABLE_1, 1, chunk_cts(5, 9), proof());
+    stop_cheat_caller_address(game.contract_address);
+    match jumped {
+        Result::Ok(_) => panic!("griefer skipped a chunk"),
+        Result::Err(p) => assert(*p.at(0) == 'BAD_OPENING_CHUNK', 'chunks are ordered'),
+    }
+
+    // Stopping after the first chunk leaves the deck unopened, and the
+    // hand recoverable: anyone can submit the rest.
+    game.open_deck(TABLE_1, 0, chunk_cts(0, 9), proof());
+    assert(!game.get_deck_opened(TABLE_1), 'half-open is not open');
+    game.open_deck(TABLE_1, 1, chunk_cts(5, 9), proof());
+
     game.reveal_community_card(TABLE_1, 0, SHARE_X, SHARE_Y, 7, proof());
     assert(game.get_community_revealed(TABLE_1, 0), 'board still revealable');
 }

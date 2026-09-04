@@ -608,7 +608,32 @@ pub trait IPokerGame<TState> {
     // proof about any other deck simply fails to verify. Callable by anyone
     // -- the proof is self-authenticating, so who submits it cannot change
     // what it proves.
-    fn open_deck(ref self: TState, table_id: felt252, ciphertexts: Span<u256>, proof: Span<felt252>);
+    //
+    // Opened in CHUNKS of DECK_OPEN_K positions, `chunk` counting from 0,
+    // strictly in order. Round 8 finding I: circuits/deck_open fixes K = 5
+    // at compile time, so its verifier exposes exactly 1 + K + 4K = 26
+    // public inputs. Deriving the position set from max_seats (the fix
+    // above) made the contract's input vector 1 + k + 4k long for
+    // k = 2*max_seats + 5 -- 46 values on a two-seat table -- which the
+    // pinned verifier can never match, so open_deck failed on every real
+    // table while the mock verifier in tests waved it through. Raising K
+    // is not an option either: garaga 1.1.0 caps a verifier at 99 public
+    // inputs, so 1 + 5k <= 99 allows only k <= 19, i.e. seven seats.
+    // Chunking keeps one circuit for every table size.
+    //
+    // `ciphertexts` is 4*DECK_OPEN_K u256 for this chunk's positions. A
+    // final partial chunk is padded by repeating the last in-play
+    // position, which the circuit proves the same way -- the repeat
+    // rewrites an identical value. deck_opened only flips once the last
+    // chunk lands, so a partial open still cannot be expressed and the
+    // griefing hole stays closed.
+    fn open_deck(
+        ref self: TState,
+        table_id: felt252,
+        chunk: u32,
+        ciphertexts: Span<u256>,
+        proof: Span<felt252>,
+    );
 
     // Reveals community card `index` (0-4: flop, flop, flop, turn, river).
     // `share` is the AGGREGATE of every party's decryption share and the
@@ -783,6 +808,8 @@ pub mod PokerGame {
         pub const DECK_NOT_OPENED: felt252 = 'DECK_NOT_OPENED';
         pub const BAD_OPENING: felt252 = 'DECK_OPENING_REJECTED';
         pub const BAD_OPENING_LEN: felt252 = 'BAD_OPENING_LENGTH';
+        // Deck-opening chunks must arrive in order, starting at 0.
+        pub const BAD_CHUNK: felt252 = 'BAD_OPENING_CHUNK';
         pub const POSITION_NOT_OPENED: felt252 = 'POSITION_NOT_OPENED';
         pub const BAD_COMMUNITY_INDEX: felt252 = 'BAD_COMMUNITY_INDEX';
         pub const CARD_REVEALED: felt252 = 'CARD_ALREADY_REVEALED';
@@ -825,6 +852,11 @@ pub mod PokerGame {
     // 2*MAX_TABLE_SEATS + 5 <= 52.
     const MAX_TABLE_SEATS: u32 = 23;
 
+    // Positions proved per deck-opening call. MUST equal `global K` in
+    // circuits/deck_open/src/main.nr -- the deployed verifier is generated
+    // for that exact value and silently rejects any other input length.
+    const DECK_OPEN_K: u32 = 5;
+
     // V2: how long one player has to publish their shuffle before the
     // table can be voided (docs/V2-MENTAL-POKER.md §6). Much shorter than
     // SETTLE_TIMEOUT_SECS: a shuffle step is a single proof the client
@@ -861,6 +893,9 @@ pub mod PokerGame {
         dealt: Map<felt252, bool>,
         // (table_id, seat) -> hole_card_note_id, and the reverse seat-taken flag
         seat_note: Map<(felt252, felt252), felt252>,
+        // table_id -> the next deck-opening chunk expected. Chunks are
+        // consumed strictly in order; see open_deck's interface comment.
+        deck_open_chunk: Map<felt252, u32>,
         // (table_id, seat) -> the OPEN note this seat wants its winnings
         // paid into, when that differs from seat_note. Round 8 finding E:
         // every settlement path used to pay seat_note, the note supplied
@@ -2319,6 +2354,7 @@ pub mod PokerGame {
         fn open_deck(
             ref self: ContractState,
             table_id: felt252,
+            chunk: u32,
             ciphertexts: Span<u256>,
             proof: Span<felt252>,
         ) {
@@ -2341,8 +2377,15 @@ pub mod PokerGame {
             // followed by 5 community slots. Not caller-supplied -- see the
             // interface comment for the griefing hole that closed.
             let max_seats = self.table_max_seats.entry(table_id).read();
-            let k = 2 * max_seats + 5;
-            assert(ciphertexts.len() == k * 4, errors::BAD_OPENING_LEN);
+            let k_total = 2 * max_seats + 5;
+            let chunks = (k_total + DECK_OPEN_K - 1) / DECK_OPEN_K;
+
+            // Strictly in order, and `chunk` is checked rather than
+            // trusted, so the caller still chooses nothing about which
+            // positions get opened -- only whether to do the next honest
+            // piece of work.
+            assert(chunk == self.deck_open_chunk.entry(table_id).read(), errors::BAD_CHUNK);
+            assert(ciphertexts.len() == DECK_OPEN_K * 4, errors::BAD_OPENING_LEN);
 
             // The deck hash comes from STORAGE, never from the caller. That
             // is the whole binding: a proof about any other deck cannot
@@ -2352,8 +2395,18 @@ pub mod PokerGame {
             inputs.append(deck_hash.low.into());
             inputs.append(deck_hash.high.into());
             let mut i: u32 = 0;
-            while i != k {
-                let pos: u256 = i.into();
+            while i != DECK_OPEN_K {
+                // A final partial chunk repeats the last in-play position
+                // rather than running past it. The circuit proves the
+                // repeat exactly as it proves any other slot, and storing
+                // it twice rewrites an identical value.
+                let raw = DECK_OPEN_K * chunk + i;
+                let p = if raw < k_total {
+                    raw
+                } else {
+                    k_total - 1
+                };
+                let pos: u256 = p.into();
                 inputs.append(pos.low.into());
                 inputs.append(pos.high.into());
                 i += 1;
@@ -2372,8 +2425,13 @@ pub mod PokerGame {
             assert(verifier.verify_deck_opening(proof, inputs.span()), errors::BAD_OPENING);
 
             let mut n: u32 = 0;
-            while n != k {
-                let pos = n;
+            while n != DECK_OPEN_K {
+                let raw = DECK_OPEN_K * chunk + n;
+                let pos = if raw < k_total {
+                    raw
+                } else {
+                    k_total - 1
+                };
                 let b = n * 4;
                 self.opened_c1_x.entry((table_id, pos)).write(*ciphertexts.at(b));
                 self.opened_c1_y.entry((table_id, pos)).write(*ciphertexts.at(b + 1));
@@ -2382,9 +2440,14 @@ pub mod PokerGame {
                 self.position_opened.entry((table_id, pos)).write(true);
                 n += 1;
             }
-            self.deck_opened.entry(table_id).write(true);
+
+            let next = chunk + 1;
+            self.deck_open_chunk.entry(table_id).write(next);
+            if next == chunks {
+                self.deck_opened.entry(table_id).write(true);
+                self.emit(DeckOpened { table_id, positions: k_total, deck_hash });
+            }
             self.reentrancy_lock.write(false);
-            self.emit(DeckOpened { table_id, positions: k, deck_hash });
         }
 
         fn reveal_community_card(
