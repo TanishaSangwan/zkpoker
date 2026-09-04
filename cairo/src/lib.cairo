@@ -621,6 +621,26 @@ pub trait IPokerGame<TState> {
 
     // ── Accusations (docs/PROTOCOL.md §8) ────────────────────────────────
     //
+    // FIRST, THE THING NOT TO ADD HERE. Decryption is strictly `n`-of-`n`
+    // and there is deliberately no threshold path — no `t`-of-`n`, no
+    // Shamir-shared keys, no way for a subset of parties to open a card
+    // without the rest. PROTOCOL.md §8 used to recommend `t = n−1` for
+    // community cards only; §8.2 records why that was rejected on
+    // 2026-09-04, and the short version is worth having in front of anyone
+    // who reaches for it again:
+    //
+    //   The shuffle circuit re-randomises every card under ONE joint key,
+    //   and the permutation moves cards freely across all 52 slots. So a
+    //   threshold is a property of the key, never of a position — "loose
+    //   for the board, strict for hole cards" cannot be expressed. Make it
+    //   global instead and any `t` parties reconstruct the secret behind
+    //   the joint key and read EVERY hole card at the table, silently,
+    //   whenever they like. Heads-up that is `t = 1`: one opponent.
+    //
+    // The liveness cost of `n`-of-`n` is real — one dropout ends the hand
+    // — and what follows is the answer to it that does not sell the trust
+    // model: name the party, end the hand, and make it cost them.
+    //
     // Decryption is `n`-of-`n`: every party's share is needed to open any
     // card. A party who simply never sends theirs freezes the table, and
     // until this existed there was nothing on-chain saying who — free

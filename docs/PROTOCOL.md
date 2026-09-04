@@ -521,11 +521,70 @@ Options for community cards:
   table by walking away.
 - **Threshold `t`-of-`n`** via Shamir-shared keys. Survives dropouts; cost is that
   `t` colluding players could decrypt the board *early*, before betting.
-  `t = n−1` tolerates exactly one dropout while requiring near-total collusion.
 
-Recommended: `t = n−1` for community cards, strict `n`-of-`n` for hole cards.
-**Open decision** — it changes Phase 0, so it must be settled before the state
-machine is built.
+### 8.2 The threshold decision — SETTLED: strict `n`-of-`n`, no threshold
+
+**Decided 2026-09-04. `t`-of-`n` is rejected.** The recommendation this section
+used to carry — `t = n−1` for community cards, strict `n`-of-`n` for hole cards —
+**is not implementable**, and the global version of it is barred by the project's
+one standing rule.
+
+**It is not implementable, because there is only one key.** The shuffle circuit
+takes a single `pk` and re-randomises *every* card under it (`circuits/shuffle`:
+`c2' = c2 + r·pk`, one `pk` parameter). The permutation moves cards freely across
+all 52 slots, so every ciphertext in the deck — hole and community alike — is
+encrypted to the same joint key `Y`. A threshold is a property of a **key**, not
+of a position. "`t`-of-`n` for community cards and `n`-of-`n` for hole cards"
+cannot be expressed over one key, and this section previously assumed it could.
+
+Two keys do not rescue it:
+
+- **Re-randomise hole slots under `Y_hole` and community slots under `Y_comm`.**
+  Fails: the permutation moves a card between the two regions across rounds, so it
+  accumulates randomness under both keys and then needs *both* secrets — the
+  stricter threshold, not a mixed one.
+- **Constrain the permutation to be block-diagonal** so hole slots only ever
+  permute among hole slots. That fixes the algebra and destroys the game: `a_0` is
+  public and positional, so the hole pool would be a publicly known `2n`-card
+  subset of the deck.
+- **A separate re-keying pass after a full shuffle** would work in principle, at
+  the cost of a second 52-card proof per party — doubling the single most
+  expensive thing in the protocol (811.9M gas × `n`) to buy tolerance for one
+  dropout.
+
+**And the global version is barred.** If the threshold is a property of the one
+key, then `t < n` means any `t` parties can reconstruct the secret behind `Y` and
+read **every hole card at the table**. Not "could decrypt the board early" — every
+player's hand, silently, at any moment: the Shamir shares are in their hands from
+Phase 0 and nothing can gate *when* they choose to combine them. At the table
+sizes that matter this is absurd on its face — heads-up is `n = 2`, so `t = n−1`
+means *one* opponent reads your cards. That is trust between players, which this
+project does not trade for anything (§1).
+
+Considered and also rejected: **escrowing each key under a time-lock puzzle or
+VDF**, opened only after a proven dropout. It does not close the hole, it prices
+it — a party with more compute opens the escrow early — and it is a large amount
+of machinery to buy a weaker guarantee than the one being given up.
+
+**The settled answer is void-and-forfeit**, and §8.1 is what makes it hold up. The
+objection to void-and-refund was that "any player can grief a table by walking
+away" — which was true when walking away was free. It is not free now: an
+accusation names the party, and conviction redistributes their stake to everyone
+else at the table. A dropout still ends the hand; it just costs the dropper and
+pays the victims.
+
+One liveness win is already banked and worth stating, because it diverges from
+Phase 0 as written above: the implementation's key set is **seated players only,
+not players + dealer**. `begin_shuffle` sums `seat_pk` over occupied seats and the
+dealer holds no share. That costs nothing — the joint key is secure as long as one
+*player* is honest about their own key, and the shuffle is secure as long as one
+player shuffles honestly — and it removes an entire party from the set that can
+stall the table. §4 phase 0's `{P_1..P_n, D}` is the older design; the contract is
+the newer one.
+
+What remains genuinely open is **not** the threshold: it is that a dropout ends
+the hand at all. Nothing in this trust model can produce a share its owner never
+computed. Improving that means changing the trust model, and the answer is no.
 
 ### 8.1 The accusation path — built
 
@@ -641,6 +700,10 @@ but "should be" is not "measured," and the entire client-side story rests on it.
 - `scripts/dealer_bot.mjs` — off-chain dealer skeleton (drives the *old* flow).
 
 **Not built:**
+- ~~The threshold (`t`-of-`n`) decision~~ — **settled 2026-09-04: rejected, strict
+  `n`-of-`n` stays.** Not implementable as recommended (one joint key covers the
+  whole deck, so the threshold cannot be per-position) and barred as a global
+  change (any `t` parties would read every hole card). See §8.2.
 - The §7 circuit change (public-input decks) and re-measurement.
 - ~~Joint-key accumulation on-chain~~ — **done, 2026-09-04.**
   `VerifierAdapter::verify_joint_key` sums the registered shares on Grumpkin
@@ -694,9 +757,7 @@ but "should be" is not "measured," and the entire client-side story rests on it.
 - ~~The accusation path (§8)~~ — **done, 2026-09-04.** `accuse_share` /
   `answer_accusation` / `claim_share_timeout`, with conviction forfeiting the
   defaulter's stake pro rata to the other contributors, and
-  `claim_shuffle_timeout` forfeiting on the same terms. See §8.1. The threshold
-  (`t`-of-`n`) decision is still open — an accusation assigns blame and cost, it
-  does not produce the missing share.
+  `claim_shuffle_timeout` forfeiting on the same terms. See §8.1.
 - Any client UI for the above; browser proving.
 - ~~Bet-matching and turn-order enforcement~~ — **done.** `bet`/`fold`/`check`
   are turn-ordered; a street cannot end until every seat still in the hand has
