@@ -2204,6 +2204,16 @@ pub mod PokerGame {
             // discrete log makes that choice impossible to prove, because
             // the attacker does not know the secret of a key they
             // constructed by subtraction.
+            // Security: this makes an external call to the verifier. The
+            // verifier address is constructor-pinned so it is not
+            // caller-controlled the way bet()'s table_token is, but every
+            // other function that calls out here takes the lock (round 3
+            // finding 3, round 4 finding 2, round 8 finding H) and an
+            // inconsistent guard is the kind of gap a later change turns
+            // into a real one.
+            assert(!self.reentrancy_lock.read(), errors::REENTRANCY);
+            self.reentrancy_lock.write(true);
+
             let verifier = IShuffleVerifierDispatcher { contract_address: self.shuffle_verifier.read() };
             let key_inputs = array![pk_x.low.into(), pk_x.high.into(), pk_y.low.into(), pk_y.high.into()];
             assert(verifier.verify_key_ownership(key_proof, key_inputs.span()), errors::BAD_KEY_PROOF);
@@ -2211,6 +2221,7 @@ pub mod PokerGame {
             self.seat_pk_x.entry(key).write(pk_x);
             self.seat_pk_y.entry(key).write(pk_y);
             self.seat_key_registered.entry(key).write(true);
+            self.reentrancy_lock.write(false);
             self.emit(ShuffleKeyRegistered { table_id, seat, pk_x, pk_y });
         }
 
@@ -2294,6 +2305,18 @@ pub mod PokerGame {
             let seat = self.shuffle_order.entry((table_id, turn)).read();
             assert(get_caller_address() == self.seat_owner.entry((table_id, seat)).read(), errors::NOT_YOUR_TURN);
 
+            // Security: this makes an external call to the verifier. The
+            // verifier address is constructor-pinned so it is not
+            // caller-controlled the way bet()'s table_token is, but every
+            // other function that calls out here takes the lock (round 3
+            // finding 3, round 4 finding 2, round 8 finding H) and an
+            // inconsistent guard is the kind of gap a later change turns
+            // into a real one. This one guards the chain head itself:
+            // deck_commitment and shuffle_turn are written after the call
+            // returns.
+            assert(!self.reentrancy_lock.read(), errors::REENTRANCY);
+            self.reentrancy_lock.write(true);
+
             let current = self.deck_commitment.entry(table_id).read();
             // The proof is checked against the CURRENT chain head, read
             // from storage — never against a commitment the caller
@@ -2325,6 +2348,7 @@ pub mod PokerGame {
             } else {
                 self.shuffle_deadline.entry(table_id).write(get_block_timestamp() + SHUFFLE_TURN_SECS);
             }
+            self.reentrancy_lock.write(false);
         }
 
         fn claim_shuffle_timeout(ref self: ContractState, table_id: felt252) {

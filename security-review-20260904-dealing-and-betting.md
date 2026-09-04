@@ -1,5 +1,10 @@
 # Security review — dealing, showdown scoring, betting rounds, verifier adapter
 
+> **SUPERSEDED** by `security-review-20260904-round8-four-agent.md`, which
+> ran the proper `cairo-auditor` 4-agent vector scan once the skill bundle
+> was reinstalled. All three findings below were independently re-confirmed
+> as fixed there, and the scan found six more. Kept for the record.
+
 **Date:** 2026-09-04
 **Scope:** the 1,585 lines added on 2026-09-03/04 — `cairo/src/lib.cairo`'s
 dealing/settlement/betting additions, `cairo-verifier/src/{dleq,adapter,card_table}.cairo`.
