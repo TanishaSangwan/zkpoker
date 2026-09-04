@@ -2134,6 +2134,24 @@ pub mod PokerGame {
             // key, in ascending seat order. Fixing it here is what stops a
             // late joiner being inserted into a chain that is already
             // running.
+            //
+            // Round 8 finding D: every SEATED player must have registered,
+            // not merely whoever happened to have registered by now. This
+            // loop used to skip an unregistered seat silently, and the
+            // dealer chooses when to call this -- so calling it one block
+            // before a player registers excluded them from the joint key
+            // while leaving them seated, still dealt hole cards at deck
+            // positions 2*seat and 2*seat+1, and still a contender at
+            // showdown. Their cards would then be encrypted under a key
+            // made only of the other players' shares: the participants
+            // could collectively read the excluded player's hand, and the
+            // excluded player could not read their own. In the limit where
+            // only the dealer registers, the dealer alone knows the whole
+            // deck -- exactly the single trusted dealer this protocol
+            // exists to remove. Seats are frozen for the hand by
+            // join_table's own guards, so requiring the two sets to match
+            // here makes participants == seated players an invariant for
+            // the rest of the hand.
             let max_seats = self.table_max_seats.entry(table_id).read();
             let mut position: u32 = 0;
             let mut s: u32 = 0;
@@ -2142,7 +2160,8 @@ pub mod PokerGame {
                     break;
                 }
                 let seat: felt252 = s.into();
-                if self.seat_key_registered.entry((table_id, seat)).read() {
+                if self.seat_owner.entry((table_id, seat)).read().is_non_zero() {
+                    assert(self.seat_key_registered.entry((table_id, seat)).read(), errors::NO_KEY);
                     self.shuffle_order.entry((table_id, position)).write(seat);
                     position += 1;
                 }

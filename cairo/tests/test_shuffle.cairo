@@ -30,6 +30,8 @@ const PK_A_X: u256 = u256 { low: 'PKAX', high: 1 };
 const PK_A_Y: u256 = u256 { low: 'PKAY', high: 2 };
 const PK_B_X: u256 = u256 { low: 'PKBX', high: 3 };
 const PK_B_Y: u256 = u256 { low: 'PKBY', high: 4 };
+const PK_C_X: u256 = u256 { low: 'PKCX', high: 10 };
+const PK_C_Y: u256 = u256 { low: 'PKCY', high: 11 };
 const JOINT_X: u256 = u256 { low: 'JOINTX', high: 5 };
 const JOINT_Y: u256 = u256 { low: 'JOINTY', high: 6 };
 const DECK_0: u256 = u256 { low: 'DECK0', high: 7 };
@@ -214,10 +216,20 @@ fn test_begin_shuffle_twice_rejected() {
     game.begin_shuffle(TABLE_1, JOINT_X, JOINT_Y, DECK_2);
 }
 
-// A seat that joined but never registered a key is left out of the chain
-// entirely, rather than blocking it forever.
+// AUDIT FINDING D, fixed. This used to skip a keyless seat and start the
+// chain without it, which sounds like liveness but is a trust break: the
+// dealer chooses when to call begin_shuffle, so calling it one block
+// before a player registers excluded them from the joint key while
+// leaving them seated, still dealt hole cards at deck positions 2*seat
+// and 2*seat+1, and still a contender at showdown. Their cards would be
+// encrypted under a key made only of the other players' shares -- the
+// participants could read the excluded player's hand and the excluded
+// player could not read their own. With only the dealer registered, the
+// dealer alone knows the whole deck. Every seated player must now have
+// registered before the chain can start.
 #[test]
-fn test_begin_shuffle_skips_seats_without_keys() {
+#[feature("safe_dispatcher")]
+fn test_begin_shuffle_requires_every_seated_player_to_have_a_key() {
     let (game, _v) = deploy_pokergame_with_verifier(POOL());
     let (token_addr, _t, _a) = deploy_mock_token();
     start_cheat_caller_address(game.contract_address, DEALER());
@@ -239,10 +251,23 @@ fn test_begin_shuffle_skips_seats_without_keys() {
     game.register_shuffle_key(TABLE_1, SEAT_2, PK_B_X, PK_B_Y, key_proof());
     stop_cheat_caller_address(game.contract_address);
 
+    let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
+    start_cheat_caller_address(game.contract_address, DEALER());
+    let outcome = safe.begin_shuffle(TABLE_1, JOINT_X, JOINT_Y, DECK_0);
+    stop_cheat_caller_address(game.contract_address);
+    match outcome {
+        Result::Ok(_) => panic!("started a chain that excluded a seated player"),
+        Result::Err(p) => assert(*p.at(0) == 'SEAT_KEY_NOT_REGISTERED', 'wrong error'),
+    }
+    assert(game.get_shuffle_order_len(TABLE_1) == 0, 'no chain started');
+
+    // Once BOB registers too, the chain starts and covers all three.
+    start_cheat_caller_address(game.contract_address, BOB());
+    game.register_shuffle_key(TABLE_1, SEAT_1, PK_C_X, PK_C_Y, key_proof());
+    stop_cheat_caller_address(game.contract_address);
     begin(game);
-    assert(game.get_shuffle_order_len(TABLE_1) == 2, 'should skip keyless seat');
-    assert(game.get_shuffle_seat_at(TABLE_1, 0) == SEAT_0, 'pos 0 = seat 0');
-    assert(game.get_shuffle_seat_at(TABLE_1, 1) == SEAT_2, 'pos 1 = seat 2');
+    assert(game.get_shuffle_order_len(TABLE_1) == 3, 'every seat participates');
+    assert(game.get_shuffle_seat_at(TABLE_1, 1) == SEAT_1, 'pos 1 = seat 1');
 }
 
 // ─── the chain itself ───────────────────────────────────────────────────
