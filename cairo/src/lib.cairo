@@ -573,19 +573,26 @@ pub trait IPokerGame<TState> {
     );
 
     // Dealer opens the shuffle phase. `joint_pk_*` is the sum of the
-    // registered key shares and `initial_commitment` commits to the
-    // starting deck (52 ciphertexts of the 52 cards under the joint key,
-    // with fixed public randomness — deterministic, so every player
-    // recomputes and checks both off-chain before shuffling).
+    // registered key shares, and is CHECKED against that sum by the
+    // adapter rather than taken on trust — see `verify_joint_key`.
+    //
+    // There is no `initial_commitment` parameter. The starting deck a_0 is
+    // defined as encryption with r = 0, so ciphertext i is
+    // (identity, M_i) with M_i = (i+1)*G: it depends on nothing — not the
+    // joint key, not the players, not the table — and is byte-identical
+    // for every table ever created (docs/PROTOCOL.md §4 phase 0). It used
+    // to be a dealer-supplied parameter that nothing on-chain checked,
+    // which let a dealer name a commitment to a deck of their own
+    // choosing: shuffles only permute and re-randomise, so the multiset of
+    // cards in play is whatever the starting deck contained. A colluding
+    // dealer and first shuffler could stack it — duplicates, missing
+    // cards, or points outside the 52-card encoding, which strand the hand
+    // at reveal time. Now the contract pins `INITIAL_DECK_COMMITMENT` and
+    // there is nothing to supply or to disagree about.
+    //
     // Freezes the participant list: every seat with a registered key, in
     // ascending seat order, becomes the shuffle order.
-    fn begin_shuffle(
-        ref self: TState,
-        table_id: felt252,
-        joint_pk_x: u256,
-        joint_pk_y: u256,
-        initial_commitment: u256,
-    );
+    fn begin_shuffle(ref self: TState, table_id: felt252, joint_pk_x: u256, joint_pk_y: u256);
 
     // One player's shuffle step. Caller must be the seat whose turn it is.
     // `proof` is checked by the configured verifier against public inputs
@@ -866,6 +873,30 @@ pub mod PokerGame {
     // slots) always has room for all 5 community cards in a 52-card deck:
     // 2*MAX_TABLE_SEATS + 5 <= 52.
     const MAX_TABLE_SEATS: u32 = 23;
+
+    // Poseidon2(a_0), the commitment to the protocol's one and only
+    // starting deck. a_0 is encryption with r = 0, so ciphertext i is
+    // (identity, M_i) with M_i = (i+1)*G -- the point at infinity is
+    // encoded (0, 0), which is what Noir's embedded-curve addition treats
+    // as the identity. It depends on nothing and is identical for every
+    // table (docs/PROTOCOL.md section 4 phase 0), which is why it is
+    // pinned here instead of being supplied by the dealer.
+    //
+    // Cairo cannot compute this value: the hash is Poseidon2 over BN254
+    // and Cairo's Poseidon is over the STARK field (section 7). It is
+    // produced by circuits/deck_init, which builds a_0 in-circuit and
+    // returns the hash -- `cd circuits/deck_init && nargo execute`. Do not
+    // hand-edit; if the card encoding or the deck layout ever changes,
+    // regenerate it there.
+    //
+    // Verified end to end: the untouched circuits/shuffle solves its
+    // witness with deck_in = a_0 and hash_in set to this value, so the
+    // first link of the chain really does start here.
+    // = 0x1673af0c7a0064af6bb3a70b30eec058d85bec4857307bde801f9244ba8271ad
+    const INITIAL_DECK_COMMITMENT: u256 = u256 {
+        low: 287590538483746469931956317567322321325,
+        high: 29843680456175890265454332793043468376,
+    };
 
     // Positions proved per deck-opening call. MUST equal `global K` in
     // circuits/deck_open/src/main.nr -- the deployed verifier is generated
@@ -2245,7 +2276,6 @@ pub mod PokerGame {
             table_id: felt252,
             joint_pk_x: u256,
             joint_pk_y: u256,
-            initial_commitment: u256,
         ) {
             assert(self.table_exists.entry(table_id).read(), errors::NO_TABLE);
             assert(!self.table_settled.entry(table_id).read(), errors::ALREADY_SETTLED);
@@ -2328,10 +2358,16 @@ pub mod PokerGame {
             self.shuffle_turn.entry(table_id).write(0);
             self.joint_pk_x.entry(table_id).write(joint_pk_x);
             self.joint_pk_y.entry(table_id).write(joint_pk_y);
-            self.deck_commitment.entry(table_id).write(initial_commitment);
+            self.deck_commitment.entry(table_id).write(INITIAL_DECK_COMMITMENT);
             self.shuffle_started.entry(table_id).write(true);
             self.shuffle_deadline.entry(table_id).write(get_block_timestamp() + SHUFFLE_TURN_SECS);
-            self.emit(ShuffleBegun { table_id, participants: position, initial_commitment });
+            self
+                .emit(
+                    ShuffleBegun {
+                        table_id, participants: position,
+                        initial_commitment: INITIAL_DECK_COMMITMENT,
+                    },
+                );
         }
 
         fn submit_shuffle(

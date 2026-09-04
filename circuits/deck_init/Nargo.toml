@@ -1,0 +1,10 @@
+[package]
+name = "deck_init"
+type = "bin"
+authors = [""]
+
+[dependencies]
+# Must match circuits/shuffle/Nargo.toml exactly -- this circuit derives the
+# commitment the FIRST shuffle step will consume as its `hash_in`. A version
+# skew here means the chain's first link silently fails to verify.
+poseidon = { tag = "v0.3.0", git = "https://github.com/noir-lang/poseidon" }

@@ -120,7 +120,7 @@ fn setup_shuffled() -> (
     stop_cheat_caller_address(game.contract_address);
 
     start_cheat_caller_address(game.contract_address, DEALER());
-    game.begin_shuffle(TABLE_1, JOINT_X, JOINT_Y, DECK_0);
+    game.begin_shuffle(TABLE_1, JOINT_X, JOINT_Y);
     stop_cheat_caller_address(game.contract_address);
 
     start_cheat_caller_address(game.contract_address, ALICE());
@@ -563,7 +563,7 @@ fn setup_preflop_done() -> zkpoker::IPokerGameDispatcher {
     stop_cheat_caller_address(game.contract_address);
 
     start_cheat_caller_address(game.contract_address, DEALER());
-    game.begin_shuffle(TABLE_1, JOINT_X, JOINT_Y, DECK_0);
+    game.begin_shuffle(TABLE_1, JOINT_X, JOINT_Y);
     stop_cheat_caller_address(game.contract_address);
     start_cheat_caller_address(game.contract_address, ALICE());
     game.submit_shuffle(TABLE_1, DECK_1, proof());

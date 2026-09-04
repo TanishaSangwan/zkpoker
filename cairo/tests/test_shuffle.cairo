@@ -34,6 +34,14 @@ const PK_C_X: u256 = u256 { low: 'PKCX', high: 10 };
 const PK_C_Y: u256 = u256 { low: 'PKCY', high: 11 };
 const JOINT_X: u256 = u256 { low: 'JOINTX', high: 5 };
 const JOINT_Y: u256 = u256 { low: 'JOINTY', high: 6 };
+// a_0's real commitment, pinned in the contract. Not a fixture: it is
+// Poseidon2 of the one starting deck the protocol defines, produced by
+// circuits/deck_init. begin_shuffle no longer takes it as a parameter.
+// = 0x1673af0c7a0064af6bb3a70b30eec058d85bec4857307bde801f9244ba8271ad
+const A0: u256 = u256 {
+    low: 287590538483746469931956317567322321325,
+    high: 29843680456175890265454332793043468376,
+};
 const DECK_0: u256 = u256 { low: 'DECK0', high: 7 };
 const DECK_1: u256 = u256 { low: 'DECK1', high: 8 };
 const DECK_2: u256 = u256 { low: 'DECK2', high: 9 };
@@ -73,7 +81,7 @@ fn setup_shuffle_ready() -> (
 
 fn begin(game: zkpoker::IPokerGameDispatcher) {
     start_cheat_caller_address(game.contract_address, DEALER());
-    game.begin_shuffle(TABLE_1, JOINT_X, JOINT_Y, DECK_0);
+    game.begin_shuffle(TABLE_1, JOINT_X, JOINT_Y);
     stop_cheat_caller_address(game.contract_address);
 }
 
@@ -170,7 +178,7 @@ fn test_begin_shuffle_freezes_participants_in_seat_order() {
     assert(game.get_shuffle_order_len(TABLE_1) == 2, 'wrong participant count');
     assert(game.get_shuffle_seat_at(TABLE_1, 0) == SEAT_0, 'pos 0 should be seat 0');
     assert(game.get_shuffle_seat_at(TABLE_1, 1) == SEAT_1, 'pos 1 should be seat 1');
-    assert(game.get_shuffle_commitment(TABLE_1) == DECK_0, 'initial commitment wrong');
+    assert(game.get_shuffle_commitment(TABLE_1) == A0, 'must pin the real a_0');
     assert(game.get_shuffle_turn(TABLE_1) == 0, 'turn should start at 0');
     assert(!game.get_shuffle_complete(TABLE_1), 'should not be complete');
 
@@ -181,7 +189,7 @@ fn test_begin_shuffle_freezes_participants_in_seat_order() {
                     game.contract_address,
                     PokerGame::Event::ShuffleBegun(
                         PokerGame::ShuffleBegun {
-                            table_id: TABLE_1, participants: 2, initial_commitment: DECK_0,
+                            table_id: TABLE_1, participants: 2, initial_commitment: A0,
                         },
                     ),
                 ),
@@ -194,7 +202,7 @@ fn test_begin_shuffle_freezes_participants_in_seat_order() {
 fn test_begin_shuffle_unauthorized_rejected() {
     let (game, _v) = setup_shuffle_ready();
     start_cheat_caller_address(game.contract_address, ALICE());
-    game.begin_shuffle(TABLE_1, JOINT_X, JOINT_Y, DECK_0);
+    game.begin_shuffle(TABLE_1, JOINT_X, JOINT_Y);
 }
 
 #[test]
@@ -204,7 +212,7 @@ fn test_begin_shuffle_with_no_keys_rejected() {
     let (token_addr, _t, _a) = deploy_mock_token();
     start_cheat_caller_address(game.contract_address, DEALER());
     game.create_table(TABLE_1, token_addr, 0, TWO_SEATS);
-    game.begin_shuffle(TABLE_1, JOINT_X, JOINT_Y, DECK_0);
+    game.begin_shuffle(TABLE_1, JOINT_X, JOINT_Y);
 }
 
 #[test]
@@ -213,7 +221,7 @@ fn test_begin_shuffle_twice_rejected() {
     let (game, _v) = setup_shuffle_ready();
     begin(game);
     start_cheat_caller_address(game.contract_address, DEALER());
-    game.begin_shuffle(TABLE_1, JOINT_X, JOINT_Y, DECK_2);
+    game.begin_shuffle(TABLE_1, JOINT_X, JOINT_Y);
 }
 
 // AUDIT FINDING D, fixed. This used to skip a keyless seat and start the
@@ -253,7 +261,7 @@ fn test_begin_shuffle_requires_every_seated_player_to_have_a_key() {
 
     let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
     start_cheat_caller_address(game.contract_address, DEALER());
-    let outcome = safe.begin_shuffle(TABLE_1, JOINT_X, JOINT_Y, DECK_0);
+    let outcome = safe.begin_shuffle(TABLE_1, JOINT_X, JOINT_Y);
     stop_cheat_caller_address(game.contract_address);
     match outcome {
         Result::Ok(_) => panic!("started a chain that excluded a seated player"),
@@ -362,7 +370,7 @@ fn test_rejected_proof_leaves_chain_head_and_turn_unchanged() {
     stop_cheat_caller_address(game.contract_address);
     assert(outcome.is_err(), 'submit should have failed');
 
-    assert(game.get_shuffle_commitment(TABLE_1) == DECK_0, 'head must be untouched');
+    assert(game.get_shuffle_commitment(TABLE_1) == A0, 'head must be untouched');
     assert(game.get_shuffle_turn(TABLE_1) == 0, 'turn must be untouched');
 
     // ..and the same player can still take their turn once they produce a
@@ -543,7 +551,7 @@ fn test_rejected_key_proof_leaves_seat_unregistered() {
     // The seat is not a participant: begin_shuffle finds nobody.
     verifier.set_reject_key(false);
     start_cheat_caller_address(game.contract_address, DEALER());
-    let begun = safe.begin_shuffle(TABLE_1, JOINT_X, JOINT_Y, DECK_0);
+    let begun = safe.begin_shuffle(TABLE_1, JOINT_X, JOINT_Y);
     stop_cheat_caller_address(game.contract_address);
     assert(begun.is_err(), 'no participants expected');
 
@@ -562,8 +570,8 @@ fn test_rejected_key_proof_leaves_seat_unregistered() {
 fn test_large_key_and_commitment_values_round_trip() {
     let (game, _v) = setup_shuffle_ready();
     begin(game);
-    assert(game.get_shuffle_commitment(TABLE_1) == DECK_0, 'commitment must round-trip');
-    assert(DECK_0.high != 0, 'fixture should exceed felt252');
+    assert(game.get_shuffle_commitment(TABLE_1) == A0, 'commitment must round-trip');
+    assert(A0.high != 0, 'a_0 exceeds felt252');
 
     start_cheat_caller_address(game.contract_address, ALICE());
     game.submit_shuffle(TABLE_1, DECK_1, proof());
@@ -595,7 +603,7 @@ fn test_begin_shuffle_rejects_a_joint_key_that_is_not_the_sum() {
 
     let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
     start_cheat_caller_address(game.contract_address, DEALER());
-    let outcome = safe.begin_shuffle(TABLE_1, JOINT_X, JOINT_Y, DECK_0);
+    let outcome = safe.begin_shuffle(TABLE_1, JOINT_X, JOINT_Y);
     stop_cheat_caller_address(game.contract_address);
     match outcome {
         Result::Ok(_) => panic!("dealer imposed a joint key of their choosing"),

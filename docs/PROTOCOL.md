@@ -618,9 +618,30 @@ but "should be" is not "measured," and the entire client-side story rests on it.
   `cairo-verifier/tests/test_joint_key.cairo`; fixtures from
   `scripts/joint_key_check.py`, which independently checks that the
   point-by-point sum equals `(Σ secrets)·G`.
-- `initial_commitment` is still dealer-supplied the same way. Unlike the joint
-  key it is not a secrecy break — the starting deck is deterministic and public,
-  so every player can recompute it — but nothing on-chain forces that.
+- ~~`initial_commitment` is still dealer-supplied~~ — **done, 2026-09-04.**
+  The parameter is gone: `a_0` depends on nothing — not the joint key, not the
+  players, not the table — so `PokerGame` pins `INITIAL_DECK_COMMITMENT`
+  instead and there is nothing left to supply or disagree about.
+
+  Not a secrecy break, but not harmless either. Shuffles only permute and
+  re-randomise, so the multiset of cards in play is whatever the starting deck
+  contained. A dealer colluding with the first shuffler could name a commitment
+  to a deck of their own choosing: duplicates, missing cards, or points outside
+  the 52-card encoding, which strand the hand at reveal time.
+
+  The value is `Poseidon2(a_0)` =
+  `0x1673af0c7a0064af6bb3a70b30eec058d85bec4857307bde801f9244ba8271ad`. Cairo
+  cannot compute it (§7 — Poseidon2 is over BN254, Cairo's Poseidon is over the
+  STARK field), so it is produced by the new `circuits/deck_init`, which builds
+  `a_0` in-circuit and returns the hash. `scripts/check_initial_commitment.py`
+  re-runs that circuit and compares it against both the contract constant and
+  the test fixture, so the two copies cannot silently drift.
+
+  Verified end to end rather than by construction: the **untouched**
+  `circuits/shuffle` solves its witness with `deck_in = a_0` and `hash_in` set
+  to this value, confirming both the constant and the identity encoding
+  (`(0, 0)`, which is what Noir's embedded-curve addition treats as the
+  identity) are what the first link of the chain actually consumes.
 - **Showdown scoring** — `settle_from_reveals` scores from cards the contract
   itself proved and pays out. Takes **no caller input beyond the table**: every
   card comes from storage a reveal proof bound, every payout note from

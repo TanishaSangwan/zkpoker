@@ -228,9 +228,12 @@ reentrancy locks on the three reveal paths.
   is what made the check meaningful: the summed set is exactly the seated
   set, so a dealer can neither impose a key nor quietly leave a player out
   of it.
-- **`initial_commitment` is dealer-supplied** the same way. Not a secrecy
-  break — the starting deck is deterministic and public, so every player can
-  recompute it — but nothing on-chain forces that.
+- ~~**`initial_commitment` is dealer-supplied**~~ **CLOSED 2026-09-04, after
+  this review.** The parameter is gone; the contract pins
+  `INITIAL_DECK_COMMITMENT`. Shuffles only permute and re-randomise, so the
+  multiset of cards in play is whatever the starting deck held — a dealer
+  colluding with the first shuffler could have stacked it. See PROTOCOL.md
+  §10.
 - **No accusation path.** A party who withholds a decryption share deadlocks
   the hand with no on-chain evidence of who did it.
 - **`n`-of-`n` liveness.** One player disconnecting freezes community
