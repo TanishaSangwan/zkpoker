@@ -1,0 +1,4 @@
+node_modules/
+# All of public/ is derived -- ~12 MB of bundle and wasm. `node build.mjs`
+# regenerates it from sources that are checked in.
+public/

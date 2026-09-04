@@ -674,13 +674,53 @@ cannot be opened after a dropout. That remains open.
 ## 9. Sequencing and UX
 
 The shuffle chain is sequential: 6 rounds of (prove → submit → confirm), roughly
-**34 s of pure proving** plus block confirmations — 1–3 minutes before the first
+**29 s of pure proving** plus block confirmations — 1–3 minutes before the first
 card is dealt.
 
 One mitigation, not built:
 
 - **Shuffle the next hand's deck during the current hand's betting.** Pipelines
   the cost away entirely, changes no security property, and is the right fix.
+
+### 9.0 Browser proving — measured, 2026-09-04
+
+Everything above assumed a player can build their own shuffle proof in a
+browser. They have to: handing the witness to anyone else hands them the
+permutation, and the permutation is the secret the protocol protects. That
+assumption had never been tested — the numbers were server-side WASM, on a
+different machine with a different memory limit and a different engine.
+
+Harness: `scripts/browser-proving/`. Headless Chromium 149, 6 threads,
+cross-origin isolated, 4 GB JS heap.
+
+| | ms |
+|---|---|
+| Witness generation | 375 |
+| Proving, 6 threads (3 runs) | 4466 · 4797 · 5279 |
+| **Client-side total per shuffle** | **~5.2 s** |
+| Proving, 1 thread | 9870 |
+
+**The measurement that matters is not the timing.** The verification key the
+browser derives is **byte-identical** (1,888 bytes) to the one Garaga generated
+the *deployed* verifier from, so the browser is proving against the contract
+actually on chain — not merely producing something bb.js will verify for
+itself. The four public inputs come back exactly as `Prover.toml` set them and
+the proof is the same 9,408 bytes as the devnet-verified `proof.bin`.
+`run.mjs` exits non-zero if that VK ever stops matching.
+
+**Cross-origin isolation is worth 2.1×.** Multithreaded proving needs
+`SharedArrayBuffer`, which browsers grant only to a cross-origin-isolated page.
+Without `COOP`/`COEP` headers bb.js silently falls back to one thread and
+proving goes 4.8 s → 9.9 s. Most static hosts do not set those headers; a
+deployment that forgets them does not break, it just doubles every player's
+wait. **This is a deployment requirement, not a nicety.**
+
+Note the toolchain is deliberately *not* the project pin: `nargo 1.0.0-beta.16`
++ `@aztec/bb.js@3.0.0-nightly.20251104`, the pairing Garaga 1.1.0 requires and
+therefore the one the deployed verifier came from. Proving the beta.22 build
+would produce a proof the on-chain verifier rejects (§ the `public_inputs_offset`
+incompatibility in `circuits/shuffle_verifier/README.md`), so measuring it would
+have measured nothing.
 
 ### 9.1 Why the chain is NOT capped at `k < n` — rejected
 
@@ -792,7 +832,11 @@ but "should be" is not "measured," and the entire client-side story rests on it.
   `answer_accusation` / `claim_share_timeout`, with conviction forfeiting the
   defaulter's stake pro rata to the other contributors, and
   `claim_shuffle_timeout` forfeiting on the same terms. See §8.1.
-- Any client UI for the above; browser proving.
+- ~~Browser proving~~ — **done, 2026-09-04.** Measured end to end in headless
+  Chromium: ~5.2 s client-side per shuffle (375 ms witness + ~4.8 s proof) on 6
+  threads, 9.9 s single-threaded. The browser's VK is byte-identical to the
+  deployed verifier's. See §9.0 and `scripts/browser-proving/`.
+- Any client UI for the above.
 - ~~Bet-matching and turn-order enforcement~~ — **done.** `bet`/`fold`/`check`
   are turn-ordered; a street cannot end until every seat still in the hand has
   acted since the last raise and matched the high; a raise reopens the action.
