@@ -429,3 +429,119 @@ fn test_cannot_join_once_the_pot_is_live() {
     }
     assert(game.get_seat_owner(TABLE_1, SEAT_1) == starknet::contract_address_const::<0>(), 'seat must stay empty');
 }
+
+// ─── AUDIT: reclaiming must forfeit the hand ────────────────────────────
+
+// AUDIT FINDING C (P0). reclaim_stalled_bet withdraws a seat's stake from
+// the pot but never removes the seat from the hand -- it does not set
+// seat_folded, so is_active() still counts it and every settlement path
+// still treats it as a contender. The timeout is measured from
+// table_created_at, not from the last action, so any table older than 24h
+// qualifies while play is still going on.
+//
+// That makes reclaiming a free option: take your money back, keep your
+// claim on the pot. Lose the hand and you lost nothing; win it and you
+// collect the rest of the pot on top of the refund you already took.
+//
+// This PoC plays it out end to end: ALICE reclaims her 1,000, then is
+// settled as the winner of the reduced pot, and walks away with her full
+// stake plus BOB's.
+#[test]
+#[feature("safe_dispatcher")]
+fn test_reclaim_forfeits_the_hand() {
+    let (game, token, admin, _token_addr) = setup_table_with_two_seats(FUND);
+    start_cheat_block_timestamp(game.contract_address, T0);
+    let _ = admin;
+    act_bet(game, ALICE(), SEAT_0, BET);
+    act_bet(game, BOB(), SEAT_1, BET);
+    stop_cheat_block_timestamp(game.contract_address);
+
+    let alice_before = token.balance_of(ALICE());
+
+    start_cheat_block_timestamp(game.contract_address, T0 + TIMEOUT_SECS + 1);
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.reclaim_stalled_bet(TABLE_1, SEAT_0);
+    stop_cheat_caller_address(game.contract_address);
+    stop_cheat_block_timestamp(game.contract_address);
+
+    assert(token.balance_of(ALICE()) == alice_before + BET.into(), 'refund landed');
+
+    // She is out of the hand: the action has moved on, she cannot act...
+    assert(game.get_action_turn(TABLE_1) == SEAT_1, 'action moved to bob');
+    let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
+    start_cheat_caller_address(game.contract_address, ALICE());
+    let acted = safe.check(TABLE_1, SEAT_0);
+    stop_cheat_caller_address(game.contract_address);
+    match acted {
+        Result::Ok(_) => panic!("a reclaimed seat still acted"),
+        Result::Err(p) => assert(*p.at(0) == 'SEAT_FOLDED', 'wrong error'),
+    }
+
+    // ...and she cannot be paid from what is left of the pot.
+    start_cheat_caller_address(game.contract_address, DEALER());
+    let paid = safe.settle_table(TABLE_1, array![SEAT_0].span(), array![NOTE_A].span());
+    stop_cheat_caller_address(game.contract_address);
+    match paid {
+        Result::Ok(_) => panic!("a reclaimed seat was awarded the pot"),
+        Result::Err(p) => assert(*p.at(0) == 'SEAT_FOLDED', 'wrong error'),
+    }
+    assert(game.get_pending_payout(NOTE_A) == 0, 'no payout to a folded seat');
+}
+
+// AUDIT FINDING G. action_turn is never initialised -- it defaults to
+// storage zero. assert_on_turn compares against it literally, and the only
+// things that ever move it (mark_acted, fold, reset_turn) are themselves
+// reachable only from an on-turn action or from advance_street, which
+// requires round_complete. So on a table whose seat 0 is never occupied,
+// every seat is permanently off-turn and nobody can bet, check or fold.
+// The table is unplayable from creation.
+#[test]
+#[feature("safe_dispatcher")]
+fn test_table_without_seat_zero_is_playable() {
+    let game = deploy_pokergame(DEALER());
+    let (token_addr, token, admin) = deploy_mock_token();
+    start_cheat_caller_address(game.contract_address, DEALER());
+    game.create_table(TABLE_1, token_addr, 0, TWO_SEATS);
+    stop_cheat_caller_address(game.contract_address);
+
+    start_cheat_caller_address(game.contract_address, BOB());
+    game.join_table(TABLE_1, SEAT_1, NOTE_B); // SEAT_0 stays empty
+    stop_cheat_caller_address(game.contract_address);
+    fund_and_approve(token, admin, BOB(), game.contract_address, FUND);
+
+    assert(game.get_action_turn(TABLE_1) == SEAT_1, 'turn must find the only seat');
+
+    let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
+    start_cheat_caller_address(game.contract_address, BOB());
+    let outcome = safe.bet(TABLE_1, SEAT_1, BET);
+    stop_cheat_caller_address(game.contract_address);
+    match outcome {
+        Result::Ok(_) => {},
+        Result::Err(p) => panic!("only player could not act: {}", *p.at(0)),
+    }
+}
+
+// AUDIT FINDING F. bet() holds the reentrancy lock across the token
+// transfer, but advance_street, fold and check -- which mutate the same
+// street, turn and epoch state bet() is midway through writing -- never
+// looked at that lock. A token that is also the table's dealer (the setup
+// test_bet_reentrancy_blocked already establishes as arrangeable) could
+// advance the street from inside bet()'s transfer_from, so bet() finishes
+// by crediting street_contributed to the street that just ended.
+#[test]
+#[should_panic(expected: 'REENTRANCY')]
+fn test_advance_street_during_bet_blocked() {
+    let game = deploy_pokergame(DEALER());
+    let (token_addr, token, admin) = deploy_mock_token();
+
+    start_cheat_caller_address(game.contract_address, token_addr);
+    game.create_table(TABLE_1, token_addr, 0, TWO_SEATS);
+    game.join_table(TABLE_1, SEAT_0, NOTE_A);
+    stop_cheat_caller_address(game.contract_address);
+
+    fund_and_approve(token, admin, token_addr, game.contract_address, FUND);
+    admin.set_reenter_advance_street(game.contract_address, TABLE_1);
+
+    start_cheat_caller_address(game.contract_address, token_addr);
+    game.bet(TABLE_1, SEAT_0, BET);
+}

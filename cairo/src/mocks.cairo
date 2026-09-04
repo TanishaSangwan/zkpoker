@@ -27,6 +27,11 @@ pub trait IMockErc20Admin<TState> {
     fn set_reenter_settle(
         ref self: TState, pokergame: ContractAddress, table_id: felt252, seat: felt252, note_id: felt252,
     );
+    // Arms a one-shot reentrant call into PokerGame.advance_street(...)
+    // from inside transfer_from. advance_street is dealer-gated, so this
+    // only fires when the token contract is itself the table's dealer --
+    // exactly the setup set_reenter_bet already uses. Round 8 finding F.
+    fn set_reenter_advance_street(ref self: TState, pokergame: ContractAddress, table_id: felt252);
 }
 
 #[starknet::contract]
@@ -44,7 +49,9 @@ mod MockErc20 {
         fail_approve: bool,
         fee_bps: u256,
         reenter_pokergame: ContractAddress,
-        reenter_mode: felt252, // 0 = none, 1 = reenter bet(), 2 = reenter settle_table()
+        // 0 = none, 1 = reenter bet(), 2 = reenter settle_table(),
+        // 3 = reenter advance_street()
+        reenter_mode: felt252,
         reenter_table_id: felt252,
         reenter_seat: felt252,
         reenter_amount: u128,
@@ -105,6 +112,9 @@ mod MockErc20 {
                         array![self.reenter_seat.read()].span(),
                         array![self.reenter_note_id.read()].span(),
                     );
+            } else if mode == 3 {
+                let pg = IPokerGameDispatcher { contract_address: self.reenter_pokergame.read() };
+                pg.advance_street(self.reenter_table_id.read());
             }
 
             true
@@ -166,6 +176,14 @@ mod MockErc20 {
             self.reenter_table_id.write(table_id);
             self.reenter_seat.write(seat);
             self.reenter_note_id.write(note_id);
+        }
+
+        fn set_reenter_advance_street(
+            ref self: ContractState, pokergame: ContractAddress, table_id: felt252,
+        ) {
+            self.reenter_pokergame.write(pokergame);
+            self.reenter_mode.write(3);
+            self.reenter_table_id.write(table_id);
         }
     }
 }

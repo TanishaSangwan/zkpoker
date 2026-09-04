@@ -1457,6 +1457,20 @@ pub mod PokerGame {
             // Round 9: factored into register_note_id_owner, shared with
             // register_payout_note below.
             self.register_note_id_owner(hole_card_note_id, caller);
+            // Round 8 finding G: action_turn was never initialised, so it
+            // sat at storage-default seat 0. assert_on_turn compares
+            // against it literally, and everything that moves it
+            // (mark_acted, fold, reset_turn) is reachable only from an
+            // on-turn action or from advance_street, which needs
+            // round_complete. A table whose seat 0 was never occupied was
+            // therefore permanently unplayable: every seat off-turn, nobody
+            // able to bet, check or fold, from creation. Point the turn at
+            // the lowest occupied seat as players sit down. Safe to redo on
+            // every join because joining is now blocked once the pot is
+            // live or the shuffle has started, so no betting state exists
+            // yet to disturb -- and it is the same rule reset_turn applies
+            // at the start of every street.
+            self.reset_turn(table_id);
             self.emit(SeatJoined { table_id, seat, hole_card_note_id });
         }
 
@@ -1633,12 +1647,50 @@ pub mod PokerGame {
             let sent = erc20.transfer(caller, owed.into());
             assert(sent, errors::TRANSFER_FAILED);
 
+            // Withdrawing your stake forfeits the hand. Round 8 finding C
+            // (P0): reclaim used to take the money out of the pot while
+            // leaving the seat active, so is_active() still counted it and
+            // every settlement path still treated it as a contender. Since
+            // the timeout runs from table_created_at rather than from the
+            // last action, any table older than SETTLE_TIMEOUT_SECS
+            // qualifies while play is still going on -- which made
+            // reclaiming a free option: lose the hand and you lost nothing,
+            // win it and you collect the rest of the pot on top of the
+            // refund you already took. There is deliberately no
+            // active_count > 1 guard here the way fold() has one: this is
+            // the escape hatch from a stalled table and must always work.
+            // A table where everyone reclaims ends with an empty pot, so
+            // nothing is stranded.
+            if !self.seat_folded.entry(key).read() {
+                self.seat_folded.entry(key).write(true);
+                // reset_turn rather than advance_turn: this seat may not
+                // have been the one on turn, and reset_turn picks the
+                // lowest seat still in the hand from scratch, which is
+                // well defined either way. If nobody is left it leaves the
+                // turn alone rather than pointing it at a dead seat.
+                let turn = self.action_turn.entry(table_id).read();
+                let turn_seat: felt252 = turn.into();
+                if turn_seat == seat {
+                    self.reset_turn(table_id);
+                }
+                self.emit(Fold { table_id, seat });
+            }
+
             self.emit(Reclaimed { table_id, seat, amount: owed });
             self.reentrancy_lock.write(false);
         }
 
         fn fold(ref self: ContractState, table_id: felt252, seat: felt252) {
             assert(self.table_exists.entry(table_id).read(), errors::NO_TABLE);
+            // Round 8 finding F: bet() holds reentrancy_lock across its
+            // token transfer while it is midway through writing street,
+            // turn and epoch state. Every other function that mutates that
+            // same state has to refuse to run inside that window, or a
+            // token that is also a seat owner or the dealer can reorder the
+            // round from inside transfer_from. Checked, not taken -- this
+            // path makes no external call of its own.
+            assert(!self.reentrancy_lock.read(), errors::REENTRANCY);
+
             // Security review follow-up: same seat-ownership check as bet —
             // previously any caller could force-fold any seat at any table.
             assert(get_caller_address() == self.seat_owner.entry((table_id, seat)).read(), errors::NOT_SEAT_OWNER);
@@ -1660,6 +1712,15 @@ pub mod PokerGame {
 
         fn advance_street(ref self: ContractState, table_id: felt252) {
             assert(self.table_exists.entry(table_id).read(), errors::NO_TABLE);
+            // Round 8 finding F: bet() holds reentrancy_lock across its
+            // token transfer while it is midway through writing street,
+            // turn and epoch state. Every other function that mutates that
+            // same state has to refuse to run inside that window, or a
+            // token that is also a seat owner or the dealer can reorder the
+            // round from inside transfer_from. Checked, not taken -- this
+            // path makes no external call of its own.
+            assert(!self.reentrancy_lock.read(), errors::REENTRANCY);
+
             assert(!self.table_settled.entry(table_id).read(), errors::ALREADY_SETTLED);
             assert(get_caller_address() == self.table_dealer.entry(table_id).read(), errors::NOT_DEALER);
             let street_entry = self.table_street.entry(table_id);
@@ -1726,6 +1787,13 @@ pub mod PokerGame {
                 // name a legitimate winning seat but redirect its payout to
                 // an unrelated note it controls.
                 let seat = *winners.at(i);
+                // Round 8 finding C, second half: a seat that folded --
+                // including one that folded implicitly by taking its stake
+                // back through reclaim_stalled_bet -- is out of the hand
+                // and cannot be a winner. Without this, the dealer path
+                // could still pay a seat that had already withdrawn its
+                // contribution from the pot.
+                assert(!self.seat_folded.entry((table_id, seat)).read(), errors::FOLDED);
                 assert(self.seat_note.entry((table_id, seat)).read() == note_id, errors::NO_TABLE);
                 // Security review (2026-08-30 re-audit, Finding 1): the
                 // check above only confirms note_id belongs to *some* seat
@@ -2389,6 +2457,15 @@ pub mod PokerGame {
 
         fn check(ref self: ContractState, table_id: felt252, seat: felt252) {
             assert(self.table_exists.entry(table_id).read(), errors::NO_TABLE);
+            // Round 8 finding F: bet() holds reentrancy_lock across its
+            // token transfer while it is midway through writing street,
+            // turn and epoch state. Every other function that mutates that
+            // same state has to refuse to run inside that window, or a
+            // token that is also a seat owner or the dealer can reorder the
+            // round from inside transfer_from. Checked, not taken -- this
+            // path makes no external call of its own.
+            assert(!self.reentrancy_lock.read(), errors::REENTRANCY);
+
             assert(!self.table_settled.entry(table_id).read(), errors::ALREADY_SETTLED);
             assert(!self.table_voided.entry(table_id).read(), errors::TABLE_VOIDED);
             let street = self.table_street.entry(table_id).read();
