@@ -570,3 +570,41 @@ fn test_large_key_and_commitment_values_round_trip() {
     stop_cheat_caller_address(game.contract_address);
     assert(game.get_shuffle_commitment(TABLE_1) == DECK_1, 'head must round-trip');
 }
+
+// ─── the joint key is checked, not trusted ──────────────────────────────
+
+// joint_pk_x/y used to be a dealer-supplied parameter that nothing
+// on-chain ever verified -- players were told to check off-chain that it
+// equalled the sum of the registered shares. A dealer who published a key
+// of their own choosing could read every hole card at the table while
+// every proof in the chain still verified: the shuffle circuit takes the
+// joint key as a public input and honestly proves re-randomisation under
+// whatever key it is handed, and each seat's Schnorr proof only says that
+// seat knows its own secret. Nothing tied the two together.
+//
+// begin_shuffle now hands the registered shares to the adapter, which
+// sums them on Grumpkin. The mock cannot do curve arithmetic on these
+// opaque fixtures, so what this covers is the CONTRACT's handling of the
+// answer; the arithmetic itself is checked against real curve points in
+// scripts/joint_key_check.py.
+#[test]
+#[feature("safe_dispatcher")]
+fn test_begin_shuffle_rejects_a_joint_key_that_is_not_the_sum() {
+    let (game, verifier) = setup_shuffle_ready();
+    verifier.set_reject_joint_key(true);
+
+    let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
+    start_cheat_caller_address(game.contract_address, DEALER());
+    let outcome = safe.begin_shuffle(TABLE_1, JOINT_X, JOINT_Y, DECK_0);
+    stop_cheat_caller_address(game.contract_address);
+    match outcome {
+        Result::Ok(_) => panic!("dealer imposed a joint key of their choosing"),
+        Result::Err(p) => assert(*p.at(0) == 'BAD_JOINT_KEY', 'wrong error'),
+    }
+    // Nothing was frozen, so the table is still recoverable.
+    assert(game.get_shuffle_order_len(TABLE_1) == 0, 'no chain started');
+
+    verifier.set_reject_joint_key(false);
+    begin(game);
+    assert(game.get_shuffle_order_len(TABLE_1) == 2, 'chain starts on a good key');
+}

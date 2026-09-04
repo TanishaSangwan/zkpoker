@@ -78,6 +78,19 @@ pub trait IShuffleVerifier<TState> {
         c2_y: u256,
         claimed_card: u8,
     ) -> bool;
+
+    // Checks that a table's joint key really is the sum of its seats'
+    // registered key shares: Y == SUM(pk_i) on Grumpkin. `shares` is flat,
+    // two u256 per seat (x then y), in seat order.
+    //
+    // This contract cannot do the addition itself -- no elliptic-curve
+    // arithmetic lives here, which is what keeps Garaga out of its
+    // dependency graph -- so begin_shuffle hands the shares to the adapter
+    // and asserts on the answer. Until this existed, `joint_pk_x/y` was a
+    // dealer-supplied parameter that nothing on-chain ever checked.
+    fn verify_joint_key(
+        self: @TState, shares: Span<u256>, joint_x: u256, joint_y: u256,
+    ) -> bool;
 }
 
 // Test-only mock ERC20 (configurable failure/fee/reentrancy behavior) used
@@ -803,6 +816,8 @@ pub mod PokerGame {
         pub const NOT_YOUR_TURN: felt252 = 'NOT_YOUR_SHUFFLE_TURN';
         pub const BAD_PROOF: felt252 = 'SHUFFLE_PROOF_REJECTED';
         pub const NO_PARTICIPANTS: felt252 = 'NO_SHUFFLE_PARTICIPANTS';
+        // joint_pk != sum of the registered seat key shares.
+        pub const BAD_JOINT_KEY: felt252 = 'BAD_JOINT_KEY';
         pub const SHUFFLE_INCOMPLETE: felt252 = 'SHUFFLE_NOT_COMPLETE';
         pub const DECK_OPENED: felt252 = 'DECK_ALREADY_OPENED';
         pub const DECK_NOT_OPENED: felt252 = 'DECK_NOT_OPENED';
@@ -2263,6 +2278,10 @@ pub mod PokerGame {
             let max_seats = self.table_max_seats.entry(table_id).read();
             let mut position: u32 = 0;
             let mut s: u32 = 0;
+            // Collected in the same walk, in the same order, so the set
+            // summed below is exactly the set frozen above -- there is no
+            // second traversal that could disagree with the first.
+            let mut shares: Array<u256> = array![];
             loop {
                 if s == max_seats {
                     break;
@@ -2271,11 +2290,39 @@ pub mod PokerGame {
                 if self.seat_owner.entry((table_id, seat)).read().is_non_zero() {
                     assert(self.seat_key_registered.entry((table_id, seat)).read(), errors::NO_KEY);
                     self.shuffle_order.entry((table_id, position)).write(seat);
+                    shares.append(self.seat_pk_x.entry((table_id, seat)).read());
+                    shares.append(self.seat_pk_y.entry((table_id, seat)).read());
                     position += 1;
                 }
                 s += 1;
             };
             assert(position != 0, errors::NO_PARTICIPANTS);
+
+            // THE JOINT KEY IS NOW CHECKED, NOT TRUSTED.
+            //
+            // joint_pk_x/y are dealer-supplied parameters. Nothing on-chain
+            // used to verify they equalled the sum of the registered
+            // shares; players were told to check off-chain. A dealer who
+            // published a key of their own choosing could read every hole
+            // card at the table while every proof in the chain still
+            // verified -- the shuffle circuit takes the joint key as a
+            // public input and honestly proves re-randomisation under
+            // whatever key it is handed, and each seat's Schnorr proof only
+            // says that seat knows its own secret. Nothing tied the two
+            // together.
+            //
+            // This contract does no curve arithmetic by design, so the sum
+            // is delegated to the adapter, which rejects off-curve shares
+            // and an identity sum as well as a mismatch. External call, so
+            // it takes the lock like every other call-out path.
+            assert(!self.reentrancy_lock.read(), errors::REENTRANCY);
+            self.reentrancy_lock.write(true);
+            let verifier = IShuffleVerifierDispatcher {
+                contract_address: self.shuffle_verifier.read(),
+            };
+            let key_ok = verifier.verify_joint_key(shares.span(), joint_pk_x, joint_pk_y);
+            self.reentrancy_lock.write(false);
+            assert(key_ok, errors::BAD_JOINT_KEY);
 
             self.shuffle_order_len.entry(table_id).write(position);
             self.shuffle_turn.entry(table_id).write(0);

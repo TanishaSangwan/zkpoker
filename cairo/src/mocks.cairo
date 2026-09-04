@@ -203,6 +203,7 @@ pub mod MockShuffleVerifier {
         reject_key: bool,
         reject_opening: bool,
         reject_reveal: bool,
+        reject_joint_key: bool,
     }
 
     #[abi(embed_v0)]
@@ -225,6 +226,17 @@ pub mod MockShuffleVerifier {
             self: @ContractState, proof: Span<felt252>, public_inputs: Span<felt252>,
         ) -> bool {
             !self.reject_opening.read()
+        }
+
+        // The real adapter sums the shares on Grumpkin. The fixtures in
+        // cairo/tests/ are opaque felts, not curve points, so this cannot
+        // do the arithmetic -- it exercises the CONTRACT's handling of
+        // both answers. That the sum itself is right is checked against
+        // real curve points in scripts/joint_key_check.py and on devnet.
+        fn verify_joint_key(
+            self: @ContractState, shares: Span<u256>, joint_x: u256, joint_y: u256,
+        ) -> bool {
+            !self.reject_joint_key.read()
         }
 
         // Accepts any card the caller names unless set_reject_reveal(true).
@@ -260,6 +272,10 @@ pub mod MockShuffleVerifier {
         fn set_reject_reveal(ref self: ContractState, reject: bool) {
             self.reject_reveal.write(reject);
         }
+
+        fn set_reject_joint_key(ref self: ContractState, reject: bool) {
+            self.reject_joint_key.write(reject);
+        }
     }
 }
 
@@ -269,4 +285,5 @@ pub trait IMockVerifierAdminTrait<TState> {
     fn set_reject_key(ref self: TState, reject: bool);
     fn set_reject_opening(ref self: TState, reject: bool);
     fn set_reject_reveal(ref self: TState, reject: bool);
+    fn set_reject_joint_key(ref self: TState, reject: bool);
 }

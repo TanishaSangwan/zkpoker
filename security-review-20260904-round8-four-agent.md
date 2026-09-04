@@ -222,13 +222,15 @@ reentrancy locks on the three reveal paths.
 
 ## Still open — pre-existing, out of this round's scope
 
-- **The joint key is dealer-supplied.** `begin_shuffle` takes `joint_pk_x/y`
-  as parameters and never checks they equal `Σ seat_pk`. Players verify
-  off-chain. Now *fixable* — `cairo-verifier/src/adapter.cairo` exists and
-  can do curve arithmetic — but not addressed here. Finding D narrowed the
-  blast radius (the summed set is now exactly the seated set) without
-  closing this.
-- **`initial_commitment` is dealer-supplied** the same way.
+- ~~**The joint key is dealer-supplied.**~~ **CLOSED 2026-09-04, after this
+  review.** `VerifierAdapter::verify_joint_key` sums the registered shares on
+  Grumpkin and `begin_shuffle` asserts on it. See PROTOCOL.md §10. Finding D
+  is what made the check meaningful: the summed set is exactly the seated
+  set, so a dealer can neither impose a key nor quietly leave a player out
+  of it.
+- **`initial_commitment` is dealer-supplied** the same way. Not a secrecy
+  break — the starting deck is deterministic and public, so every player can
+  recompute it — but nothing on-chain forces that.
 - **No accusation path.** A party who withholds a decryption share deadlocks
   the hand with no on-chain evidence of who did it.
 - **`n`-of-`n` liveness.** One player disconnecting freezes community

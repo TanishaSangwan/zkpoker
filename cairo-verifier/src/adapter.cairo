@@ -47,6 +47,26 @@ pub trait IShuffleVerifier<TState> {
         c2_y: u256,
         claimed_card: u8,
     ) -> bool;
+
+    // Checks that the table's joint key really is the sum of the seats'
+    // registered key shares: Y == SUM(pk_i) on Grumpkin.
+    //
+    // `shares` is flat, two u256 per seat (x then y), in the order
+    // PokerGame walks its seats. `joint_x`/`joint_y` are what the dealer
+    // supplied to begin_shuffle.
+    //
+    // Why this lives here: PokerGame does no elliptic-curve arithmetic by
+    // design -- that is what keeps Garaga out of the game contract's
+    // dependency graph -- so until this existed the joint key was simply a
+    // dealer-supplied parameter that nothing on-chain ever checked, and
+    // players were expected to verify it off-chain. A dealer who published
+    // a joint key of their own choosing could read every hole card at the
+    // table while every proof in the chain still verified: the shuffle
+    // circuit takes the joint key as a public input and proves
+    // re-randomisation under whatever key it is given.
+    fn verify_joint_key(
+        self: @TState, shares: Span<u256>, joint_x: u256, joint_y: u256,
+    ) -> bool;
 }
 
 // The Garaga-generated verifiers. `full_proof_with_hints` is the whole
@@ -61,11 +81,16 @@ pub trait IUltraKeccakZKHonkVerifier<TState> {
 
 #[starknet::contract]
 pub mod VerifierAdapter {
+    use garaga::definitions::{G1Point, G1PointZero, Zero};
+    use garaga::ec_ops::{G1PointTrait, ec_safe_add};
     use starknet::ContractAddress;
     use starknet::storage::{StoragePointerReadAccess, StoragePointerWriteAccess};
     use super::{IUltraKeccakZKHonkVerifierDispatcher, IUltraKeccakZKHonkVerifierDispatcherTrait};
     use zkpoker_verifier::dleq::{IDleqVerifierDispatcher, IDleqVerifierDispatcherTrait};
     use zkpoker_verifier::{IKeyVerifierDispatcher, IKeyVerifierDispatcherTrait};
+
+    // Garaga curve id, same as dleq.cairo.
+    const GRUMPKIN: usize = 5;
 
     #[storage]
     struct Storage {
@@ -126,6 +151,55 @@ pub mod VerifierAdapter {
         ok
     }
 
+    // Y == SUM(pk_i) on Grumpkin. Sums the shares and compares both
+    // coordinates.
+    //
+    // ec_safe_add handles the awkward cases the naive formula does not:
+    // the identity (so the accumulator can start at infinity), equal
+    // points (doubling), and opposite points (which collapse to
+    // infinity). Two colluding seats CAN choose shares x and -x that
+    // cancel -- both know their secret, so both Schnorr proofs pass -- but
+    // cancelling only removes their own contribution from a sum they
+    // already knew their part of, so it buys them nothing. The one case
+    // that must not slip through is every share cancelling: the joint key
+    // would be the identity, c2 = M + r*Y = M, and every card would be in
+    // the clear. An infinity sum is therefore rejected outright.
+    fn joint_key_matches(shares: Span<u256>, joint_x: u256, joint_y: u256) -> bool {
+        // Two coordinates per seat, and a table of nobody has no key.
+        if shares.len() == 0 || shares.len() % 2 != 0 {
+            return false;
+        }
+
+        let mut acc: G1Point = G1PointZero::zero();
+        let mut ok = true;
+        let mut i: u32 = 0;
+        while i != shares.len() {
+            let p = G1Point { x: (*shares.at(i)).into(), y: (*shares.at(i + 1)).into() };
+            // Every share must be a real curve point. Off-curve values do
+            // not obey the group law, so summing them proves nothing about
+            // the key anyone actually holds.
+            if !p.is_on_curve_excluding_infinity(GRUMPKIN) {
+                ok = false;
+                break;
+            }
+            acc = ec_safe_add(acc, p, GRUMPKIN);
+            i += 2;
+        }
+        if !ok || acc.is_zero() {
+            return false;
+        }
+
+        let joint = G1Point { x: joint_x.into(), y: joint_y.into() };
+        if !joint.is_on_curve_excluding_infinity(GRUMPKIN) {
+            return false;
+        }
+        let acc_x: u256 = acc.x.try_into().unwrap();
+        let acc_y: u256 = acc.y.try_into().unwrap();
+        // Both coordinates, not just x: -Y has the same x as Y, and
+        // encrypting to -Y is a different key.
+        acc_x == joint_x && acc_y == joint_y
+    }
+
     fn check_honk(
         verifier: ContractAddress, proof: Span<felt252>, expected: Span<felt252>,
     ) -> bool {
@@ -177,6 +251,12 @@ pub mod VerifierAdapter {
         ) -> bool {
             IDleqVerifierDispatcher { contract_address: self.dleq.read() }
                 .verify_card_reveal(proof, public_inputs, c2_x, c2_y, claimed_card)
+        }
+
+        fn verify_joint_key(
+            self: @ContractState, shares: Span<u256>, joint_x: u256, joint_y: u256,
+        ) -> bool {
+            joint_key_matches(shares, joint_x, joint_y)
         }
     }
 }

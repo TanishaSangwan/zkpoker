@@ -598,10 +598,29 @@ but "should be" is not "measured," and the entire client-side story rests on it.
 
 **Not built:**
 - The §7 circuit change (public-input decks) and re-measurement.
-- Joint-key accumulation on-chain — `begin_shuffle` still takes `joint_pk` as a
-  dealer-supplied parameter and never checks it equals `Σ seat_pk`. Players are
-  expected to verify off-chain. It cannot be fixed inside `PokerGame` (no EC
-  arithmetic there by design); it belongs in the adapter.
+- ~~Joint-key accumulation on-chain~~ — **done, 2026-09-04.**
+  `VerifierAdapter::verify_joint_key` sums the registered shares on Grumpkin
+  with `ec_safe_add` and compares both coordinates; `begin_shuffle` collects
+  the shares in the same walk that freezes the participant list and asserts on
+  the answer. Until this landed, `joint_pk_x/y` was a dealer-supplied parameter
+  nothing on-chain checked: a dealer could publish a key of their own choosing
+  and read every hole card at the table while every proof in the chain still
+  verified, because the shuffle circuit honestly proves re-randomisation under
+  whatever key it is handed and each seat's Schnorr proof only says that seat
+  knows its own secret. Nothing tied the two together.
+
+  The adapter rejects off-curve shares (the group law does not hold there), a
+  sum of infinity (`Y = O` makes `c2 = M + r*Y = M` — every card in the clear),
+  and compares **both** coordinates, since `-Y` shares `Y`'s x and is a
+  different key. Measured: **2.49M L2 gas at 3 seats, 4.83M at 23** — about
+  117K per additional seat, and 0.6% of one shuffle-proof verification at the
+  largest table the contract allows. Verified against real curve points in
+  `cairo-verifier/tests/test_joint_key.cairo`; fixtures from
+  `scripts/joint_key_check.py`, which independently checks that the
+  point-by-point sum equals `(Σ secrets)·G`.
+- `initial_commitment` is still dealer-supplied the same way. Unlike the joint
+  key it is not a secrecy break — the starting deck is deterministic and public,
+  so every player can recompute it — but nothing on-chain forces that.
 - **Showdown scoring** — `settle_from_reveals` scores from cards the contract
   itself proved and pays out. Takes **no caller input beyond the table**: every
   card comes from storage a reveal proof bound, every payout note from
