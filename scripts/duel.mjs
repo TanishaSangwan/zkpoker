@@ -356,7 +356,9 @@ switch (cmd) {
       const D = dealing.combineShares([...collected.values()]);
       const card = reveal.cardFromShare({ c1, c2 }, D);
       if (card === null) throw new Error(`position ${pos}: shares decrypt outside the card encoding`);
-      const blinding = grumpkin.randomScalar();
+      // A felt252, not a curve scalar: a Grumpkin scalar does not fit in one,
+      // and the mismatch only bites at showdown. See src/lib/felt.ts randomFelt.
+      const blinding = felt.randomFelt();
       await send('commit_hole_shares', {
         table_id: TABLE, seat: String(MY_SEAT), slot,
         commitment: hex(reveal.holeCommitment(D, blinding)),

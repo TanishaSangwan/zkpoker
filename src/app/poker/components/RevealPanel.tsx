@@ -16,7 +16,7 @@ import type { TableState } from '../useTableState';
 import { asU256, decodeError, executeAndWait, pgCall, pokerGameReader, readU256 } from '../contract';
 import type { SeatIdentity } from '@/lib/identity';
 import { fromWire, type Point, cardToName } from '@/lib/grumpkin';
-import { randomScalar } from '@/lib/grumpkin';
+import { randomFelt } from '@/lib/felt';
 import * as dealing from '@/lib/dealing';
 import { initProver as initDleqProver } from '@/lib/dleq';
 import {
@@ -193,7 +193,10 @@ export default function RevealPanel(p: Props) {
               `share is wrong or the deck was fabricated — do not commit to this.`,
           );
         }
-        const blinding = randomScalar();
+        // A felt252, NOT a curve scalar. See felt.ts's randomFelt: a Grumpkin
+        // scalar does not fit in a felt252, and the mismatch only surfaces at
+        // showdown, where the blinding is finally sent to the chain.
+        const blinding = randomFelt();
         // Committed BEFORE betting. That ordering is the point: a commitment
         // made after the board is known would let a player pick a friendlier
         // share set, and the shares are what determine the card.
@@ -265,11 +268,18 @@ export default function RevealPanel(p: Props) {
       // that would hand them this card. See src/lib/dealing.ts.
       setBusy('running the three-round aggregate');
       const shares = await gatherShares(position, c1, true);
-      const agg = await dealing.runAggregate({
+      // The co-signers need D = SUM(d_i), which includes THIS seat's share.
+      // Held back all hand precisely so nobody could read this card; released
+      // now because showing it is exactly what is about to happen.
+      //
+      // Announced for the whole aggregate, not just once before it: the other
+      // seats only start gathering when they SEE this seat's first nonce
+      // commitment, so the share has to still be arriving after that point.
+      const agg = await announceOpenShare(position, () => dealing.runAggregate({
         transport: transport.current!, tableId: table.tableId, position, h: c1,
-        jointKey: table.jointKey, keys, shares, mySeat: yourSeat!, mySecret: identity!.secret,
+        jointKey: table.jointKey!, keys, shares, mySeat: yourSeat!, mySecret: identity!.secret,
         onProgress: (phase, outstanding) => setBusy(`${phase} — waiting on ${outstanding.join(', ') || '—'}`),
-      });
+      }));
       return send('reveal_hole_card', revealHoleArgs({
         tableId: table.tableId, seat: yourSeat!, slot,
         share: agg.share, blinding: stored.blinding, card: stored.card, proof: agg.proof,
@@ -396,6 +406,66 @@ export default function RevealPanel(p: Props) {
   }, [autoServe, table.deckOpened, table.deckOpenChunk, yourSeat, identity, provider, owed, keys, openedAt, say, table.tableId]);
 
   /**
+   * Publish this seat's share for `pos` IN THE CLEAR.
+   *
+   * Only ever called for a hole position at showdown, and that restriction is
+   * the security property, not a detail.
+   *
+   * The aggregate challenge is taken over D = SUM(d_i), so every co-signer
+   * must know D to produce its s_i -- and c2 is already on-chain, so anyone
+   * who knows D for a hole position computes c2 - D and reads that card. That
+   * is why hole shares are sealed to their owner during dealing and why
+   * src/lib/dealing.ts builds the hole aggregate at showdown rather than at
+   * dealing time (docs/PROTOCOL.md §9.5).
+   *
+   * At showdown the card is being turned face up anyway, so D stops being a
+   * secret and the co-signers can finally have it. Publishing it is what makes
+   * a hand finish. Publishing it one moment earlier would hand the table
+   * somebody's hole cards.
+   */
+  const publishOpenShare = useCallback(async (pos: number) => {
+    const { c1 } = await openedAt(pos);
+    const msg = dealing.shareFor(identity!.secret, c1);
+    await transport.current!.publish({
+      tableId: table.tableId, position: pos, from: yourSeat!, kind: 'share', to: null,
+      body: {
+        d: { x: msg.d.x.toString(), y: msg.d.y.toString() },
+        s: msg.s.toString(), e: msg.e.toString(),
+      },
+    });
+  }, [openedAt, identity, yourSeat, table.tableId]);
+
+  /**
+   * Publish this seat's open share for `pos` and KEEP publishing it until
+   * `fn` finishes.
+   *
+   * Sending it once is not enough, and that is not a transport quirk to work
+   * around -- it is the shape of the problem. Clients arrive at a position at
+   * different moments: a reload, a slow gather, a retry after a timeout. A
+   * share sent before a peer was listening is simply gone, so that peer waits
+   * for something that was genuinely sent, while the sender considers the job
+   * done. Both sides then wait forever, which is exactly how a showdown with
+   * every card in place still could not finish.
+   *
+   * The nonce commitments in src/lib/dealing.ts are re-announced for the same
+   * reason. This is the same rule applied to the one message that was still
+   * being sent once.
+   *
+   * Re-publishing is free of consequence: receivers key shares by seat, so a
+   * repeat overwrites itself, and each carries its own DLEQ.
+   */
+  const announceOpenShare = useCallback(async <T,>(pos: number, fn: () => Promise<T>): Promise<T> => {
+    await publishOpenShare(pos);
+    say(`published my share for position ${pos} -- seat ${Math.floor(pos / 2)} is showing`);
+    const timer = setInterval(() => { void publishOpenShare(pos).catch(() => {}); }, 2500);
+    try {
+      return await fn();
+    } finally {
+      clearInterval(timer);
+    }
+  }, [publishOpenShare, say]);
+
+  /**
    * Run the aggregate for one position: gather shares, do the three rounds,
    * and submit if it is a community card.
    *
@@ -408,25 +478,40 @@ export default function RevealPanel(p: Props) {
     const L = latest.current;
     await initDleqProver();
     const { c1, c2 } = await L.openedAt(pos);
-    const shares = await L.gatherShares(pos, c1, false);
-    // Report the ROUND, not just "working".
-    //
-    // Without this the UI kept showing the last message gatherShares set --
-    // "waiting on seat —", meaning it had every share it needed -- for the
-    // entire three-round aggregate, so a table that was mid-protocol looked
-    // identical to one stuck collecting shares. The phase and who is
-    // outstanding is the whole diagnostic for an n-of-n round.
-    setBusy(`position ${pos}: shares in, starting the aggregate`);
-    const agg = await dealing.runAggregate({
-      transport: transport.current!, tableId: L.table.tableId, position: pos, h: c1,
-      jointKey: L.table.jointKey!, keys: L.keys, shares,
-      mySeat: yourSeat!, mySecret: L.identity!.secret,
-      onProgress: (phase, outstanding) => {
-        const who = outstanding.length ? `waiting on seat ${outstanding.join(', ')}` : 'all in';
-        setBusy(`position ${pos}: ${phase} round — ${who}`);
-        say(`pos ${pos} ${phase}: ${who}`);
-      },
-    });
+    // Joining a showdown reveal of somebody else's hole card: the co-signers
+    // need D, so every share for that position has to be in the clear. This
+    // seat's is one of them.
+    const joiningAHoleReveal = pos < 2 * L.table.maxSeats && Math.floor(pos / 2) !== yourSeat;
+
+    const gatherThenAggregate = async () => {
+      const shares = await L.gatherShares(pos, c1, false);
+      // Report the ROUND, not just "working".
+      //
+      // Without this the UI kept showing the last message gatherShares set --
+      // "waiting on seat —", meaning it had every share it needed -- for the
+      // entire three-round aggregate, so a table that was mid-protocol looked
+      // identical to one stuck collecting shares. The phase and who is
+      // outstanding is the whole diagnostic for an n-of-n round.
+      setBusy(`position ${pos}: shares in, starting the aggregate`);
+      return dealing.runAggregate({
+        transport: transport.current!, tableId: L.table.tableId, position: pos, h: c1,
+        jointKey: L.table.jointKey!, keys: L.keys, shares,
+        mySeat: yourSeat!, mySecret: L.identity!.secret,
+        onProgress: (phase, outstanding) => {
+          const who = outstanding.length ? `waiting on seat ${outstanding.join(', ')}` : 'all in';
+          setBusy(`position ${pos}: ${phase} round — ${who}`);
+          say(`pos ${pos} ${phase}: ${who}`);
+        },
+      });
+    };
+
+    // Announced across the WHOLE run, not just this seat's own gather. The
+    // other co-signers reach their gather at different moments -- one is
+    // already aggregating while another is still collecting -- so stopping
+    // the moment this seat has what it needs strands whoever is behind it.
+    const agg = joiningAHoleReveal
+      ? await announceOpenShare(pos, gatherThenAggregate)
+      : await gatherThenAggregate();
     setBusy(null);
     const communityBase = 2 * L.table.maxSeats;
     const drawBase = communityBase + 5;
@@ -460,7 +545,7 @@ export default function RevealPanel(p: Props) {
     } catch {
       // Someone else submitted first. That is the point of both sides trying.
     }
-  }, [yourSeat, say]);
+  }, [yourSeat, say, announceOpenShare]);
 
   // Join an aggregate the moment someone starts one, so a reveal is one click
   // for whoever wants the card and nothing at all for everyone else.
@@ -476,6 +561,30 @@ export default function RevealPanel(p: Props) {
       // Never over my own hole positions -- see the rule above. Showing is a
       // decision, and the share that keeps the card private is mine.
       if (myHoles.includes(pos)) return;
+      const T = latest.current.table;
+      if (pos < 2 * T.maxSeats) {
+        // Somebody else's HOLE card, which now means publishing a share that
+        // lets the whole table read it. Three conditions, all of them load
+        // bearing, and none of them merely tidy:
+        //
+        //   * the showdown has actually started -- before that a hole card is
+        //     nobody's business and this share is the thing protecting it;
+        //   * the request came from the card's OWNER, not a third party. Any
+        //     seat could otherwise nonce-commit on a rival's hole position and
+        //     have the rest of the table hand over the pieces of their hand;
+        //   * it is that owner's TURN to show. The contract enforces the order
+        //     for the reveal itself, but the shares travel off-chain and would
+        //     not be covered by it.
+        //
+        // Together: this seat helps expose a hole card only when its owner
+        // asks, on their own turn, at showdown -- which is the one moment
+        // showing it is what they are entitled to do.
+        const owner = Math.floor(pos / 2);
+        if (!T.showdownStarted || T.settled) return;
+        if (e.from !== owner) return;
+        if (T.showdownTurn !== owner) return;
+        if (T.seats[owner]?.mucked || T.seats[owner]?.folded) return;
+      }
       // And never help open a board card before its street. Same reasoning as
       // `owed`: the contract refuses the reveal, but there is no reason to
       // contribute to it in the first place.

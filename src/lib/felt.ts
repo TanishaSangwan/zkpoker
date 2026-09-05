@@ -46,5 +46,41 @@ export function poseidonSpan(values: bigint[]): bigint {
 }
 
 /** For calldata: starknet.js wants decimal or hex strings, not bigints. */
+/** The STARK field's prime: 2^251 + 17*2^192 + 1. What a felt252 can hold. */
+export const STARK_PRIME =
+  (1n << 251n) + 17n * (1n << 192n) + 1n;
+
+/**
+ * A uniform random felt252.
+ *
+ * NOT interchangeable with grumpkin's `randomScalar`, and confusing the two
+ * cost a whole hand. Grumpkin scalars live mod its group order -- BN254's base
+ * field, about 2^254 -- which does not fit in a felt252. A blinding factor
+ * drawn there is unrepresentable roughly three times in four, and the failure
+ * lands at the far end of the protocol: `commit_hole_shares` only ever hashes
+ * the blinding locally, so committing succeeds, and the value is not sent as a
+ * felt until `reveal_hole_card` at showdown -- where starknet.js rejects the
+ * call client-side, before any transaction exists. A hand that had been played
+ * out in full simply could not be shown, with nothing on-chain to explain why.
+ *
+ * So: anything destined for a Cairo felt is drawn HERE, and anything that is a
+ * curve scalar is drawn there.
+ *
+ * Rejection-sampled rather than reduced, because `% STARK_PRIME` over 32 bytes
+ * is measurably biased toward small values, and this is a blinding factor --
+ * bias is the one property it must not have.
+ */
+export function randomFelt(): bigint {
+  for (;;) {
+    const bytes = new Uint8Array(32);
+    crypto.getRandomValues(bytes);
+    let v = 0n;
+    for (const b of bytes) v = (v << 8n) | BigInt(b);
+    // Trim to the field's bit length first, or the loop rejects ~almost always.
+    v >>= 4n;
+    if (v < STARK_PRIME) return v;
+  }
+}
+
 export const feltStr = (v: bigint): string => '0x' + v.toString(16);
 export const feltStrs = (vs: bigint[]): string[] => vs.map(feltStr);

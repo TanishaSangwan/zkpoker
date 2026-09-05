@@ -153,9 +153,46 @@ export async function runAggregate(args: {
       ephemeral: true,
     });
 
+  // Reveals that arrived before this client had every commitment.
+  //
+  // Holding them is not politeness, it is the commit round's security
+  // property: a reveal accepted early lets the last party choose its nonce
+  // after seeing everyone else's, which is the classic naive-multisignature
+  // break. AggregateSession refuses such a reveal by throwing -- correct as a
+  // rule, fatal as a reaction, because in runAggregate that throw rejects the
+  // whole run.
+  //
+  // And arriving early is NORMAL, not an attack: a client that joins a
+  // position seconds late -- a reload, a slow share gather -- meets parties
+  // who are already past committing. So the reveal is parked and replayed the
+  // moment the commit round closes. The property is kept (nothing is accepted
+  // early) and the run survives. A reveal that then fails to match its
+  // commitment is still fatal, which is the case that actually is an attack.
+  const parked = new Map<number, { r1: Point; r2: Point }>();
+
   const done = new Promise<AggregateResult>((resolve, reject) => {
     const stop = transport.subscribe((e) => {
       if (e.tableId !== tableId || e.position !== position || e.from === mySeat) return;
+      // A seat that is not a party to this table is NOISE, not a cheat.
+      //
+      // AggregateSession.require() throws on an unknown seat, which is right
+      // for a local API misuse and catastrophic for a network message: the
+      // throw lands in the catch below, which rejects the whole run. The
+      // caller retries, the stray arrives again, and the position never
+      // resolves -- an infinite loop that looks exactly like a stalled table.
+      //
+      // Worse than a bug: the transport is a dumb relay that anyone can post
+      // to, so before this filter ANY outsider could stall every reveal at
+      // every table by publishing one envelope with a seat number nobody
+      // holds. No stake, no key, no cost. Found by a leftover tab from an
+      // older four-seat table publishing as seat 3 into a three-seat one --
+      // the channel is named by table id, so two tables that share a name
+      // share a channel.
+      //
+      // Filtered here rather than made non-fatal in the session, because
+      // equivocation BY A PARTY -- two different nonce commitments from one
+      // seat -- must stay fatal. That is the commit round's entire purpose.
+      if (!keys.has(e.from)) return;
       try {
         // Adopt the proposer's run; ignore every other.
         //
@@ -176,10 +213,18 @@ export async function runAggregate(args: {
         if (session && e.session && e.session !== session) return;
         const body = e.body as any;
         if (e.kind === 'nonce-commit') state.acceptCommitment(e.from, BigInt(body.commitment));
-        else if (e.kind === 'nonce-reveal') {
-          state.acceptReveal(e.from, pt(body.r1), pt(body.r2));
-        } else if (e.kind === 'response') state.acceptResponse(e.from, BigInt(body.s));
+        else if (e.kind === 'nonce-reveal') parked.set(e.from, { r1: pt(body.r1), r2: pt(body.r2) });
+        else if (e.kind === 'response') state.acceptResponse(e.from, BigInt(body.s));
         else return;
+
+        // Whatever is now admissible, in order. Throws only on a reveal that
+        // genuinely does not open its commitment.
+        if (state.phase !== 'committing') {
+          for (const [seat, r] of [...parked]) {
+            parked.delete(seat);
+            if (!state.has(seat, 'reveal')) state.acceptReveal(seat, r.r1, r.r2);
+          }
+        }
 
         say(state.phase, state.outstanding);
 
@@ -281,11 +326,20 @@ export async function runAggregate(args: {
     const announce = setInterval(() => {
       if (state.phase === 'complete') return;
       if (mySeat !== proposer && session === null) return; // nothing to say yet
-      if (state.phase === 'committing') {
-        send('nonce-commit', { commitment: mine.commitment.toString() });
-      } else {
-        advanceMe();
-      }
+      // The commitment goes out on EVERY tick, not only while this seat is
+      // still in the commit round.
+      //
+      // Re-announcing just the current round deadlocked any table where the
+      // clients did not join together. Two seats reach the reveal round and
+      // stop repeating their commitments; a third joins a moment later, hears
+      // only reveals, and can never close its own commit round -- so it never
+      // reveals, and the first two wait on it forever. All three are then
+      // waiting, which is precisely what it looked like from the table.
+      //
+      // Safe to repeat, and repeating is the point: a byte-identical
+      // commitment is a duplicate delivery, not equivocation.
+      send('nonce-commit', { commitment: mine.commitment.toString() });
+      advanceMe();
     }, 2000);
     const clearAnnounce = () => { clearInterval(announce); clearTimeout(grace); };
   });
