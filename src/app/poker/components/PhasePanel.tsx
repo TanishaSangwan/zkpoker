@@ -563,7 +563,7 @@ export default function PhasePanel(p: Props) {
               Binds the in-play ciphertexts to the deck the chain committed to. The contract cannot
               check that itself — the commitment is a Poseidon2 hash over BN254 and Cairo&apos;s
               Poseidon is over the STARK field — so this proof is what stops a fabricated deck.
-              Needs no secret, so anyone at the table can do it. The circuit opens 5 slots at a
+              Needs no secret, so anyone at the table can do it. The circuit opens 16 slots at a
               time, and the last chunk repeats the final position to fill up.
             </span>
           </div>

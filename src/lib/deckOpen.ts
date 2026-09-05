@@ -16,10 +16,10 @@
 // shuffle's 811M.
 //
 // ── Chunking ────────────────────────────────────────────────────────────
-// The circuit's K is fixed at 5, so the verifier's public-input count is
+// The circuit's K is fixed at 16, so the verifier's public-input count is
 // fixed too. A table has 3*max_seats + 5 in-play positions -- two hole cards
 // and one button draw per seat, plus the board -- which is not a
-// multiple of 5, so the contract takes it in chunks of 5 and PADS the final
+// multiple of 16, so the contract takes it in chunks of K and PADS the final
 // chunk by repeating the last real position. This module reproduces that
 // padding exactly; anything else produces a proof whose public inputs do not
 // match what the contract builds, and it is rejected with BAD_OPENING.
@@ -28,7 +28,7 @@ import { Ciphertext, deckToFields } from './deck';
 import { u256Parts } from './felt';
 
 /** MUST equal DECK_OPEN_K in cairo/src/lib.cairo and K in circuits/deck_open. */
-export const DECK_OPEN_K = 5;
+export const DECK_OPEN_K = 16;
 
 const CIRCUIT_URL = '/circuits/deck_open.json';
 const WASM_PATH = '/circuits/wasm/barretenberg.wasm.gz';
@@ -47,7 +47,7 @@ export function chunkCount(maxSeats: number): number {
 }
 
 /**
- * The 5 positions for one chunk, padded the way the contract pads.
+ * The K positions for one chunk, padded the way the contract pads.
  *
  * `raw < k_total ? raw : k_total - 1` -- a short final chunk repeats the last
  * in-play position rather than running past it. The circuit proves the repeat

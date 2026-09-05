@@ -783,7 +783,7 @@ pub trait IPokerGame<TState> {
     // what it proves.
     //
     // Opened in CHUNKS of DECK_OPEN_K positions, `chunk` counting from 0,
-    // strictly in order. Round 8 finding I: circuits/deck_open fixes K = 5
+    // strictly in order. Round 8 finding I: circuits/deck_open fixes K = 16
     // at compile time, so its verifier exposes exactly 1 + K + 4K = 26
     // public inputs. Deriving the position set from max_seats (the fix
     // above) made the contract's input vector 1 + k + 4k long for
@@ -1208,7 +1208,19 @@ pub mod PokerGame {
     // deck submit_shuffle publishes as calldata.
     const DECK_FIELDS: u32 = 208;
 
-    const DECK_OPEN_K: u32 = 5;
+    // Deck positions opened per proof. MUST equal K in circuits/deck_open.
+    //
+    // Raised from 5 once the cost model was measured on Sepolia: on-chain Honk
+    // verification is ~587M gas FIXED per proof plus ~13M per sumcheck round,
+    // so what costs money is the NUMBER of proofs, not the size of each. The
+    // circuit did not grow at all going from 5 slots to 16 -- log_n stayed 14 --
+    // while a three-seat table's opening went from three proofs to one.
+    //
+    // 16 is the ceiling, not a preference. garaga counts sixteen more public
+    // inputs than the circuit declares (the pairing-point accumulator) against
+    // a hard cap of 99, and this circuit publishes 1 + 5K, so 1 + 5K + 16 <= 99
+    // gives K <= 16.4.
+    const DECK_OPEN_K: u32 = 16;
 
     // V2: how long one player has to publish their shuffle before the
     // table can be voided (docs/V2-MENTAL-POKER.md §6). Much shorter than

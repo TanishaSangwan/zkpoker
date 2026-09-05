@@ -307,7 +307,42 @@ cost scales with the deck, so a larger deck, a wider re-randomisation, or a
 second statement folded into the same circuit all spend from those 398 million
 gas. Past the cap the proof cannot be verified in one transaction at all, and
 the fix is not tuning — it is splitting the statement, the way `open_deck`
-already chunks at K=5.
+already chunks at K=16.
+
+### 6.2 K was raised from 5 to 16 — measured, then done
+
+The corollary of 6.1's cost model is that **the number of proofs is what
+costs money, not the size of each**. `deck_open` opened K=5 positions per
+proof, so a table's in-play slots took several: three for a two-seat table,
+ten for a fifteen-seat one, each paying the same ~587M fixed verification.
+
+Raising K to 16 collapses that, and the circuit did not grow at all doing it —
+`log_n` stayed 14, so a proof costs exactly what it did before:
+
+| table | in-play slots | proofs at K=5 | at K=16 |
+|---|---|---|---|
+| 2 seats | 11 | 3 | **1** |
+| 3 seats | 14 | 3 | **1** |
+| 4 seats | 17 | 4 | 2 |
+| 15 seats | 50 | 10 | **4** |
+
+**16 is the ceiling, not a preference.** Garaga counts SIXTEEN more public
+inputs than the circuit declares — the pairing-point accumulator — against its
+cap of 99, so the real budget is 83. This circuit publishes `1 + 5K`, giving
+`K ≤ 16.4`. An attempt at 19 was refused outright:
+
+```
+Name 'zk_honk_sumcheck_size_14_pub_112' is too long to fit in a felt252
+```
+
+Nothing about the checks changed: the same positions are bound to the same
+commitment by the same proof system. Only the packaging did.
+
+One thing it cost, worth recording: at K=16 a two-seat table opens atomically,
+so the fixtures that used to exercise chunk ordering and the "not opened until
+the last chunk" rule stopped testing anything. A four-seat fixture (17 slots,
+two chunks) keeps that coverage — `max_seats` drives the slot count, not how
+many seats are occupied, so it needs no extra players.
 
 It bites before the limit does. The first attempt on Sepolia was refused
 without running:

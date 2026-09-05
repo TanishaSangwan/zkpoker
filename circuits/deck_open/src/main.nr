@@ -26,13 +26,34 @@ use poseidon::poseidon2::Poseidon2;
 
 global N: u32 = 52;
 global DECK_FIELDS: u32 = 208; // 4 * N
-global K: u32 = 5; // slots opened at once (flop+turn+river = 5)
+// Slots opened per proof.
+//
+// Was 5 -- the five community cards -- which meant a table's in-play positions
+// took several proofs: 3 for a two-seat table, 10 for a fifteen-seat one.
+// That is expensive for a reason worth stating: on-chain Honk verification is
+// roughly 587M gas FIXED per proof plus ~13M per sumcheck round, so cost
+// tracks the NUMBER of proofs and barely notices circuit size. The shuffle
+// circuit is 8x larger than this one and verifies for only 5% more.
+//
+// So the constraint to optimise against is not gates, it is PUBLIC INPUTS,
+// which garaga caps at 99 (see the note above). This circuit publishes
+// 1 + 5K of them -- the deck hash, plus a position and four ciphertext fields
+// per slot. But garaga counts SIXTEEN more than the circuit declares -- the
+// pairing-point accumulator Honk carries -- so the real budget is 99 - 16 = 83,
+// and 1 + 5K <= 83 gives K = 16. (Trying 19 produced 96 + 16 = 112 and garaga
+// refused outright: "Name 'zk_honk_sumcheck_size_14_pub_112' is too long to fit
+// in a felt252".)
+//
+// K = 16 still opens a three-seat table (14 slots) in ONE proof instead of
+// three, and a full fifteen-seat table in four instead of ten, for identical
+// checks.
+global K: u32 = 16;
 
 fn main(
     // -- public --
     deck_hash: pub Field, // must equal the shuffle chain's final hash_out
     positions: pub [u32; K], // which deck slots are being opened
-    cards: pub [Field; 20], // 4 * K -- the ciphertexts claimed at those slots
+    cards: pub [Field; 64], // 4 * K -- the ciphertexts claimed at those slots
     // -- private --
     deck: [Field; DECK_FIELDS],
 ) {

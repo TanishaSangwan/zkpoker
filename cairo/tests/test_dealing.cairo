@@ -88,14 +88,17 @@ fn all_positions() -> Span<u32> {
         .span()
 }
 
+// MUST equal DECK_OPEN_K in src/lib.cairo and K in circuits/deck_open.
+const DECK_OPEN_K: u32 = 16;
+
 // One DECK_OPEN_K-sized chunk of ciphertexts, starting at `first`, padded
 // the way the contract pads a final partial chunk: by repeating the last
-// in-play position. Round 8 finding I -- the deck is opened K=5 positions
+// in-play position. Round 8 finding I -- the deck is opened K positions
 // at a time because circuits/deck_open fixes K at compile time.
 fn chunk_cts(first: u32, k_total: u32) -> Span<u256> {
     let mut out: Array<u256> = array![];
     let mut i: u32 = 0;
-    while i != 5 {
+    while i != DECK_OPEN_K {
         let raw = first + i;
         let p = if raw < k_total {
             raw
@@ -113,12 +116,11 @@ fn chunk_cts(first: u32, k_total: u32) -> Span<u256> {
 }
 
 // A two-seat table has 3*2 + 5 = 11 in-play positions -- four hole slots,
-// five community cards and one high-card draw per seat -- so three chunks.
+// five community cards and one high-card draw per seat -- which now fits in a
+// SINGLE chunk of 16. It took three at K=5.
 const TWO_SEAT_POSITIONS: u32 = 11;
 fn open_all(game: zkpoker::IPokerGameDispatcher) {
     game.open_deck(TABLE_1, 0, chunk_cts(0, TWO_SEAT_POSITIONS), proof());
-    game.open_deck(TABLE_1, 1, chunk_cts(5, TWO_SEAT_POSITIONS), proof());
-    game.open_deck(TABLE_1, 2, chunk_cts(10, TWO_SEAT_POSITIONS), proof());
 }
 
 
@@ -159,6 +161,59 @@ fn setup_shuffled() -> (
     (game, verifier)
 }
 
+// A table WIDE enough that its deck still needs more than one chunk.
+//
+// At K=16 a two-seat table's 11 in-play positions open atomically, which is
+// the point of raising K -- but it also means the two-seat fixtures can no
+// longer exercise chunk ordering or the "not opened until the last chunk"
+// rule. `max_seats` drives the position count (3*max_seats + 5), NOT how many
+// seats are filled, so four seats gives 17 positions and two chunks with the
+// same two players.
+const FOUR_SEATS: u32 = 4;
+const WIDE_POSITIONS: u32 = 17;
+fn setup_shuffled_wide() -> zkpoker::IPokerGameDispatcher {
+    let (game, _verifier) = deploy_pokergame_with_verifier(POOL());
+    let (token_addr, _token, _admin) = deploy_mock_token();
+
+    start_cheat_caller_address(game.contract_address, DEALER());
+    game.create_table(TABLE_1, token_addr, 0, FOUR_SEATS);
+    stop_cheat_caller_address(game.contract_address);
+
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.join_table(TABLE_1, SEAT_0, NOTE_A);
+    game.register_shuffle_key(TABLE_1, SEAT_0, PK_A_X, PK_A_Y, key_proof());
+    stop_cheat_caller_address(game.contract_address);
+
+    start_cheat_caller_address(game.contract_address, BOB());
+    game.join_table(TABLE_1, SEAT_1, NOTE_B);
+    game.register_shuffle_key(TABLE_1, SEAT_1, PK_B_X, PK_B_Y, key_proof());
+    stop_cheat_caller_address(game.contract_address);
+
+    start_cheat_caller_address(game.contract_address, DEALER());
+    game.begin_shuffle(TABLE_1, JOINT_X, JOINT_Y);
+    stop_cheat_caller_address(game.contract_address);
+
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.submit_shuffle(TABLE_1, DECK_1, deck_of(1), proof());
+    stop_cheat_caller_address(game.contract_address);
+    start_cheat_caller_address(game.contract_address, BOB());
+    game.submit_shuffle(TABLE_1, DECK_2, deck_of(1), proof());
+    stop_cheat_caller_address(game.contract_address);
+    game
+}
+
+#[test]
+fn test_open_deck_is_not_complete_until_every_chunk_lands() {
+    // The partial-open rule, on a table that still spans two chunks. A deck
+    // marked open before every in-play position is bound is exactly what
+    // round 8's finding I was about.
+    let game = setup_shuffled_wide();
+    game.open_deck(TABLE_1, 0, chunk_cts(0, WIDE_POSITIONS), proof());
+    assert(!game.get_deck_opened(TABLE_1), 'not opened until complete');
+    game.open_deck(TABLE_1, 1, chunk_cts(DECK_OPEN_K, WIDE_POSITIONS), proof());
+    assert(game.get_deck_opened(TABLE_1), 'deck not marked opened');
+}
+
 fn setup_opened() -> (
     zkpoker::IPokerGameDispatcher, zkpoker::mocks::IMockVerifierAdminTraitDispatcher,
 ) {
@@ -173,13 +228,11 @@ fn setup_opened() -> (
 fn test_open_deck_success_and_event() {
     let (game, _v) = setup_shuffled();
     let mut spy = spy_events();
-    // The first chunk alone must NOT mark the deck open -- a partial open
-    // is what finding 1's griefer wanted.
+    // A two-seat table's 11 positions fit one chunk at K=16, so opening is
+    // atomic here and the "not opened until every chunk lands" rule is
+    // exercised by test_open_deck_is_not_complete_until_every_chunk_lands,
+    // which uses a table big enough to still need two.
     game.open_deck(TABLE_1, 0, chunk_cts(0, TWO_SEAT_POSITIONS), proof());
-    assert(!game.get_deck_opened(TABLE_1), 'not opened until complete');
-    game.open_deck(TABLE_1, 1, chunk_cts(5, TWO_SEAT_POSITIONS), proof());
-    assert(!game.get_deck_opened(TABLE_1), 'not opened until complete');
-    game.open_deck(TABLE_1, 2, chunk_cts(10, TWO_SEAT_POSITIONS), proof());
     assert(game.get_deck_opened(TABLE_1), 'deck not marked opened');
     spy
         .assert_emitted(
@@ -877,7 +930,9 @@ fn test_settle_from_reveals_before_showdown_rejected() {
 #[test]
 #[feature("safe_dispatcher")]
 fn test_open_deck_partial_open_is_unexpressible() {
-    let (game, _v) = setup_shuffled();
+    // On the wide fixture, because a two-seat table now opens atomically and
+    // a griefer needs more than one chunk to leave one half-done.
+    let game = setup_shuffled_wide();
     let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
 
     // A short ciphertext array is rejected outright.
@@ -893,7 +948,7 @@ fn test_open_deck_partial_open_is_unexpressible() {
     // Skipping ahead to the last chunk, so the earlier slots are never
     // opened, is refused too -- chunks are consumed strictly in order.
     start_cheat_caller_address(game.contract_address, MALLORY());
-    let jumped = safe.open_deck(TABLE_1, 1, chunk_cts(5, TWO_SEAT_POSITIONS), proof());
+    let jumped = safe.open_deck(TABLE_1, 1, chunk_cts(DECK_OPEN_K, WIDE_POSITIONS), proof());
     stop_cheat_caller_address(game.contract_address);
     match jumped {
         Result::Ok(_) => panic!("griefer skipped a chunk"),
@@ -902,10 +957,9 @@ fn test_open_deck_partial_open_is_unexpressible() {
 
     // Stopping after the first chunk leaves the deck unopened, and the
     // hand recoverable: anyone can submit the rest.
-    game.open_deck(TABLE_1, 0, chunk_cts(0, TWO_SEAT_POSITIONS), proof());
+    game.open_deck(TABLE_1, 0, chunk_cts(0, WIDE_POSITIONS), proof());
     assert(!game.get_deck_opened(TABLE_1), 'half-open is not open');
-    game.open_deck(TABLE_1, 1, chunk_cts(5, TWO_SEAT_POSITIONS), proof());
-    game.open_deck(TABLE_1, 2, chunk_cts(10, TWO_SEAT_POSITIONS), proof());
+    game.open_deck(TABLE_1, 1, chunk_cts(DECK_OPEN_K, WIDE_POSITIONS), proof());
 
     // The point of this test is that a half-opened deck leaves the hand
     // recoverable, not that a card can be shown early -- so reach the flop
@@ -1235,12 +1289,9 @@ fn test_conviction_forfeits_the_defaulters_stake() {
     game.submit_shuffle(TABLE_1, DECK_0, deck_of(1), proof());
     stop_cheat_caller_address(game.contract_address);
 
-    // 3 seats: 6 hole slots, 5 community, 3 draws. 14 positions, 3 chunks.
-    let mut c: u32 = 0;
-    while c != 3 {
-        game.open_deck(TABLE_1, c, chunk_cts(5 * c, 14), proof());
-        c += 1;
-    }
+    // 3 seats: 6 hole slots, 5 community, 3 draws. 14 positions -- one chunk
+    // at K=16, where it took three at K=5.
+    game.open_deck(TABLE_1, 0, chunk_cts(0, 14), proof());
 
     // BOB stalls on the flop.
     let flop = 2 * 3;

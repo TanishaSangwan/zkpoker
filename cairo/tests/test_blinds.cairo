@@ -62,11 +62,14 @@ fn ct(tag: u128) -> Array<u256> {
     ]
 }
 
-// One K=5 chunk starting at `first`, padded the contract's way.
+// MUST equal DECK_OPEN_K in src/lib.cairo and K in circuits/deck_open.
+const DECK_OPEN_K: u32 = 16;
+
+// One K-sized chunk starting at `first`, padded the contract's way.
 fn chunk_cts(first: u32, k_total: u32) -> Span<u256> {
     let mut out: Array<u256> = array![];
     let mut i: u32 = 0;
-    while i != 5 {
+    while i != DECK_OPEN_K {
         let raw = first + i;
         let p = if raw < k_total {
             raw
@@ -90,10 +93,10 @@ fn draw_pos(max_seats: u32, seat: u32) -> u32 {
 
 fn open_all(game: zkpoker::IPokerGameDispatcher, max_seats: u32) {
     let total = 3 * max_seats + 5;
-    let chunks = (total + 4) / 5;
+    let chunks = (total + DECK_OPEN_K - 1) / DECK_OPEN_K;
     let mut c: u32 = 0;
     while c != chunks {
-        game.open_deck(TABLE_1, c, chunk_cts(5 * c, total), proof());
+        game.open_deck(TABLE_1, c, chunk_cts(DECK_OPEN_K * c, total), proof());
         c += 1;
     }
     assert(game.get_deck_opened(TABLE_1), 'setup: deck not opened');
