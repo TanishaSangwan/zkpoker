@@ -195,7 +195,30 @@ for (;;) {
       } else if (!opened) {
         note('deck not opened (OPEN_DECK=0)');
       } else if (Number(await view.get_table_street(TABLE)) === 4) {
-        note('showdown -- players decide whether to show; settle_from_reveals is permissionless');
+        // Settle once every seat still in the hand has either shown or been
+        // given the chance to. settle_from_reveals takes no input beyond the
+        // table -- every card comes from storage a reveal proof bound, every
+        // payout note from join_table -- so anyone may call it and nobody can
+        // steer it, which is exactly why a keeper is allowed to.
+        //
+        // A seat that declines to show simply does not win; mucking forfeits
+        // rather than blocking, so a hand where somebody stays quiet still
+        // resolves for everyone else.
+        let contenders = 0, shown = 0;
+        for (let seat = 0; seat < maxSeats; seat++) {
+          if (BigInt(await view.get_seat_owner(TABLE, String(seat))) === 0n) continue;
+          if (await view.get_seat_folded(TABLE, String(seat))) continue;
+          contenders += 1;
+          if (await view.get_hole_revealed(TABLE, String(seat), 0)
+              && await view.get_hole_revealed(TABLE, String(seat), 1)) shown += 1;
+        }
+        if (shown === contenders && contenders > 0) {
+          console.log(`  showdown: ${shown}/${contenders} shown -- settling`);
+          console.log(`  settle_from_reveals ok  ${await send('settle_from_reveals', { table_id: TABLE })}`);
+          lastNote = '';
+        } else {
+          note(`showdown: ${shown}/${contenders} hands shown`);
+        }
       } else if (await view.get_round_complete(TABLE)) {
         const from = Number(await view.get_table_street(TABLE));
         console.log(`  round complete on street ${from} -- advancing`);

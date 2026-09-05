@@ -310,6 +310,7 @@ export default function RevealPanel(p: Props) {
   const latest = useRef({ keys, table, identity, openedAt, gatherShares, refresh, send });
   latest.current = { keys, table, identity, openedAt, gatherShares, refresh, send };
   const [autoServe, setAutoServe] = useState(true);
+  const [autoShow, setAutoShow] = useState(true);
   const [autoLog, setAutoLog] = useState<string[]>([]);
   const say = useCallback((m: string) => setAutoLog((l) => [...l.slice(-6), m]), []);
 
@@ -518,6 +519,45 @@ export default function RevealPanel(p: Props) {
     });
   }, [autoServe, deckIsOpen, yourSeat, mySecretHex, table.seats, say]);
 
+  // ── show at showdown, unless told not to ──────────────────────────────
+  //
+  // Two different things happen at showdown and only one of them is a
+  // decision.
+  //
+  // Helping SOMEONE ELSE show is mechanical: their card needs a share from
+  // every party, so a client that sits out is not being cautious, it is
+  // stopping a hand from resolving. The auto-join above already covers that --
+  // it skips only this seat's OWN hole positions.
+  //
+  // Showing YOUR hand is a choice. Mucking is legal, the contract pays only
+  // hands it verified, and there is no obligation to expose a loser. So this
+  // defaults to showing -- which is what almost everyone wants almost always,
+  // and what makes a hand actually finish -- but it is a toggle, not a rule.
+  //
+  // Folded seats are skipped: they have nothing to show and the contract would
+  // reject it.
+  const showing = useRef(false);
+  useEffect(() => {
+    if (!autoShow || yourSeat === null || !mySecretHex) return;
+    if (table.street !== 4 || table.settled) return;
+    const me = table.seats[yourSeat];
+    if (!me || me.folded || showing.current) return;
+    const pending = [0, 1].filter((slot) => !me.holeRevealed[slot]);
+    if (pending.length === 0) return;
+    showing.current = true;
+    void (async () => {
+      for (const slot of pending) {
+        try {
+          await showHoleCard(slot);
+        } catch {
+          // Usually the other seats have not joined the aggregate yet. Left
+          // for the next poll rather than treated as a refusal to show.
+        }
+      }
+      showing.current = false;
+    })();
+  }, [autoShow, yourSeat, mySecretHex, table.street, table.settled, table.seats]);
+
   // ── accusations ────────────────────────────────────────────────────────
   const [accSeat, setAccSeat] = useState('0');
   const [accPos, setAccPos] = useState('0');
@@ -636,6 +676,10 @@ export default function RevealPanel(p: Props) {
 
           {table.street >= 4 || table.settled ? (
             <div className={styles.actionsRow}>
+              <label className={styles.fieldHint} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <input type="checkbox" checked={autoShow} onChange={(e) => setAutoShow(e.target.checked)} />
+                Show my hand automatically at showdown
+              </label>
               {[0, 1].map((slot) =>
                 mySeatState?.holeRevealed[slot] ? null : (
                   <button key={slot} className={uni.btn} disabled={!!busy} onClick={() => showHoleCard(slot)}>
@@ -650,7 +694,9 @@ export default function RevealPanel(p: Props) {
               <span className={styles.fieldHint}>
                 Settling takes no input beyond the table — every card comes from storage a reveal
                 proof bound — so anyone may call it and nobody can steer it. Declining to show
-                forfeits rather than blocks.
+                forfeits rather than blocks: untick the box above to muck. Helping others show is
+                automatic either way, since their card needs a share from every seat and sitting out
+                only stops the hand resolving.
               </span>
             </div>
           ) : null}
