@@ -12,6 +12,11 @@
 //   TABLE_ID=TABLE_1 npm run smoke:local     # leaves a real table behind
 //   npm run dev
 //   npm run check:ui
+//   TABLE=DUEL3 npm run check:ui             # any existing table
+//
+// The table has to exist on the CURRENT deployment. A redeploy gives
+// PokerGame a fresh address and therefore no tables, so a check that hardcoded
+// one reported a UI failure when the only thing wrong was its own fixture.
 //
 // Two things here are not incidental and are the reason this took three tries:
 // a DOM click on an unhydrated React button "succeeds" and runs no handler,
@@ -19,6 +24,8 @@
 // directly is invisible to onChange. Both look exactly like broken UI.
 
 import puppeteer from 'puppeteer-core';
+
+const TABLE = process.env.TABLE ?? 'TABLE_1';
 const b = await puppeteer.launch({ executablePath: '/usr/bin/chromium', headless: 'new',
   args: ['--no-sandbox', '--ignore-certificate-errors'] });
 const p = await b.newPage();
@@ -48,11 +55,11 @@ await p.evaluate(() => {
   const i = document.querySelector('input');
   if (i) {
     const set = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-    set.call(i, 'TABLE_1');
+    set.call(i, TABLE);
     i.dispatchEvent(new Event('input', { bubbles: true }));
   }
   [...document.querySelectorAll('button')].find((x) => x.textContent.trim() === 'Open')?.click();
-});
+}, TABLE);
 await new Promise((r) => setTimeout(r, 9000));
 
 const text = await p.evaluate(() => document.body.innerText);

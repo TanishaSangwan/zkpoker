@@ -101,6 +101,22 @@ export default function PokerPanel() {
 
   const { env, ready: envReady } = useProvingEnvironment();
 
+  // Nothing that depends on client-only state may drive the FIRST render.
+  //
+  // The wallet, the devnet account and the selected network all live in
+  // zustand stores. The server has none of them, so a first render that reads
+  // them disagrees with the server's HTML and React discards the hydration --
+  // which showed up as `disabled={true}` on the client against `null` from the
+  // server on the Open button. It is reported as a warning and it is not
+  // cosmetic: a tree React refuses to patch up can leave handlers attached to
+  // markup that no longer matches.
+  //
+  // So the first paint matches the server exactly, and everything
+  // network-dependent waits one tick. Same reasoning as
+  // useProvingEnvironment, which had the same problem for the same reason.
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => { setMounted(true); }, []);
+
   // The table's own buy-in token, read from the contract rather than assumed.
   // A client has to approve exactly this ERC20 before joining or betting;
   // approving a different one produces a join that reverts inside the token
@@ -125,7 +141,7 @@ export default function PokerPanel() {
           local devnet deployment is live and invisible until you switch, and
           the old banner's advice ("set the Sepolia variable") was actively
           wrong in exactly that case. */}
-      {networksWithDeployment.length > 0 ? (
+      {mounted && networksWithDeployment.length > 0 ? (
         <div className={styles.modeToggle}>
           {networksWithDeployment.map((i) => (
             <button
@@ -139,12 +155,12 @@ export default function PokerPanel() {
         </div>
       ) : null}
 
-      {!deployed ? (
+      {mounted && !deployed ? (
         <div className={styles.banner}>
           <strong>
             PokerGame is not deployed on {constants.NetworkLabels[providerIndex] ?? `provider ${providerIndex}`}.
           </strong>{' '}
-          {networksWithDeployment.length > 0 ? (
+          {mounted && networksWithDeployment.length > 0 ? (
             <>
               It <em>is</em> deployed on{' '}
               {networksWithDeployment.map((i) => constants.NetworkLabels[i] ?? `provider ${i}`).join(', ')} —
@@ -169,7 +185,9 @@ export default function PokerPanel() {
         <div className={styles.sectionHead}>
           <div className={styles.sectionTitle}>Table</div>
           <div className={styles.sectionHint}>
-            {contract === '0x0' ? 'no contract' : shortHex(contract)} · {constants.NetworkLabels[providerIndex] ?? providerIndex}
+            {!mounted
+              ? 'connecting…'
+              : `${contract === '0x0' ? 'no contract' : shortHex(contract)} · ${constants.NetworkLabels[providerIndex] ?? providerIndex}`}
             {' · '}
             {!envReady
               ? 'checking proving environment…'
@@ -182,15 +200,15 @@ export default function PokerPanel() {
         <div className={styles.tableIdRow}>
           <input className={styles.input} value={tableIdInput}
             onChange={(e) => setTableIdInput(e.target.value)} placeholder="table id" />
-          <button className={uni.btn} disabled={!deployed}
+          <button className={uni.btn} disabled={!mounted || !deployed}
             onClick={() => { try { setTableId(toFelt(tableIdInput)); setError(null); } catch (e) { setError(decodeError(e)); } }}>
             Open
           </button>
-          <button className={uni.btn} disabled={!tableId || loading} onClick={() => refresh()}>
+          <button className={uni.btn} disabled={!mounted || !tableId || loading} onClick={() => refresh()}>
             {loading ? 'Refreshing…' : 'Refresh'}
           </button>
         </div>
-        {!persisted ? (
+        {mounted && !persisted ? (
           <div className={styles.caution}>
             This browser could not store your seat key (private mode, or storage is blocked).
             It exists only in this tab: <strong>a reload loses it</strong>, and a lost key means you
