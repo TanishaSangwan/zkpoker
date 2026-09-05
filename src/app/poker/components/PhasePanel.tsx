@@ -249,6 +249,19 @@ export default function PhasePanel(p: Props) {
   // right move for you, so waiting for a click buys nothing. This does it on
   // your turn, on your device, with the witness never leaving the browser.
   const shuffling = useRef(false);
+  // Why the automatic shuffle is not running, when it is your turn and it
+  // is not. Silence was the worst part of every bug this table hit today:
+  // an effect that returns early is indistinguishable from one that never
+  // fired, so "nothing is happening" had to be diagnosed from a relay log
+  // rather than read off the screen.
+  const shuffleBlocker =
+    !myShuffleTurn ? null
+    : !autoShuffle ? 'automatic shuffling is switched off'
+    : !account ? 'no wallet or devnet account is connected'
+    : !provider ? 'no RPC provider'
+    : !identity ? 'no seat key in this browser -- register, or reconnect the account that did'
+    : !table.jointKey ? 'the table has no joint key yet'
+    : null;
   useEffect(() => {
     if (!autoShuffle || !myShuffleTurn || shuffling.current) return;
     if (!account || !provider || !identity || !table.jointKey) return;
@@ -375,6 +388,11 @@ export default function PhasePanel(p: Props) {
               <button className={uni.btn} disabled={!!busy} onClick={doShuffle}>
                 Shuffle &amp; prove
               </button>
+              {shuffleBlocker ? (
+                <span className={styles.fieldHint} style={{ color: '#c0392b' }}>
+                  Not shuffling automatically: {shuffleBlocker}.
+                </span>
+              ) : null}
               <span className={styles.fieldHint}>
                 ~{env.multithreaded ? 5 : 10} s of proving in this tab. There is no decision here —
                 shuffling honestly is always right for you — but it has to happen on your machine,
