@@ -30,9 +30,22 @@ export default function PokerPanel() {
   const account = useStoreWallet((s) => s.account);
   const address = useStoreWallet((s) => s.address);
   const providerIndex = useFrontendProvider((s) => s.currentFrontendProviderIndex);
+  const setProviderIndex = useFrontendProvider((s) => s.setCurrentFrontendProviderIndex);
   const provider = constants.myFrontendProviders[providerIndex];
   const contract = constants.pokerGameAddressForIndex(providerIndex);
   const deployed = !!contract && BigInt(contract) !== 0n;
+
+  // Networks with a non-zero PokerGame address in the env.
+  const networksWithDeployment = useMemo(
+    () =>
+      Object.keys(constants.NetworkLabels)
+        .map(Number)
+        .filter((i) => {
+          const a = constants.pokerGameAddressForIndex(i);
+          try { return !!a && BigInt(a) !== 0n; } catch { return false; }
+        }),
+    [],
+  );
 
   const [tableIdInput, setTableIdInput] = useState('TABLE_1');
   const [tableId, setTableId] = useState<string | null>(null);
@@ -72,11 +85,48 @@ export default function PokerPanel() {
 
   return (
     <div className={styles.wrap}>
+      {/* Which networks actually have a deployment configured. Worth showing
+          rather than leaving implicit: the provider defaults to Sepolia, so a
+          local devnet deployment is live and invisible until you switch, and
+          the old banner's advice ("set the Sepolia variable") was actively
+          wrong in exactly that case. */}
+      {networksWithDeployment.length > 0 ? (
+        <div className={styles.modeToggle}>
+          {networksWithDeployment.map((i) => (
+            <button
+              key={i}
+              className={`${styles.modeBtn} ${i === providerIndex ? styles.modeBtnActive : ''}`}
+              onClick={() => setProviderIndex(i)}
+            >
+              {constants.NetworkLabels[i] ?? `provider ${i}`}
+            </button>
+          ))}
+        </div>
+      ) : null}
+
       {!deployed ? (
         <div className={styles.banner}>
-          <strong>PokerGame is not deployed on {constants.NetworkLabels[providerIndex] ?? `provider ${providerIndex}`}.</strong>{' '}
-          Set <code className={styles.bannerCode}>NEXT_PUBLIC_POKERGAME_{(constants.NetworkLabels[providerIndex] ?? 'DEVNET')}</code>{' '}
-          in <code className={styles.bannerCode}>.env.local</code> and reload. Nothing below will work until then.
+          <strong>
+            PokerGame is not deployed on {constants.NetworkLabels[providerIndex] ?? `provider ${providerIndex}`}.
+          </strong>{' '}
+          {networksWithDeployment.length > 0 ? (
+            <>
+              It <em>is</em> deployed on{' '}
+              {networksWithDeployment.map((i) => constants.NetworkLabels[i] ?? `provider ${i}`).join(', ')} —
+              switch above.
+            </>
+          ) : (
+            <>
+              Set{' '}
+              <code className={styles.bannerCode}>
+                NEXT_PUBLIC_POKERGAME_{constants.NetworkLabels[providerIndex] ?? 'DEVNET'}
+              </code>{' '}
+              in <code className={styles.bannerCode}>.env.local</code> and restart the dev server —
+              Next inlines <code className={styles.bannerCode}>NEXT_PUBLIC_*</code> at build time, so
+              a running server keeps the old value. For a local devnet:{' '}
+              <code className={styles.bannerCode}>npm run deploy:local</code>.
+            </>
+          )}
         </div>
       ) : null}
 

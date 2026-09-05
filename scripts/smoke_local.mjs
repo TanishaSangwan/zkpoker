@@ -78,9 +78,13 @@ async function send(account, entrypoint, args) {
   return transaction_hash;
 }
 
-// A fresh id per run: devnet keeps state between runs, and create_table
-// refuses to reuse one.
-const TABLE = '0x' + Buffer.from(`SM${Date.now() % 100000}`).toString('hex');
+// A fresh id per run by default: devnet keeps state between runs and
+// create_table refuses to reuse one. TABLE_ID overrides it, which is how a
+// named table gets left behind for the UI to open.
+const TABLE = process.env.TABLE_ID
+  ? '0x' + Buffer.from(process.env.TABLE_ID).toString('hex')
+  : '0x' + Buffer.from(`SM${Date.now() % 100000}`).toString('hex');
+console.log(`table id: ${TABLE}${process.env.TABLE_ID ? ` (${process.env.TABLE_ID})` : ''}`);
 const SEATS = 2;
 const hex = (v) => '0x' + v.toString(16);
 const u256 = (v) => { const [low, high] = felt.u256Parts(v); return { low, high }; };
