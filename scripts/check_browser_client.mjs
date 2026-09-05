@@ -50,9 +50,11 @@ else ok('COOP: same-origin');
 if (coep !== 'require-corp') fail(`Cross-Origin-Embedder-Policy is ${coep}, expected require-corp`);
 else ok('COEP: require-corp');
 
-const circuit = await fetch(`${base}/circuits/shuffle.json`);
-if (!circuit.ok) fail(`/circuits/shuffle.json -> ${circuit.status}; run scripts/build_client_circuits.mjs`);
-else ok('/circuits/shuffle.json is served');
+for (const name of ['shuffle.json', 'deck_open.json']) {
+  const r = await fetch(`${base}/circuits/${name}`);
+  if (!r.ok) fail(`/circuits/${name} -> ${r.status}; run scripts/build_client_circuits.mjs`);
+  else ok(`/circuits/${name} is served`);
+}
 
 const browser = await puppeteer.launch({
   executablePath: CHROME,
@@ -117,6 +119,9 @@ if (!result || !result.ok) {
   ok(`shuffle proved in-app: witness ${result.witnessMs} ms, proof ${result.proveMs} ms, ` +
      `calldata ${result.calldataMs} ms (total ${result.totalMs} ms on ${result.threads} threads)`);
   ok(`${result.calldataFelts} felts of Starknet calldata, new commitment ${result.commitmentOut}`);
+  if (!result.openMs) fail('the deck opening did not run');
+  else ok(`deck opened in-app: ${result.openMs} ms, ${result.openCalldataFelts} felts, ` +
+          `positions ${result.openPositions}`);
 }
 
 await browser.close();

@@ -19,6 +19,7 @@ import { deckToU256, proveShuffle } from '@/lib/shuffle';
 import { useProvingEnvironment } from '../useProvingEnvironment';
 import { INITIAL_DECK_COMMITMENT, initialDeck, type Ciphertext } from '@/lib/deck';
 import { findDeckPublishedTx, readPublishedDeck } from '@/lib/publishedDeck';
+import { chunkCount, openDeckArgs, proveOpenChunk } from '@/lib/deckOpen';
 import { cardToName } from '@/lib/grumpkin';
 
 export type Busy = { label: string; detail?: string } | null;
@@ -162,6 +163,48 @@ export default function PhasePanel(p: Props) {
         proof: result.calldata.map((v) => '0x' + v.toString(16)),
       });
       return `${txt}\nwitness ${result.timings.witnessMs} ms · proof ${result.timings.proveMs} ms · calldata ${result.timings.calldataMs} ms`;
+    });
+
+  // ── open the deck ──────────────────────────────────────────────────────
+  //
+  // One opening per hand, not one per reveal. Opening reveals nothing -- the
+  // ciphertexts are already public in the published deck and the card values
+  // come only from DLEQ decryption later -- so every in-play position is
+  // opened once, straight after the chain, and revealed progressively
+  // afterwards (PROTOCOL.md §7.3). It matters because an opening proof costs
+  // 772M gas, barely under a shuffle's 811M.
+  //
+  // Needs no secret, only the final deck, so any party can carry it.
+  const chunks = table.maxSeats ? chunkCount(table.maxSeats) : 0;
+
+  const openChunk = () =>
+    run('Opening the deck', async () => {
+      let deck = p.deck;
+      if (!deck) {
+        setBusy({ label: 'Opening the deck', detail: 'reading the final deck from chain' });
+        const txHash = await findDeckPublishedTx({ provider: provider!, contract, tableId: table.tableId });
+        deck = txHash
+          ? await readPublishedDeck({ provider: provider!, txHash, expectedHash: table.publishedDeckHash })
+          : null;
+        if (deck) p.setDeck(deck);
+      }
+      if (!deck) throw new Error('Could not read the final deck from chain.');
+
+      const chunk = table.deckOpenChunk;
+      setBusy({ label: 'Opening the deck', detail: `proving chunk ${chunk + 1} of ${chunks}` });
+      const result = await proveOpenChunk({
+        deck,
+        deckHash: table.commitment,
+        maxSeats: table.maxSeats,
+        chunk,
+        onProgress: (stage) => setBusy({ label: `Opening chunk ${chunk + 1}/${chunks}`, detail: stage }),
+      });
+      const args = openDeckArgs(table.tableId, result);
+      const txt = await send('open_deck', {
+        ...args,
+        proof: (args.proof as string[]),
+      });
+      return `${txt}\npositions ${result.positions.join(', ')} · proof ${result.timings.proveMs} ms`;
     });
 
   // ── betting ────────────────────────────────────────────────────────────
@@ -364,13 +407,25 @@ export default function PhasePanel(p: Props) {
       ) : null}
 
       {table.phase === 'opening' ? (
-        <div className={styles.caution}>
-          The shuffle chain is complete. Opening the deck needs a{' '}
-          <code>circuits/deck_open</code> proof, and the browser build of that circuit is not staged
-          yet — <code>scripts/build_client_circuits.mjs</code> only stages the shuffle circuit,
-          because the deck-open circuit has no nargo 1.0.0-beta.16 build checked in. Compile it with
-          beta.16 and re-run that script to enable this step.
-        </div>
+        <>
+          <div className={styles.stateGrid}>
+            <Item label="chunks done" value={`${table.deckOpenChunk} / ${chunks}`} />
+            <Item label="positions" value={`${2 * table.maxSeats} hole + 5 community`} />
+            <Item label="chain head" value={`0x${table.commitment.toString(16).slice(0, 10)}…`} />
+          </div>
+          <div className={styles.actionsRow}>
+            <button className={uni.btn} disabled={!!busy} onClick={openChunk}>
+              Open chunk {table.deckOpenChunk + 1} of {chunks}
+            </button>
+            <span className={styles.fieldHint}>
+              Binds the in-play ciphertexts to the deck the chain committed to. The contract cannot
+              check that itself — the commitment is a Poseidon2 hash over BN254 and Cairo&apos;s
+              Poseidon is over the STARK field — so this proof is what stops a fabricated deck.
+              Needs no secret, so anyone at the table can do it. The circuit opens 5 slots at a
+              time, and the last chunk repeats the final position to fill up.
+            </span>
+          </div>
+        </>
       ) : null}
 
       {busy ? (

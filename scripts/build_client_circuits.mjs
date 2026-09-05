@@ -15,6 +15,7 @@
 //
 //   noirup --version 1.0.0-beta.16
 //   nargo compile --program-dir circuits/shuffle_verifier/example_proof/beta16_build
+//   nargo compile --program-dir circuits/deck_open_verifier/example_proof/beta16_build
 //   noirup --version 1.0.0-beta.22
 import { cpSync, mkdirSync, existsSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -24,11 +25,15 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const R = (...p) => join(root, ...p);
 
 const OUT = R('public/circuits');
-const BETA16 = R('circuits/shuffle_verifier/example_proof/beta16_build/target/shuffle.json');
+const CIRCUITS = [
+  ['shuffle.json', R('circuits/shuffle_verifier/example_proof/beta16_build/target/shuffle.json')],
+  ['deck_open.json', R('circuits/deck_open_verifier/example_proof/beta16_build/target/deck_open.json')],
+];
 
-if (!existsSync(BETA16)) {
-  console.error(`missing ${BETA16}`);
-  console.error('Compile it with nargo 1.0.0-beta.16 -- see the header of this file.');
+for (const [name, path] of CIRCUITS) {
+  if (existsSync(path)) continue;
+  console.error(`missing ${path}`);
+  console.error(`Compile ${name} with nargo 1.0.0-beta.16 -- see the header of this file.`);
   process.exit(1);
 }
 
@@ -41,7 +46,7 @@ const copy = (from, to) => {
 };
 
 console.log('staging browser proving artifacts:');
-copy(BETA16, join(OUT, 'shuffle.json'));
+for (const [name, path] of CIRCUITS) copy(path, join(OUT, name));
 
 // bb's wasm ships only in the node dest; the browser dest expects it served.
 // src/lib/shuffle.ts points `wasmPath` here, and bb appends "-threads" itself

@@ -1086,10 +1086,23 @@ harness-only and changes nothing the app ships.
   delivery cannot be withheld, and `dispute_deck` ends a hand built on an
   unusable deck without robbing anyone.
 
-  Not wired up: deck opening (`src/lib/deckOpen.ts` exists and mirrors the
-  contract's chunking and padding, but `circuits/deck_open` has no beta.16
-  build staged), and the reveal/showdown and accusation flows, which need the
-  opening first.
+  **Deck opening is wired up too (2026-09-05).** `circuits/deck_open` now has
+  a beta.16 build, and the VK it produces is **byte-identical** to the one the
+  deployed deck-open verifier was generated from, so the browser proves against
+  the contract actually on chain. `src/lib/deckOpen.ts` mirrors the contract's
+  chunking and its padding rule (a short final chunk repeats the last in-play
+  position), and the table opens one chunk per click.
+
+  Verified against the real verifier rather than a mock: the checked-in fixture
+  is an opening of the deck **the shuffle circuit actually produced** — its
+  `deck_hash` is the `hash_out` of the a_0 shuffle proof — which is what
+  exercises the join between the two circuits. Three tests pass at 257.3M L2
+  gas: the proof is accepted, the 26 public inputs come back in exactly the
+  order `open_deck` rebuilds them (`deck_hash`, 5 positions, 20 coordinates —
+  round 8's finding I was precisely this going wrong while a mock hid it), and
+  a corrupted proof is rejected. `scripts/prove_deck_open.mjs` regenerates it.
+
+  Not wired up: the reveal/showdown and accusation flows.
 - ~~Bet-matching and turn-order enforcement~~ — **done.** `bet`/`fold`/`check`
   are turn-ordered; a street cannot end until every seat still in the hand has
   acted since the last raise and matched the high; a raise reopens the action.

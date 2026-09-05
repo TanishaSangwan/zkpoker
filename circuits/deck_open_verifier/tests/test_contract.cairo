@@ -89,3 +89,74 @@ fn test_verify_ultra_keccak_zk_honk_proof() {
 // assert(public_inputs.len() > 0, 'No public inputs');
 // Additional assertions on the public input values can be added here
 }
+
+// ── Added by this project (not Garaga) ──────────────────────────────────
+//
+// The fixture is an opening of the deck the SHUFFLE circuit actually
+// produced: its deck_hash is the hash_out of the a_0 shuffle proof checked in
+// at circuits/shuffle_verifier/example_proof/. Proving the two circuits join
+// up is the point -- a layout or encoding skew between them would otherwise
+// only show up as an unopenable deck on a live table. Regenerate with
+// scripts/prove_deck_open.mjs.
+
+// The public inputs, in the exact order PokerGame::open_deck rebuilds them:
+// deck_hash, then K positions, then 4K ciphertext coordinates. Round 8's
+// finding I was precisely this going wrong -- the deck could not be opened at
+// all against the real verifier while a mock hid it -- so it is pinned here
+// against the deployed contract rather than assumed.
+#[test]
+fn test_public_inputs_are_hash_then_positions_then_cards() {
+    let class_hash = declare_contract("UltraKeccakZKHonkVerifier");
+    let dispatcher = IUltraKeccakZKHonkVerifierLibraryDispatcher { class_hash };
+    let file = FileTrait::new("tests/proof_calldata.txt");
+    let calldata = read_txt(@file).span();
+
+    let public_inputs = dispatcher.verify_ultra_keccak_zk_honk_proof(calldata).unwrap();
+
+    // 1 deck_hash + 5 positions + 20 card coordinates. The adapter compares
+    // these against 52 felts of low/high pairs, so this length is what makes
+    // `expected.len() == actual.len() * 2` hold on the other side.
+    assert(public_inputs.len() == 26, 'expected 26 public inputs');
+
+    // deck_hash is the shuffle chain's hash_out for the a_0 shuffle.
+    let deck_hash = *public_inputs.at(0);
+    assert(deck_hash.low == 0x278a7a93481827387028a145d9d06fb2, 'deck_hash.low');
+    assert(deck_hash.high == 0xae3743d9d68c4badd62e5685ceaed13, 'deck_hash.high');
+
+    // Chunk 0 of the canonical order. open_deck derives these itself and does
+    // not take them from the caller, so a proof naming any other positions is
+    // rejected by the adapter's comparison rather than silently accepted.
+    let mut i: u32 = 0;
+    while i != 5 {
+        let pos = *public_inputs.at(1 + i);
+        assert(pos.high == 0, 'position fits a u128');
+        assert(pos.low == i.into(), 'positions are 0..4');
+        i += 1;
+    }
+}
+
+// Rejection is a PANIC, not an Err -- same as the shuffle verifier, and for
+// the same reason: Garaga's MSM hints are derived from the proof, so
+// corrupting it desynchronises them before any pairing check runs. Safe at
+// every PokerGame call site, all of which assert on the result.
+#[test]
+#[should_panic(expected: ('Wrong GLV/FakeGLV decomposition', 'ENTRYPOINT_FAILED'))]
+fn test_rejects_a_corrupted_proof() {
+    let class_hash = declare_contract("UltraKeccakZKHonkVerifier");
+    let dispatcher = IUltraKeccakZKHonkVerifierLibraryDispatcher { class_hash };
+    let file = FileTrait::new("tests/proof_calldata.txt");
+    let calldata = read_txt(@file);
+
+    let mut corrupted: Array<felt252> = array![];
+    let mut i = 0;
+    while i < calldata.len() {
+        if i == 12 {
+            corrupted.append(*calldata.at(i) + 1);
+        } else {
+            corrupted.append(*calldata.at(i));
+        }
+        i += 1;
+    }
+
+    dispatcher.verify_ultra_keccak_zk_honk_proof(corrupted.span());
+}

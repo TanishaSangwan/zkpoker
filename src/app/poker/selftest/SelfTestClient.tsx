@@ -20,6 +20,7 @@ import { INITIAL_DECK_COMMITMENT, commitment, initialDeck } from '@/lib/deck';
 import { proveShuffle, provingEnvironment } from '@/lib/shuffle';
 import { useProvingEnvironment } from '../useProvingEnvironment';
 import { jointKey, normaliseEvenY } from '@/lib/schnorr';
+import { proveOpenChunk } from '@/lib/deckOpen';
 
 type Result = {
   ok: boolean;
@@ -32,6 +33,9 @@ type Result = {
   totalMs?: number;
   calldataFelts?: number;
   commitmentOut?: string;
+  openMs?: number;
+  openCalldataFelts?: number;
+  openPositions?: string;
   error?: string;
 };
 
@@ -65,8 +69,26 @@ export default function SelfTestClient() {
         deckIn: a0, jointKey: Y, commitmentIn: INITIAL_DECK_COMMITMENT,
         onProgress: setStage,
       });
+      // Then open the deck that shuffle just produced -- the real sequence, and
+      // the join between the two circuits. An opening proof binds ciphertexts
+      // to the committed deck; without it, whoever posts the deck could
+      // fabricate one outright (PROTOCOL.md §7).
+      setStage('opening the deck');
+      const t1 = performance.now();
+      const opened = await proveOpenChunk({
+        deck: r.deckOut,
+        deckHash: r.commitmentOut,
+        maxSeats: 2,
+        chunk: 0,
+        onProgress: (st) => setStage(`opening: ${st}`),
+      });
+      const openMs = Math.round(performance.now() - t1);
+
       setResult({
         ok: a0Matches,
+        openMs,
+        openCalldataFelts: opened.calldata.length,
+        openPositions: opened.positions.join(', '),
         crossOriginIsolated: env.crossOriginIsolated,
         threads: env.threads,
         a0Matches,
@@ -142,6 +164,8 @@ export default function SelfTestClient() {
                 <Row label="Starknet calldata" value={`${result.calldataMs} ms · ${result.calldataFelts} felts`} />
                 <Row label="total" value={`${result.totalMs} ms on ${result.threads} thread${result.threads === 1 ? '' : 's'}`} />
                 <Row label="new commitment" value={result.commitmentOut ?? ''} />
+                <Row label="deck opening" value={`${result.openMs} ms · ${result.openCalldataFelts} felts`} />
+                <Row label="opened positions" value={result.openPositions ?? ''} />
               </div>
             )}
           </div>
