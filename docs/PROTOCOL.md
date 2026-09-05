@@ -722,6 +722,42 @@ would produce a proof the on-chain verifier rejects (§ the `public_inputs_offse
 incompatibility in `circuits/shuffle_verifier/README.md`), so measuring it would
 have measured nothing.
 
+---
+
+### 9.1 Why the chain is NOT capped at `k < n` — rejected
+
+Capping the chain looks like free money: "unbiased as long as ≥1 shuffler is
+honest" does not obviously require all `n`, and `k=3` would cut ~2.4B L2 gas
+and ~17 s of proving. It was implemented and then **reverted**, because the
+premise is wrong.
+
+If every seat in the chain colludes, they know the composed permutation
+`π₁∘…∘π_k`. `a_0` is canonical and public, so knowing the composition tells
+them exactly which card sits at every position of the final deck — and seat
+`i`'s hole cards are always at positions `2i` and `2i+1`. **They read the
+entire table without decrypting anything.** The joint key does not help here;
+no decryption is involved.
+
+So a player outside the chain gets **no protection from it at all**. "Cap at
+`k=3`" means seats 3…n−1 are trusting seats 0…2 — structurally the same
+trusted-dealer arrangement this protocol exists to remove, just with a
+different set of trustees.
+
+A voluntary opt-in variant was also built and reverted. It is sound for anyone
+who opts in — your own permutation stays secret, so you are protected no matter
+who else cheats — but opting *out* still means trusting, and a player saving
+gas without understanding they have surrendered the guarantee is a footgun in a
+game with money on the table. Given the choice between a cheaper hand and a
+hand nobody has to trust anyone for, this project takes the second.
+
+**Every player shuffles. `k = n`. The cost stands.**
+
+Also unverified: the 5.67 s was measured with the WASM backend *server-side*.
+**Browser proving has never been tested.** Same WASM, so it should be comparable —
+but "should be" is not "measured," and the entire client-side story rests on it.
+
+---
+
 ### 9.2 The identity-point defect — found and FIXED, 2026-09-05
 
 Building the browser client turned up a defect that stopped the first shuffle
@@ -826,6 +862,94 @@ state written. The difference is diagnostic only. Anything that ever wants to
 
 ---
 
+### 9.3 Deck delivery — found and FIXED, 2026-09-05
+
+`submit_shuffle` used to publish a commitment and a proof, and nothing else.
+Decks travelled player-to-player off-chain, so each shuffler had to *choose* to
+deliver.
+
+**The inversion.** `claim_shuffle_timeout` convicts
+`shuffle_order[shuffle_turn]` — the seat whose turn it is. But the seat able to
+stall the chain is the **previous** one: post your commitment, satisfying your
+own deadline, then never send the deck. The next seat has nothing to shuffle
+and cannot invent one (it would need a preimage of the stored commitment). When
+its clock runs out, **it** is convicted and **its** stake is forfeited. The
+griefer paid nothing and the victim paid everything — the exact inversion the
+forfeit exists to prevent (§8.1).
+
+**The fix: publish the deck as calldata.** `submit_shuffle(table_id,
+new_commitment, deck, proof)` now takes all 208 `u256` and asserts the length.
+Delivery is part of the transaction that advances the turn, so it can no longer
+be withheld separately from it. There is nothing left to not-send.
+
+Publishing is safe, and this is worth being explicit about because it looks
+alarming. The deck is private to the **circuit** — only its Poseidon2
+commitment is a public input, which is what keeps the verifier under Garaga's
+99-input cap (§7.1) — but the ciphertexts are not secret. Re-randomisation is
+*precisely* what makes the output reveal nothing about the permutation, and
+reading a card still needs every party's decryption share. §5 already budgeted
+the deck as calldata.
+
+The contract also stores `poseidon_hash_span` of what was published — **Starknet's**
+Poseidon over the calldata, which it computes itself. That is not, and cannot
+be, the BN254 commitment (§7). It is a handle: a client can confirm it read the
+bytes the transaction actually carried instead of trusting an RPC's event
+index. `get_published_deck_hash` / `get_published_deck_seat` expose it, and a
+small `DeckPublished` event carries the hash so the transaction can be located.
+The deck itself is deliberately *not* re-emitted — 416 felts twice would double
+the data cost for nothing, since anyone holding the transaction can check it
+against the stored hash.
+
+**Cost, measured.** Same test (`test_full_shuffle_chain_completes`, a two-link
+chain) before and after:
+
+| | before | after |
+|---|---:|---:|
+| L2 gas | 27,020,980 | **34,033,238** |
+| L1 data gas | 3,840 | 4,032 |
+
+**≈3.5M L2 gas per `submit_shuffle`** — the Poseidon over 416 felts, two
+storage writes and the event. Against the 811.9M a shuffle proof costs to
+verify, that is **0.43%**.
+
+---
+
+### 9.3.1 What is still not adjudicable, and what happens instead
+
+Publishing kills silent withholding. It does not let the contract check that
+the published deck *opens the commitment it is chained to*: that means
+recomputing a BN254 Poseidon2 hash in Cairo, which is the whole of §7. It was
+worth confirming there is no cheap way around it, and there is not — a linear
+fingerprint the contract could recompute with Garaga's field ops is forgeable,
+because one linear equation in 208 unknowns is trivially solvable, and a
+full-deck opening proof would need 261 public inputs against a cap of 99 (or 11
+chunked proofs at ~772M each, more than an entire hand).
+
+So a shuffler can still publish a deck that does not match, and the chain dies.
+`dispute_deck(table_id)` is the answer:
+
+- callable **only** by the seat whose turn it is — a bystander who could end
+  the hand would be a cheaper griefing tool than stalling;
+- **only** once the chain has a real publisher, since position 0 consumes the
+  pinned canonical `a_0` that nobody publishes;
+- **only** before that seat's own deadline, so a seat that already let its
+  clock expire cannot dispute its way out of the forfeit it has earned.
+
+It voids the hand and **forfeits nobody**. That is deliberate. Rather than
+convict on a coin-flip it cannot resolve, the contract ends the hand and every
+seat reclaims exactly what it put in.
+
+**Why no-forfeit is safe here specifically.** The shuffle chain runs *before
+any betting*: every seat has contributed exactly its buy-in, no card, share or
+bet exists, and no information has been revealed. Voiding returns everyone to
+where they started. A frivolous dispute is therefore a denial-of-service that
+costs its caller gas and gains it nothing — and it is strictly better than the
+alternative it replaces, which was forfeiting the stake of a player who
+provably could not act. The same reasoning would **not** hold after betting
+opens, which is why `dispute_deck` is confined to the shuffle phase.
+
+---
+
 ### 9.4 The SRS is a third-party runtime dependency
 
 Worth stating because it is invisible until it fails: bb.js does not ship the
@@ -852,77 +976,6 @@ Three consequences a deployment should know about:
 this fetch alone, because headless Chromium in the dev sandbox does not trust
 that host's CA even though `curl` on the same machine does. That flag is
 harness-only and changes nothing the app ships.
-
----
-
-### 9.3 The deck is delivered off-chain, and the timeout blames the wrong seat
-
-`submit_shuffle(table_id, new_commitment, proof)` publishes a commitment and a
-proof. It does **not** publish the deck — decks are private, with only
-Poseidon2 commitments public (§7.2), which is what keeps the verifier at four
-public inputs. So each shuffler must send the deck itself to the next one
-off-chain.
-
-`claim_shuffle_timeout` convicts `shuffle_order[shuffle_turn]` — the seat whose
-turn it is. But the seat that can stall the chain is the **previous** one: it
-posts its commitment on-chain, satisfying its own deadline, then never sends
-the deck. The next player cannot shuffle, because they have nothing to shuffle
-and could not satisfy the chain-head check if they invented one. When their
-deadline expires, **they** are convicted and **their** stake is forfeited.
-
-So the griefer pays nothing and their victim pays everything — the exact
-inversion the forfeit was added to prevent (§8.1).
-
-Not fixed here; it needs a protocol decision, and there are at least three
-shapes:
-
-- **Publish the deck as calldata** on `submit_shuffle`. 416 felts, not stored,
-  and Starknet settles only state diffs — the same argument that already makes
-  §5's calldata affordable. Delivery becomes unforgeable and the timeout
-  becomes correct, at a real but bounded calldata cost.
-- **A delivery receipt**: the next player acknowledges on-chain, and the clock
-  only starts once they have. Cheap, but adds a round trip per link and a new
-  way to stall.
-- **Make the accusation path cover it**, as it covers withheld shares: let the
-  stalled player name their predecessor rather than being convicted by default.
-
-The client sends decks over the same encrypted transport as shares and shows
-"waiting for the deck from seat N", which makes the stall visible — but visible
-is not the same as attributable, and only the chain can attribute it.
-
----
-
-### 9.1 Why the chain is NOT capped at `k < n` — rejected
-
-Capping the chain looks like free money: "unbiased as long as ≥1 shuffler is
-honest" does not obviously require all `n`, and `k=3` would cut ~2.4B L2 gas
-and ~17 s of proving. It was implemented and then **reverted**, because the
-premise is wrong.
-
-If every seat in the chain colludes, they know the composed permutation
-`π₁∘…∘π_k`. `a_0` is canonical and public, so knowing the composition tells
-them exactly which card sits at every position of the final deck — and seat
-`i`'s hole cards are always at positions `2i` and `2i+1`. **They read the
-entire table without decrypting anything.** The joint key does not help here;
-no decryption is involved.
-
-So a player outside the chain gets **no protection from it at all**. "Cap at
-`k=3`" means seats 3…n−1 are trusting seats 0…2 — structurally the same
-trusted-dealer arrangement this protocol exists to remove, just with a
-different set of trustees.
-
-A voluntary opt-in variant was also built and reverted. It is sound for anyone
-who opts in — your own permutation stays secret, so you are protected no matter
-who else cheats — but opting *out* still means trusting, and a player saving
-gas without understanding they have surrendered the guarantee is a footgun in a
-game with money on the table. Given the choice between a cheaper hand and a
-hand nobody has to trust anyone for, this project takes the second.
-
-**Every player shuffles. `k = n`. The cost stands.**
-
-Also unverified: the 5.67 s was measured with the WASM backend *server-side*.
-**Browser proving has never been tested.** Same WASM, so it should be comparable —
-but "should be" is not "measured," and the entire client-side story rests on it.
 
 ---
 
@@ -1024,12 +1077,14 @@ but "should be" is not "measured," and the entire client-side story rests on it.
   `scripts/check_browser_client.mjs` drives the production build headlessly and
   confirms COOP/COEP, cross-origin isolation and 6-thread proving.
 
-  Building it also surfaced two defects nothing else could have: §9.2's
-  identity-point bug, which stopped the first shuffle of every chain under the
-  deployed verifier's own toolchain — **now fixed**, with the verifier
-  regenerated and a real first-link proof checked in as its test fixture — and
-  §9.3's deck-delivery griefing gap, which is still open and needs a protocol
-  decision rather than a client change.
+  Building it also surfaced two defects nothing else could have, **both now
+  fixed**: §9.2's identity-point bug, which stopped the first shuffle of every
+  chain under the deployed verifier's own toolchain (verifier regenerated, with
+  a real first-link proof checked in as its test fixture), and §9.3's
+  deck-delivery inversion, where withholding a deck off-chain got the *next*
+  seat convicted and forfeited. The deck is now published as calldata, so
+  delivery cannot be withheld, and `dispute_deck` ends a hand built on an
+  unusable deck without robbing anyone.
 
   Not wired up: deck opening (`src/lib/deckOpen.ts` exists and mirrors the
   contract's chunking and padding, but `circuits/deck_open` has no beta.16

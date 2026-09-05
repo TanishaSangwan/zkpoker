@@ -429,8 +429,24 @@ export const pokerGameAbi = [
             "type": "core::integer::u256"
           },
           {
+            "name": "deck",
+            "type": "core::array::Span::<core::integer::u256>"
+          },
+          {
             "name": "proof",
             "type": "core::array::Span::<core::felt252>"
+          }
+        ],
+        "outputs": [],
+        "state_mutability": "external"
+      },
+      {
+        "type": "function",
+        "name": "dispute_deck",
+        "inputs": [
+          {
+            "name": "table_id",
+            "type": "core::felt252"
           }
         ],
         "outputs": [],
@@ -1087,6 +1103,38 @@ export const pokerGameAbi = [
         "outputs": [
           {
             "type": "core::bool"
+          }
+        ],
+        "state_mutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "get_published_deck_hash",
+        "inputs": [
+          {
+            "name": "table_id",
+            "type": "core::felt252"
+          }
+        ],
+        "outputs": [
+          {
+            "type": "core::felt252"
+          }
+        ],
+        "state_mutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "get_published_deck_seat",
+        "inputs": [
+          {
+            "name": "table_id",
+            "type": "core::felt252"
+          }
+        ],
+        "outputs": [
+          {
+            "type": "core::felt252"
           }
         ],
         "state_mutability": "view"
@@ -1789,6 +1837,60 @@ export const pokerGameAbi = [
   },
   {
     "type": "event",
+    "name": "zkpoker::PokerGame::DeckPublished",
+    "kind": "struct",
+    "members": [
+      {
+        "name": "table_id",
+        "type": "core::felt252",
+        "kind": "key"
+      },
+      {
+        "name": "position",
+        "type": "core::integer::u32",
+        "kind": "data"
+      },
+      {
+        "name": "seat",
+        "type": "core::felt252",
+        "kind": "data"
+      },
+      {
+        "name": "deck_hash",
+        "type": "core::felt252",
+        "kind": "data"
+      }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "zkpoker::PokerGame::DeckDisputed",
+    "kind": "struct",
+    "members": [
+      {
+        "name": "table_id",
+        "type": "core::felt252",
+        "kind": "key"
+      },
+      {
+        "name": "disputing_seat",
+        "type": "core::felt252",
+        "kind": "data"
+      },
+      {
+        "name": "publisher_seat",
+        "type": "core::felt252",
+        "kind": "data"
+      },
+      {
+        "name": "published_deck_hash",
+        "type": "core::felt252",
+        "kind": "data"
+      }
+    ]
+  },
+  {
+    "type": "event",
     "name": "zkpoker::PokerGame::ShuffleComplete",
     "kind": "struct",
     "members": [
@@ -2139,6 +2241,16 @@ export const pokerGameAbi = [
       {
         "name": "Shuffled",
         "type": "zkpoker::PokerGame::Shuffled",
+        "kind": "nested"
+      },
+      {
+        "name": "DeckPublished",
+        "type": "zkpoker::PokerGame::DeckPublished",
+        "kind": "nested"
+      },
+      {
+        "name": "DeckDisputed",
+        "type": "zkpoker::PokerGame::DeckDisputed",
         "kind": "nested"
       },
       {

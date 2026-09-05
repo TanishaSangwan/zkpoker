@@ -50,6 +50,10 @@ export type TableState = {
   deckOpened: boolean;
   deckOpenChunk: number;
 
+  /** Starknet-Poseidon of the deck the chain head published; 0 if none yet. */
+  publishedDeckHash: bigint;
+  publishedDeckSeat: number;
+
   actionTurn: number;
   actionDeadline: number;
   roundComplete: boolean;
@@ -107,9 +111,11 @@ export function useTableState(args: {
           c.get_shuffle_commitment(tableId), c.get_joint_pk(tableId),
         ]);
 
-      const [deckOpened, deckOpenChunk, actionTurn, actionDeadline, roundComplete] = await Promise.all([
+      const [deckOpened, deckOpenChunk, actionTurn, actionDeadline, roundComplete,
+             publishedDeckHash, publishedDeckSeat] = await Promise.all([
         c.get_deck_opened(tableId), c.get_deck_open_chunk(tableId), c.get_action_turn(tableId),
         c.get_action_deadline(tableId), c.get_round_complete(tableId),
+        c.get_published_deck_hash(tableId), c.get_published_deck_seat(tableId),
       ]);
 
       const n = num(maxSeats);
@@ -169,6 +175,8 @@ export function useTableState(args: {
         shuffleTurn: num(shuffleTurn), shuffleOrder, shuffleDeadline: num(shuffleDeadline),
         commitment: readU256(commitment), jointKey: pointOrNull(jointRaw),
         deckOpened: !!deckOpened, deckOpenChunk: num(deckOpenChunk),
+        publishedDeckHash: BigInt(publishedDeckHash ?? 0),
+        publishedDeckSeat: Number(publishedDeckSeat ?? 0),
         actionTurn: Number(actionTurn ?? 0), actionDeadline: num(actionDeadline),
         roundComplete: !!roundComplete,
         seats, community, seated,
@@ -220,7 +228,8 @@ function emptyTable(tableId: string): TableState {
     tableId, exists: false, dealer: ZERO, maxSeats: 0, pot: 0n, street: 0,
     settled: false, voided: false, shuffleStarted: false, shuffleComplete: false,
     shuffleTurn: 0, shuffleOrder: [], shuffleDeadline: 0, commitment: 0n, jointKey: null,
-    deckOpened: false, deckOpenChunk: 0, actionTurn: 0, actionDeadline: 0,
+    deckOpened: false, deckOpenChunk: 0, publishedDeckHash: 0n, publishedDeckSeat: 0,
+    actionTurn: 0, actionDeadline: 0,
     roundComplete: false, seats: [], community: [], seated: [], phase: 'no-table',
   };
 }

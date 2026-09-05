@@ -21,7 +21,7 @@
 // public/circuits/ is the beta.16 one.
 
 import type { Point } from './grumpkin';
-import { Ciphertext, commitment, shuffle as shuffleDeck, shuffleCircuitInputs } from './deck';
+import { Ciphertext, commitment, deckToFields, shuffle as shuffleDeck, shuffleCircuitInputs } from './deck';
 import { u256Parts } from './felt';
 
 /** Where the beta.16 artifacts are served from. See scripts/build_client_circuits.mjs. */
@@ -230,13 +230,29 @@ function assertPublicInputs(
 }
 
 /**
- * Arguments for `submit_shuffle(table_id, new_commitment, proof)`.
+ * Arguments for `submit_shuffle(table_id, new_commitment, deck, proof)`.
  *
- * new_commitment is a u256, so it crosses as low/high; starknet.js's CallData
- * compiler does that from the ABI, but the split is spelled out here because
- * getting it backwards is silent.
+ * The deck goes on-chain as calldata. That is not incidental: it is what stops
+ * a shuffler advancing its own turn while withholding the deck the next seat
+ * needs, which used to get the NEXT seat convicted and forfeited
+ * (docs/PROTOCOL.md §9.3). Publishing it is safe -- re-randomisation is
+ * exactly what makes the output ciphertexts reveal nothing about the
+ * permutation, and reading a card still needs every party's decryption share.
  */
 export function submitShuffleArgs(tableId: string, result: ShuffleResult) {
   const [low, high] = u256Parts(result.commitmentOut);
-  return { table_id: tableId, new_commitment: { low, high }, proof: result.calldata };
+  return {
+    table_id: tableId,
+    new_commitment: { low, high },
+    deck: deckToU256(result.deckOut),
+    proof: result.calldata,
+  };
+}
+
+/** The 208 u256 the contract expects: four per card, (c1.x, c1.y, c2.x, c2.y). */
+export function deckToU256(deck: Ciphertext[]): { low: bigint; high: bigint }[] {
+  return deckToFields(deck).map((f) => {
+    const [low, high] = u256Parts(f);
+    return { low, high };
+  });
 }

@@ -51,6 +51,24 @@ fn proof() -> Span<felt252> {
     array!['PROOF'].span()
 }
 
+// A well-formed 208-entry deck for submit_shuffle's calldata.
+//
+// The mock verifier does not look at it, and the real one cannot -- checking a
+// deck against its Poseidon2 commitment means BN254 arithmetic Cairo does not
+// have (docs/PROTOCOL.md §7). What the CONTRACT checks is the length, and that
+// is what these tests exercise: a submission must carry a full deck, which is
+// what stops a shuffler advancing its own turn while withholding the deck the
+// next seat needs (§9.3).
+fn deck_of(tag: u128) -> Span<u256> {
+    let mut out: Array<u256> = array![];
+    let mut i: u128 = 0;
+    while i != 208 {
+        out.append(u256 { low: tag + i, high: 0 });
+        i += 1;
+    }
+    out.span()
+}
+
 fn key_proof() -> Span<felt252> {
     array!['KEYPROOF'].span()
 }
@@ -287,7 +305,7 @@ fn test_full_shuffle_chain_completes() {
     let mut spy = spy_events();
 
     start_cheat_caller_address(game.contract_address, ALICE());
-    game.submit_shuffle(TABLE_1, DECK_1, proof());
+    game.submit_shuffle(TABLE_1, DECK_1, deck_of(1), proof());
     stop_cheat_caller_address(game.contract_address);
 
     assert(game.get_shuffle_commitment(TABLE_1) == DECK_1, 'head should advance');
@@ -295,7 +313,7 @@ fn test_full_shuffle_chain_completes() {
     assert(!game.get_shuffle_complete(TABLE_1), 'not complete after 1 of 2');
 
     start_cheat_caller_address(game.contract_address, BOB());
-    game.submit_shuffle(TABLE_1, DECK_2, proof());
+    game.submit_shuffle(TABLE_1, DECK_2, deck_of(1), proof());
     stop_cheat_caller_address(game.contract_address);
 
     assert(game.get_shuffle_commitment(TABLE_1) == DECK_2, 'head should be final deck');
@@ -330,7 +348,7 @@ fn test_shuffle_out_of_turn_rejected() {
     let (game, _v) = setup_shuffle_ready();
     begin(game);
     start_cheat_caller_address(game.contract_address, BOB());
-    game.submit_shuffle(TABLE_1, DECK_1, proof());
+    game.submit_shuffle(TABLE_1, DECK_1, deck_of(1), proof());
 }
 
 #[test]
@@ -339,7 +357,7 @@ fn test_shuffle_by_non_participant_rejected() {
     let (game, _v) = setup_shuffle_ready();
     begin(game);
     start_cheat_caller_address(game.contract_address, MALLORY());
-    game.submit_shuffle(TABLE_1, DECK_1, proof());
+    game.submit_shuffle(TABLE_1, DECK_1, deck_of(1), proof());
 }
 
 #[test]
@@ -349,7 +367,7 @@ fn test_shuffle_with_rejected_proof_is_refused() {
     begin(game);
     verifier.set_reject(true);
     start_cheat_caller_address(game.contract_address, ALICE());
-    game.submit_shuffle(TABLE_1, DECK_1, proof());
+    game.submit_shuffle(TABLE_1, DECK_1, deck_of(1), proof());
 }
 
 // A rejected proof must leave the chain untouched, not half-advanced —
@@ -366,7 +384,7 @@ fn test_rejected_proof_leaves_chain_head_and_turn_unchanged() {
 
     verifier.set_reject(true);
     start_cheat_caller_address(game.contract_address, ALICE());
-    let outcome = safe.submit_shuffle(TABLE_1, DECK_1, proof());
+    let outcome = safe.submit_shuffle(TABLE_1, DECK_1, deck_of(1), proof());
     stop_cheat_caller_address(game.contract_address);
     assert(outcome.is_err(), 'submit should have failed');
 
@@ -377,7 +395,7 @@ fn test_rejected_proof_leaves_chain_head_and_turn_unchanged() {
     // proof that verifies.
     verifier.set_reject(false);
     start_cheat_caller_address(game.contract_address, ALICE());
-    game.submit_shuffle(TABLE_1, DECK_1, proof());
+    game.submit_shuffle(TABLE_1, DECK_1, deck_of(1), proof());
     stop_cheat_caller_address(game.contract_address);
     assert(game.get_shuffle_commitment(TABLE_1) == DECK_1, 'chain resumes normally');
     assert(game.get_shuffle_turn(TABLE_1) == 1, 'turn advances after success');
@@ -388,7 +406,7 @@ fn test_rejected_proof_leaves_chain_head_and_turn_unchanged() {
 fn test_shuffle_before_begin_rejected() {
     let (game, _v) = setup_shuffle_ready();
     start_cheat_caller_address(game.contract_address, ALICE());
-    game.submit_shuffle(TABLE_1, DECK_1, proof());
+    game.submit_shuffle(TABLE_1, DECK_1, deck_of(1), proof());
 }
 
 #[test]
@@ -397,12 +415,12 @@ fn test_shuffle_after_complete_rejected() {
     let (game, _v) = setup_shuffle_ready();
     begin(game);
     start_cheat_caller_address(game.contract_address, ALICE());
-    game.submit_shuffle(TABLE_1, DECK_1, proof());
+    game.submit_shuffle(TABLE_1, DECK_1, deck_of(1), proof());
     stop_cheat_caller_address(game.contract_address);
     start_cheat_caller_address(game.contract_address, BOB());
-    game.submit_shuffle(TABLE_1, DECK_2, proof());
+    game.submit_shuffle(TABLE_1, DECK_2, deck_of(1), proof());
     // chain is complete; a third submission must not reopen it
-    game.submit_shuffle(TABLE_1, u256 { low: 'DECK3', high: 10 }, proof());
+    game.submit_shuffle(TABLE_1, u256 { low: 'DECK3', high: 10 }, deck_of(1), proof());
 }
 
 // ─── deadlines and the all-of-n forfeit ─────────────────────────────────
@@ -414,7 +432,7 @@ fn test_shuffle_after_deadline_rejected() {
     begin(game);
     start_cheat_block_timestamp_global(SHUFFLE_TURN_SECS + 2);
     start_cheat_caller_address(game.contract_address, ALICE());
-    game.submit_shuffle(TABLE_1, DECK_1, proof());
+    game.submit_shuffle(TABLE_1, DECK_1, deck_of(1), proof());
 }
 
 #[test]
@@ -463,7 +481,7 @@ fn test_deadline_resets_each_turn() {
 
     start_cheat_block_timestamp_global(SHUFFLE_TURN_SECS - 1);
     start_cheat_caller_address(game.contract_address, ALICE());
-    game.submit_shuffle(TABLE_1, DECK_1, proof());
+    game.submit_shuffle(TABLE_1, DECK_1, deck_of(1), proof());
     stop_cheat_caller_address(game.contract_address);
 
     let second_deadline = game.get_shuffle_deadline(TABLE_1);
@@ -472,7 +490,7 @@ fn test_deadline_resets_each_turn() {
     // BOB still gets a full turn even though ALICE used nearly all of hers.
     start_cheat_block_timestamp_global(SHUFFLE_TURN_SECS + 100);
     start_cheat_caller_address(game.contract_address, BOB());
-    game.submit_shuffle(TABLE_1, DECK_2, proof());
+    game.submit_shuffle(TABLE_1, DECK_2, deck_of(1), proof());
     stop_cheat_caller_address(game.contract_address);
     assert(game.get_shuffle_complete(TABLE_1), 'BOB should still fit in turn');
 }
@@ -488,7 +506,7 @@ fn test_shuffle_on_voided_table_rejected() {
     stop_cheat_caller_address(game.contract_address);
 
     start_cheat_caller_address(game.contract_address, ALICE());
-    game.submit_shuffle(TABLE_1, DECK_1, proof());
+    game.submit_shuffle(TABLE_1, DECK_1, deck_of(1), proof());
 }
 
 #[test]
@@ -574,7 +592,7 @@ fn test_large_key_and_commitment_values_round_trip() {
     assert(A0.high != 0, 'a_0 exceeds felt252');
 
     start_cheat_caller_address(game.contract_address, ALICE());
-    game.submit_shuffle(TABLE_1, DECK_1, proof());
+    game.submit_shuffle(TABLE_1, DECK_1, deck_of(1), proof());
     stop_cheat_caller_address(game.contract_address);
     assert(game.get_shuffle_commitment(TABLE_1) == DECK_1, 'head must round-trip');
 }
@@ -655,3 +673,189 @@ fn test_shuffle_timeout_forfeits_the_stalled_seats_stake() {
     assert(game.get_seat_contributed(TABLE_1, SEAT_0) == 0, 'staller forfeits');
     assert(game.get_seat_contributed(TABLE_1, SEAT_1) == 2_000, 'the other seat takes it');
 }
+
+// ── deck delivery (docs/PROTOCOL.md §9.3) ───────────────────────────────
+//
+// The deck used to travel player-to-player off-chain while only the
+// commitment went on-chain. A shuffler could therefore post its commitment --
+// satisfying its OWN deadline -- and then never send the deck. The next seat
+// had nothing to shuffle, its clock ran out, and claim_shuffle_timeout
+// convicted IT. The griefer paid nothing and the victim forfeited its stake.
+//
+// Publishing the deck as calldata is what closes that: delivery is now part
+// of the same transaction that advances the turn, so there is no longer a
+// separate thing to withhold.
+
+#[test]
+#[should_panic(expected: 'DECK_MUST_BE_208_FIELDS')]
+fn test_submit_shuffle_rejects_a_short_deck() {
+    let (game, _v) = setup_shuffle_ready();
+    begin(game);
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.submit_shuffle(TABLE_1, DECK_1, array![u256 { low: 1, high: 0 }].span(), proof());
+}
+
+#[test]
+#[should_panic(expected: 'DECK_MUST_BE_208_FIELDS')]
+fn test_submit_shuffle_rejects_an_empty_deck() {
+    // The exact shape of the old attack: advance your turn, deliver nothing.
+    let (game, _v) = setup_shuffle_ready();
+    begin(game);
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.submit_shuffle(TABLE_1, DECK_1, array![].span(), proof());
+}
+
+#[test]
+fn test_published_deck_is_recorded_on_chain() {
+    let (game, _v) = setup_shuffle_ready();
+    begin(game);
+    assert(game.get_published_deck_hash(TABLE_1) == 0, 'nothing published yet');
+
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.submit_shuffle(TABLE_1, DECK_1, deck_of(7), proof());
+    stop_cheat_caller_address(game.contract_address);
+
+    // The hash is Starknet's own Poseidon over the calldata, computed by the
+    // contract -- NOT the BN254 commitment, which Cairo cannot recompute
+    // (§7). Recompute it here the same way to prove it describes the deck
+    // that was actually passed.
+    let mut expected_felts: Array<felt252> = array![];
+    let published = deck_of(7);
+    let mut i: u32 = 0;
+    while i != published.len() {
+        let v = *published.at(i);
+        expected_felts.append(v.low.into());
+        expected_felts.append(v.high.into());
+        i += 1;
+    }
+    let expected = core::poseidon::poseidon_hash_span(expected_felts.span());
+
+    assert(game.get_published_deck_hash(TABLE_1) == expected, 'hash covers the calldata');
+    assert(game.get_published_deck_seat(TABLE_1) == SEAT_0, 'publisher recorded');
+
+    // A different deck must not produce the same handle.
+    let mut other_felts: Array<felt252> = array![];
+    let other = deck_of(8);
+    let mut j: u32 = 0;
+    while j != other.len() {
+        let v = *other.at(j);
+        other_felts.append(v.low.into());
+        other_felts.append(v.high.into());
+        j += 1;
+    }
+    assert(
+        core::poseidon::poseidon_hash_span(other_felts.span()) != expected, 'distinct decks differ',
+    );
+}
+
+#[test]
+fn test_dispute_deck_voids_without_forfeiting_anyone() {
+    // THE REGRESSION THIS SECTION EXISTS FOR. Before, a seat handed an
+    // unusable deck could only wait for its own clock to expire and lose its
+    // stake. Now it can end the hand and keep it.
+    let (game, _v) = deploy_pokergame_with_verifier(POOL());
+    let (token_addr, token, admin) = deploy_mock_token();
+    start_cheat_caller_address(game.contract_address, DEALER());
+    game.create_table(TABLE_1, token_addr, 0, TWO_SEATS);
+    stop_cheat_caller_address(game.contract_address);
+
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.join_table(TABLE_1, SEAT_0, NOTE_A);
+    game.register_shuffle_key(TABLE_1, SEAT_0, PK_A_X, PK_A_Y, key_proof());
+    stop_cheat_caller_address(game.contract_address);
+    start_cheat_caller_address(game.contract_address, BOB());
+    game.join_table(TABLE_1, SEAT_1, NOTE_B);
+    game.register_shuffle_key(TABLE_1, SEAT_1, PK_B_X, PK_B_Y, key_proof());
+    stop_cheat_caller_address(game.contract_address);
+
+    super::helpers::fund_and_approve(token, admin, ALICE(), game.contract_address, 10_000);
+    super::helpers::fund_and_approve(token, admin, BOB(), game.contract_address, 10_000);
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.bet(TABLE_1, SEAT_0, 1_000);
+    stop_cheat_caller_address(game.contract_address);
+    start_cheat_caller_address(game.contract_address, BOB());
+    game.bet(TABLE_1, SEAT_1, 1_000);
+    stop_cheat_caller_address(game.contract_address);
+
+    begin(game);
+
+    // ALICE (position 0) publishes a deck BOB says does not open the
+    // commitment. The contract cannot check that -- §7 -- so it must not
+    // pretend to.
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.submit_shuffle(TABLE_1, DECK_1, deck_of(1), proof());
+    stop_cheat_caller_address(game.contract_address);
+
+    let mut spy = spy_events();
+    start_cheat_caller_address(game.contract_address, BOB());
+    game.dispute_deck(TABLE_1);
+    stop_cheat_caller_address(game.contract_address);
+
+    assert(game.get_table_voided(TABLE_1), 'hand is over');
+    // The whole point: nobody is robbed. Compare with
+    // test_claim_shuffle_timeout_forfeits_the_staller, where the stalled seat
+    // goes to 0 and the other takes 2,000.
+    assert(game.get_seat_contributed(TABLE_1, SEAT_0) == 1_000, 'publisher keeps its stake');
+    assert(game.get_seat_contributed(TABLE_1, SEAT_1) == 1_000, 'disputer keeps its stake');
+
+    spy
+        .assert_emitted(
+            @array![
+                (
+                    game.contract_address,
+                    PokerGame::Event::DeckDisputed(
+                        PokerGame::DeckDisputed {
+                            table_id: TABLE_1,
+                            disputing_seat: SEAT_1,
+                            publisher_seat: SEAT_0,
+                            published_deck_hash: game.get_published_deck_hash(TABLE_1),
+                        },
+                    ),
+                ),
+            ],
+        );
+}
+
+#[test]
+#[should_panic(expected: 'FIRST_DECK_IS_CANONICAL')]
+fn test_dispute_deck_rejected_at_the_head_of_the_chain() {
+    // Position 0 consumes a_0, which is pinned and published by nobody, so
+    // there is no publisher to accuse.
+    let (game, _v) = setup_shuffle_ready();
+    begin(game);
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.dispute_deck(TABLE_1);
+}
+
+#[test]
+#[should_panic(expected: 'NOT_YOUR_SHUFFLE_TURN')]
+fn test_dispute_deck_rejected_from_a_bystander() {
+    // Only the seat that is actually blocked. A bystander who could end the
+    // hand would be a cheaper griefing tool than stalling, since disputing
+    // costs no stake.
+    let (game, _v) = setup_shuffle_ready();
+    begin(game);
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.submit_shuffle(TABLE_1, DECK_1, deck_of(1), proof());
+    stop_cheat_caller_address(game.contract_address);
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.dispute_deck(TABLE_1);
+}
+
+#[test]
+#[should_panic(expected: 'SHUFFLE_DEADLINE_PASSED')]
+fn test_dispute_deck_rejected_after_your_own_deadline() {
+    // A seat that already let its clock run out cannot dispute its way out of
+    // the forfeit it has earned -- otherwise claim_shuffle_timeout would stop
+    // deterring anything.
+    let (game, _v) = setup_shuffle_ready();
+    begin(game);
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.submit_shuffle(TABLE_1, DECK_1, deck_of(1), proof());
+    stop_cheat_caller_address(game.contract_address);
+
+    start_cheat_block_timestamp_global(SHUFFLE_TURN_SECS + 2);
+    start_cheat_caller_address(game.contract_address, BOB());
+    game.dispute_deck(TABLE_1);
+}
+

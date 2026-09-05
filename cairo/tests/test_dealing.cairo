@@ -37,6 +37,24 @@ fn proof() -> Span<felt252> {
     array!['PROOF'].span()
 }
 
+// A well-formed 208-entry deck for submit_shuffle's calldata.
+//
+// The mock verifier does not look at it, and the real one cannot -- checking a
+// deck against its Poseidon2 commitment means BN254 arithmetic Cairo does not
+// have (docs/PROTOCOL.md §7). What the CONTRACT checks is the length, and that
+// is what these tests exercise: a submission must carry a full deck, which is
+// what stops a shuffler advancing its own turn while withholding the deck the
+// next seat needs (§9.3).
+fn deck_of(tag: u128) -> Span<u256> {
+    let mut out: Array<u256> = array![];
+    let mut i: u128 = 0;
+    while i != 208 {
+        out.append(u256 { low: tag + i, high: 0 });
+        i += 1;
+    }
+    out.span()
+}
+
 fn key_proof() -> Span<felt252> {
     array!['KEYPROOF'].span()
 }
@@ -126,11 +144,11 @@ fn setup_shuffled() -> (
     stop_cheat_caller_address(game.contract_address);
 
     start_cheat_caller_address(game.contract_address, ALICE());
-    game.submit_shuffle(TABLE_1, DECK_1, proof());
+    game.submit_shuffle(TABLE_1, DECK_1, deck_of(1), proof());
     stop_cheat_caller_address(game.contract_address);
 
     start_cheat_caller_address(game.contract_address, BOB());
-    game.submit_shuffle(TABLE_1, DECK_2, proof());
+    game.submit_shuffle(TABLE_1, DECK_2, deck_of(1), proof());
     stop_cheat_caller_address(game.contract_address);
 
     assert(game.get_shuffle_complete(TABLE_1), 'setup: shuffle incomplete');
@@ -568,10 +586,10 @@ fn setup_preflop_done() -> zkpoker::IPokerGameDispatcher {
     game.begin_shuffle(TABLE_1, JOINT_X, JOINT_Y);
     stop_cheat_caller_address(game.contract_address);
     start_cheat_caller_address(game.contract_address, ALICE());
-    game.submit_shuffle(TABLE_1, DECK_1, proof());
+    game.submit_shuffle(TABLE_1, DECK_1, deck_of(1), proof());
     stop_cheat_caller_address(game.contract_address);
     start_cheat_caller_address(game.contract_address, BOB());
-    game.submit_shuffle(TABLE_1, DECK_2, proof());
+    game.submit_shuffle(TABLE_1, DECK_2, deck_of(1), proof());
     stop_cheat_caller_address(game.contract_address);
 
     open_all(game);
@@ -1144,13 +1162,13 @@ fn test_conviction_forfeits_the_defaulters_stake() {
     game.begin_shuffle(TABLE_1, JOINT_X, JOINT_Y);
     stop_cheat_caller_address(game.contract_address);
     start_cheat_caller_address(game.contract_address, ALICE());
-    game.submit_shuffle(TABLE_1, DECK_1, proof());
+    game.submit_shuffle(TABLE_1, DECK_1, deck_of(1), proof());
     stop_cheat_caller_address(game.contract_address);
     start_cheat_caller_address(game.contract_address, BOB());
-    game.submit_shuffle(TABLE_1, DECK_2, proof());
+    game.submit_shuffle(TABLE_1, DECK_2, deck_of(1), proof());
     stop_cheat_caller_address(game.contract_address);
     start_cheat_caller_address(game.contract_address, CAROL());
-    game.submit_shuffle(TABLE_1, DECK_0, proof());
+    game.submit_shuffle(TABLE_1, DECK_0, deck_of(1), proof());
     stop_cheat_caller_address(game.contract_address);
 
     // 3 seats: 6 hole slots then 5 community. 11 positions, 3 chunks of 5.

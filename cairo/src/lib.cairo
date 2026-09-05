@@ -610,7 +610,51 @@ pub trait IPokerGame<TState> {
     // [joint_pk_x, joint_pk_y, current_commitment, new_commitment] — so a
     // proof is only accepted if it chains onto the deck the previous
     // player published. Reverts if the deadline has passed.
-    fn submit_shuffle(ref self: TState, table_id: felt252, new_commitment: u256, proof: Span<felt252>);
+    // `deck` is the FULL output deck -- 208 u256, four per card
+    // (c1.x, c1.y, c2.x, c2.y) -- published as calldata.
+    //
+    // Publishing it is what stops the griefing described in
+    // docs/PROTOCOL.md §9.3. The deck is private to the CIRCUIT (only its
+    // Poseidon2 commitment is a public input, which is what keeps the
+    // verifier under Garaga's 99-input cap), but it is not a secret: the
+    // ciphertexts are re-randomised under the joint key, and re-randomisation
+    // is precisely what makes the output reveal nothing about the
+    // permutation. Reading a card still needs every party's decryption share.
+    // §5 already budgeted the deck as calldata for this reason.
+    //
+    // Before this, the deck travelled player-to-player off-chain, so a seat
+    // could post its commitment -- satisfying its OWN deadline -- and then
+    // never send the deck. The next seat had nothing to shuffle, and
+    // claim_shuffle_timeout convicted THEM. The griefer paid nothing and
+    // their victim forfeited. Now delivery is part of the step that advances
+    // the turn, so it cannot be withheld separately from it.
+    fn submit_shuffle(
+        ref self: TState,
+        table_id: felt252,
+        new_commitment: u256,
+        deck: Span<u256>,
+        proof: Span<felt252>,
+    );
+
+    // Ends the hand when the published deck does not match the commitment it
+    // was supposed to open. Callable only by the seat whose turn it is, only
+    // once the chain has a real publisher (position 0 consumes the canonical
+    // a_0, which nobody publishes), and only before that seat's own deadline.
+    //
+    // It voids and forfeits NOBODY, which is deliberate. The contract cannot
+    // adjudicate the claim: checking a published deck against
+    // `deck_commitment` means recomputing a BN254 Poseidon2 hash in Cairo,
+    // and §7 is the whole reason that is not available. Rather than convict
+    // on a coin-flip, the hand ends and every seat reclaims what it put in.
+    //
+    // That is safe here in a way it would not be later: the shuffle chain
+    // runs BEFORE any betting, so every seat has contributed exactly its
+    // buy-in and no card, share or bet exists yet. Voiding returns everyone
+    // to where they started. A frivolous dispute is therefore a
+    // denial-of-service that costs its caller gas and gains them nothing --
+    // strictly better than the alternative, which was forfeiting the stake of
+    // a player who provably could not act.
+    fn dispute_deck(ref self: TState, table_id: felt252);
 
     // All-of-n forfeit (docs/V2-MENTAL-POKER.md §6). Callable by anyone
     // once the current player has missed their deadline. Their share is
@@ -866,6 +910,11 @@ pub trait IPokerGame<TState> {
     fn get_joint_pk(self: @TState, table_id: felt252) -> (u256, u256);
     fn get_seat_folded(self: @TState, table_id: felt252, seat: felt252) -> bool;
     fn get_shuffle_started(self: @TState, table_id: felt252) -> bool;
+    // Starknet-Poseidon over the calldata of the most recent submit_shuffle's
+    // deck, and the seat that published it. Lets a client confirm it read the
+    // bytes that were actually published rather than trusting an RPC.
+    fn get_published_deck_hash(self: @TState, table_id: felt252) -> felt252;
+    fn get_published_deck_seat(self: @TState, table_id: felt252) -> felt252;
     fn get_position_opened(self: @TState, table_id: felt252, position: u32) -> bool;
     // 0 when this seat has not committed its shares for that slot yet.
     fn get_hole_commitment(self: @TState, table_id: felt252, seat: felt252, slot: u32) -> felt252;
@@ -963,6 +1012,8 @@ pub mod PokerGame {
         pub const SHUFFLE_DONE: felt252 = 'SHUFFLE_ALREADY_COMPLETE';
         pub const NOT_YOUR_TURN: felt252 = 'NOT_YOUR_SHUFFLE_TURN';
         pub const BAD_PROOF: felt252 = 'SHUFFLE_PROOF_REJECTED';
+        pub const BAD_DECK_LEN: felt252 = 'DECK_MUST_BE_208_FIELDS';
+        pub const NO_PUBLISHER: felt252 = 'FIRST_DECK_IS_CANONICAL';
         pub const NO_PARTICIPANTS: felt252 = 'NO_SHUFFLE_PARTICIPANTS';
         // joint_pk != sum of the registered seat key shares.
         pub const BAD_JOINT_KEY: felt252 = 'BAD_JOINT_KEY';
@@ -1054,6 +1105,11 @@ pub mod PokerGame {
     // Positions proved per deck-opening call. MUST equal `global K` in
     // circuits/deck_open/src/main.nr -- the deployed verifier is generated
     // for that exact value and silently rejects any other input length.
+    // 52 cards x 4 field elements each (c1.x, c1.y, c2.x, c2.y). MUST equal
+    // DECK_FIELDS in circuits/shuffle/src/main.nr -- it is the length of the
+    // deck submit_shuffle publishes as calldata.
+    const DECK_FIELDS: u32 = 208;
+
     const DECK_OPEN_K: u32 = 5;
 
     // V2: how long one player has to publish their shuffle before the
@@ -1184,6 +1240,15 @@ pub mod PokerGame {
         // forces the shuffles to compose instead of running in parallel on
         // the same starting deck.
         deck_commitment: Map<felt252, u256>,
+        // Starknet-Poseidon hash of the deck the current chain head PUBLISHED
+        // as calldata, and the seat that published it. Not the same thing as
+        // deck_commitment, and it cannot be: that is a Poseidon2 hash over
+        // BN254 which Cairo cannot compute (§7). This is a STARK-field hash
+        // the contract computes itself over the calldata, so a client can
+        // check it got the bytes that were actually published without
+        // trusting an RPC's event index.
+        published_deck_hash: Map<felt252, felt252>,
+        published_deck_seat: Map<felt252, felt252>,
         // table_id -> participant list, frozen at begin_shuffle.
         shuffle_order: Map<(felt252, u32), felt252>, // position -> seat
         shuffle_order_len: Map<felt252, u32>,
@@ -1285,6 +1350,8 @@ pub mod PokerGame {
         ShuffleKeyRegistered: ShuffleKeyRegistered,
         ShuffleBegun: ShuffleBegun,
         Shuffled: Shuffled,
+        DeckPublished: DeckPublished,
+        DeckDisputed: DeckDisputed,
         ShuffleComplete: ShuffleComplete,
         TableVoided: TableVoided,
         Checked: Checked,
@@ -1421,6 +1488,32 @@ pub mod PokerGame {
         pub position: u32,
         pub seat: felt252,
         pub commitment: u256,
+    }
+
+    // The deck one shuffler published as calldata, identified by the
+    // contract's own Starknet-Poseidon hash of it. The deck is in the
+    // transaction, not in this event: 416 felts twice would double the data
+    // cost for no gain, and a client that has the tx can check it against
+    // `deck_hash` itself.
+    #[derive(Drop, starknet::Event)]
+    pub struct DeckPublished {
+        #[key]
+        pub table_id: felt252,
+        pub position: u32,
+        pub seat: felt252,
+        pub deck_hash: felt252,
+    }
+
+    // The seat on turn says the deck it was handed does not open the
+    // commitment it is chained to. Names both sides; convicts neither, because
+    // the contract cannot check the claim (§7).
+    #[derive(Drop, starknet::Event)]
+    pub struct DeckDisputed {
+        #[key]
+        pub table_id: felt252,
+        pub disputing_seat: felt252,
+        pub publisher_seat: felt252,
+        pub published_deck_hash: felt252,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -2712,8 +2805,15 @@ pub mod PokerGame {
         }
 
         fn submit_shuffle(
-            ref self: ContractState, table_id: felt252, new_commitment: u256, proof: Span<felt252>,
+            ref self: ContractState,
+            table_id: felt252,
+            new_commitment: u256,
+            deck: Span<u256>,
+            proof: Span<felt252>,
         ) {
+            // 52 cards x 4 coordinates. Checked before anything else so a
+            // malformed deck costs the caller a revert, not a verification.
+            assert(deck.len() == DECK_FIELDS, errors::BAD_DECK_LEN);
             assert(self.table_exists.entry(table_id).read(), errors::NO_TABLE);
             assert(!self.table_voided.entry(table_id).read(), errors::TABLE_VOIDED);
             assert(self.shuffle_started.entry(table_id).read(), errors::SHUFFLE_NOT_STARTED);
@@ -2762,9 +2862,29 @@ pub mod PokerGame {
             assert(verifier.verify_shuffle(proof, public_inputs.span()), errors::BAD_PROOF);
 
             self.deck_commitment.entry(table_id).write(new_commitment);
+
+            // Record what was actually published. Starknet's own Poseidon over
+            // the calldata -- NOT the BN254 commitment above, which Cairo
+            // cannot recompute -- so a client can confirm it read the same
+            // bytes this transaction carried. Emitting the hash rather than
+            // the 416 felts keeps the event small; the deck itself is already
+            // public in the calldata.
+            let mut deck_felts: Array<felt252> = array![];
+            let mut d: u32 = 0;
+            while d != deck.len() {
+                let v = *deck.at(d);
+                deck_felts.append(v.low.into());
+                deck_felts.append(v.high.into());
+                d += 1;
+            }
+            let deck_hash = core::poseidon::poseidon_hash_span(deck_felts.span());
+            self.published_deck_hash.entry(table_id).write(deck_hash);
+            self.published_deck_seat.entry(table_id).write(seat);
+
             let next = turn + 1;
             self.shuffle_turn.entry(table_id).write(next);
             self.emit(Shuffled { table_id, position: turn, seat, commitment: new_commitment });
+            self.emit(DeckPublished { table_id, position: turn, seat, deck_hash });
 
             if next == self.shuffle_order_len.entry(table_id).read() {
                 self.shuffle_complete.entry(table_id).write(true);
@@ -2773,6 +2893,56 @@ pub mod PokerGame {
                 self.shuffle_deadline.entry(table_id).write(get_block_timestamp() + SHUFFLE_TURN_SECS);
             }
             self.reentrancy_lock.write(false);
+        }
+
+        fn dispute_deck(ref self: ContractState, table_id: felt252) {
+            assert(self.table_exists.entry(table_id).read(), errors::NO_TABLE);
+            assert(!self.table_voided.entry(table_id).read(), errors::TABLE_VOIDED);
+            assert(!self.table_settled.entry(table_id).read(), errors::ALREADY_SETTLED);
+            assert(self.shuffle_started.entry(table_id).read(), errors::SHUFFLE_NOT_STARTED);
+            assert(!self.shuffle_complete.entry(table_id).read(), errors::SHUFFLE_DONE);
+
+            // Position 0 consumes a_0, which is canonical, pinned and
+            // published by nobody -- there is no publisher to dispute.
+            let turn = self.shuffle_turn.entry(table_id).read();
+            assert(turn != 0, errors::NO_PUBLISHER);
+
+            // Only the seat that is actually blocked. Everyone else still has
+            // a working table as far as they can tell, and letting a bystander
+            // end the hand would be a strictly cheaper griefing tool.
+            let seat = self.shuffle_order.entry((table_id, turn)).read();
+            assert(
+                get_caller_address() == self.seat_owner.entry((table_id, seat)).read(),
+                errors::NOT_YOUR_TURN,
+            );
+
+            // Before your own deadline, not after. A seat that let its clock
+            // run out cannot then dispute its way out of the forfeit it has
+            // already earned -- the same rule submit_shuffle applies to
+            // itself, and the reason claim_shuffle_timeout stays a real
+            // deterrent.
+            assert(
+                get_block_timestamp() <= self.shuffle_deadline.entry(table_id).read(),
+                errors::DEADLINE_PASSED,
+            );
+
+            let publisher = self.published_deck_seat.entry(table_id).read();
+            let deck_hash = self.published_deck_hash.entry(table_id).read();
+
+            // No forfeit, by design. See the interface comment: the claim is
+            // not checkable on-chain, nothing has been bet yet, and voiding
+            // returns every seat exactly what it put in.
+            self.table_voided.entry(table_id).write(true);
+            self
+                .emit(
+                    DeckDisputed {
+                        table_id,
+                        disputing_seat: seat,
+                        publisher_seat: publisher,
+                        published_deck_hash: deck_hash,
+                    },
+                );
+            self.emit(TableVoided { table_id, stalled_seat: publisher });
         }
 
         fn claim_shuffle_timeout(ref self: ContractState, table_id: felt252) {
@@ -3253,6 +3423,14 @@ pub mod PokerGame {
 
         fn get_shuffle_started(self: @ContractState, table_id: felt252) -> bool {
             self.shuffle_started.entry(table_id).read()
+        }
+
+        fn get_published_deck_hash(self: @ContractState, table_id: felt252) -> felt252 {
+            self.published_deck_hash.entry(table_id).read()
+        }
+
+        fn get_published_deck_seat(self: @ContractState, table_id: felt252) -> felt252 {
+            self.published_deck_seat.entry(table_id).read()
         }
 
         fn get_position_opened(self: @ContractState, table_id: felt252, position: u32) -> bool {

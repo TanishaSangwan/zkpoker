@@ -15,9 +15,10 @@ import type { TableState } from '../useTableState';
 import { asU256, decodeError, executeAndWait, pgCall, erc20ApproveCall, STREET_NAMES } from '../contract';
 import type { SeatIdentity } from '@/lib/identity';
 import { jointKey as sumKeys, prove as schnorrProve, initProver as initSchnorr } from '@/lib/schnorr';
-import { proveShuffle } from '@/lib/shuffle';
+import { deckToU256, proveShuffle } from '@/lib/shuffle';
 import { useProvingEnvironment } from '../useProvingEnvironment';
 import { INITIAL_DECK_COMMITMENT, initialDeck, type Ciphertext } from '@/lib/deck';
+import { findDeckPublishedTx, readPublishedDeck } from '@/lib/publishedDeck';
 import { cardToName } from '@/lib/grumpkin';
 
 export type Busy = { label: string; detail?: string } | null;
@@ -106,12 +107,35 @@ export default function PhasePanel(p: Props) {
     run('Shuffling', async () => {
       if (!table.jointKey) throw new Error('The table has no joint key yet.');
       // Position 0 shuffles the canonical starting deck, which needs no
-      // delivery -- a_0 depends on nothing and is identical for every table.
-      const deckIn = table.shuffleTurn === 0 ? initialDeck() : p.deck;
+      // delivery at all -- a_0 depends on nothing and is identical for every
+      // table.
+      //
+      // Every later position reads the previous deck FROM THE CHAIN. It used
+      // to arrive off-chain, which meant the previous seat could publish its
+      // commitment, satisfy its own deadline, and then send nothing -- and it
+      // was this seat that got timed out and forfeited (PROTOCOL.md §9.3).
+      // The deck is now part of submit_shuffle's calldata, so there is
+      // nothing left to withhold. A locally cached copy is still preferred as
+      // a fast path; the chain is the guarantee under it.
+      let deckIn: Ciphertext[] | null;
+      if (table.shuffleTurn === 0) {
+        deckIn = initialDeck();
+      } else {
+        deckIn = p.deck;
+        if (!deckIn) {
+          setBusy({ label: 'Shuffling', detail: 'reading the published deck from chain' });
+          const txHash = await findDeckPublishedTx({ provider: provider!, contract, tableId: table.tableId });
+          deckIn = txHash
+            ? await readPublishedDeck({ provider: provider!, txHash, expectedHash: table.publishedDeckHash })
+            : null;
+        }
+      }
       if (!deckIn) {
         throw new Error(
-          `Waiting for the deck from seat ${table.shuffleOrder[table.shuffleTurn - 1]}. ` +
-            `The deck is private and travels off-chain, so it has to arrive before you can shuffle.`,
+          `Seat ${table.publishedDeckSeat} published a deck that could not be read back, or none ` +
+            `at all. If it does not open the commitment this chain is now on, you cannot shuffle ` +
+            `and nobody can adjudicate it on-chain -- dispute it rather than letting your clock ` +
+            `run out, which would forfeit your stake.`,
         );
       }
       const expected = table.shuffleTurn === 0 ? INITIAL_DECK_COMMITMENT : table.commitment;
@@ -133,6 +157,8 @@ export default function PhasePanel(p: Props) {
       const txt = await send('submit_shuffle', {
         table_id: table.tableId,
         new_commitment: asU256(result.commitmentOut),
+        // Published as calldata, not merely sent to the next player -- see above.
+        deck: deckToU256(result.deckOut),
         proof: result.calldata.map((v) => '0x' + v.toString(16)),
       });
       return `${txt}\nwitness ${result.timings.witnessMs} ms · proof ${result.timings.proveMs} ms · calldata ${result.timings.calldataMs} ms`;
@@ -228,6 +254,24 @@ export default function PhasePanel(p: Props) {
               Waiting for seat {table.shuffleOrder[table.shuffleTurn]} ({shuffleClock}).
             </p>
           )}
+          {myShuffleTurn && table.shuffleTurn > 0 && shuffleClock !== 'expired' ? (
+            <div className={styles.actionsRow}>
+              <button
+                className={uni.btn}
+                disabled={!!busy}
+                onClick={() => run('Disputing the deck', () => send('dispute_deck', { table_id: table.tableId }))}
+              >
+                Dispute the deck
+              </button>
+              <span className={styles.fieldHint}>
+                Only if the deck seat {table.publishedDeckSeat} published does not open the
+                commitment the chain is on. Ends the hand and forfeits <strong>nobody</strong> — the
+                contract cannot check the claim, and nothing has been bet yet, so every seat
+                reclaims exactly what it put in. Do this <em>before</em> your clock expires:
+                afterwards you forfeit.
+              </span>
+            </div>
+          ) : null}
           {shuffleClock === 'expired' ? (
             <div className={styles.actionsRow}>
               <button
