@@ -10,6 +10,7 @@
 // "every seat shuffled and proved it".
 
 import { useEffect, useMemo, useState } from 'react';
+import { hash } from 'starknet';
 import Link from 'next/link';
 import styles from './poker.module.css';
 import uni from '../uni.module.css';
@@ -279,6 +280,23 @@ export default function PokerPanel() {
 function SeatControls(p: any) {
   const { table, yourSeat, contract, account, provider, refresh, token } = p;
   const [seat, setSeat] = useState('0');
+
+  /**
+   * A payout note id that is unique to (account, table, seat).
+   *
+   * `note_id_owner` is a GLOBAL map and the first claimer owns an id forever,
+   * across every table. Defaulting to the seat index -- as this did -- meant
+   * seat 1 of one table claimed id 1 permanently, and the next account to sit
+   * in any seat 1 anywhere got NOTE_ID_TAKEN. Deriving it from the address
+   * makes collisions between players impossible while staying deterministic,
+   * so the same player rejoining the same seat reclaims the same id rather
+   * than stranding the old one.
+   */
+  const defaultNote = useMemo(() => {
+    if (!account?.address) return '';
+    return hash.computePoseidonHashOnElements([account.address, table.tableId, seat]);
+  }, [account?.address, table.tableId, seat]);
+
   const [noteId, setNoteId] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -336,10 +354,14 @@ function SeatControls(p: any) {
         </div>
         <div className={styles.field}>
           <label className={styles.label}>payout note id</label>
-          <input className={styles.input} value={noteId} placeholder="defaults to the seat index"
+          <input className={styles.input} value={noteId}
+            placeholder={defaultNote ? `${defaultNote.slice(0, 14)}…` : 'connect an account'}
             onChange={(e) => setNoteId(e.target.value)} />
           <div className={styles.fieldHint}>
-            Where winnings go. Can be re-bound later with <code>bind_payout_note</code>.
+            Where winnings go. Defaults to a value derived from your address, this table and this
+            seat — note ids are a <em>global</em> namespace whose first claimer owns them forever,
+            so a shared default like the seat number collides with whoever claimed it first. Can be
+            re-bound later with <code>bind_payout_note</code>.
           </div>
         </div>
       </div>

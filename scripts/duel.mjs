@@ -21,7 +21,7 @@ import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { build } from 'esbuild';
-import { Account, CallData, Contract, RpcProvider } from 'starknet';
+import { Account, CallData, Contract, RpcProvider, hash } from 'starknet';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const RPC = process.env.RPC ?? 'http://127.0.0.1:5050';
@@ -155,7 +155,11 @@ switch (cmd) {
       await provider.waitForTransaction(transaction_hash, { retries: 200, retryInterval: 500 });
       console.log(`  approve ok  ${transaction_hash}  (${ALLOWANCE} to PokerGame)`);
     }
-    await send('join_table', { table_id: TABLE, seat: String(MY_SEAT), hole_card_note_id: String(200 + MY_SEAT) });
+    // Derived, not a small constant: note_id_owner is a GLOBAL map whose
+    // first claimer owns an id forever, so a fixed value collides with any
+    // other account that ever used it.
+    const noteId = hash.computePoseidonHashOnElements([me.address, TABLE, String(MY_SEAT)]);
+    await send('join_table', { table_id: TABLE, seat: String(MY_SEAT), hole_card_note_id: noteId });
     const key = schnorr.generateKey();
     await schnorr.initProver();
     const proof = schnorr.prove(key.secret);
