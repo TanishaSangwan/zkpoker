@@ -30,7 +30,21 @@ import { build } from 'esbuild';
 import { Account, CallData, Contract, RpcProvider } from 'starknet';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
-const RPC = process.env.RPC ?? 'http://127.0.0.1:5050';
+// NETWORK picks the chain, the accounts and which deployment to read. Devnet
+// stays the default for the same reason deploy_local.sh does: this is run far
+// more often against a throwaway node, and on a public chain every proof
+// verified on-chain costs real fees.
+//
+//   node scripts/check_showdown.mjs                     devnet
+//   NETWORK=sepolia node scripts/check_showdown.mjs     Starknet Sepolia
+const NETWORK = process.env.NETWORK ?? 'devnet';
+const ON_SEPOLIA = NETWORK === 'sepolia';
+const RPC = process.env.RPC
+  ?? (ON_SEPOLIA ? 'https://api.cartridge.gg/x/starknet/sepolia' : 'http://127.0.0.1:5050');
+// Two seats, two independent keys. Predeployed on devnet; on a public chain
+// they are accounts that had to be created and funded.
+const SEAT_ACCOUNTS = (process.env.SEAT_ACCOUNTS
+  ?? (ON_SEPOLIA ? 'sepolia,sep2' : 'devnet0,devnet1')).split(',');
 const ACCOUNTS = process.env.ACCOUNTS_FILE ?? `${process.env.HOME}/.starknet_accounts/starknet_open_zeppelin_accounts.json`;
 
 const fail = (m) => { console.error(`\nFAIL: ${m}`); process.exit(1); };
@@ -60,19 +74,29 @@ await dleq.initProver();
 
 const env = readFileSync(join(root, '.env.local'), 'utf8');
 const readEnv = (k) => (env.match(new RegExp(`^${k}=(.*)$`, 'm')) ?? [])[1]?.trim();
-const GAME = readEnv('NEXT_PUBLIC_POKERGAME_DEVNET');
-const TOKEN = readEnv('NEXT_PUBLIC_DEVNET_TOKEN');
-if (!GAME || GAME === '0x0') fail('NEXT_PUBLIC_POKERGAME_DEVNET is not set -- run scripts/deploy_local.sh');
+const GAME = readEnv(ON_SEPOLIA ? 'NEXT_PUBLIC_POKERGAME_SEPOLIA' : 'NEXT_PUBLIC_POKERGAME_DEVNET');
+// STRK sits at the same canonical address on every network, so the buy-in
+// token needs no per-network lookup.
+const TOKEN = ON_SEPOLIA
+  ? '0x4718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d'
+  : readEnv('NEXT_PUBLIC_DEVNET_TOKEN');
+if (!GAME || GAME === '0x0') fail(`no ${NETWORK} deployment in .env.local -- run scripts/deploy_local.sh`);
+console.log(`network ${NETWORK} · game ${GAME.slice(0, 14)}… · via ${RPC}`);
 
 const provider = new RpcProvider({ nodeUrl: RPC });
 const accts = JSON.parse(readFileSync(ACCOUNTS, 'utf8'));
-const net = Object.values(accts).find((n) => n.devnet0);
 // starknet.js v10 takes an options object, not positional args -- the
 // positional form silently gives `address === undefined` and dies inside the
 // constructor.
-const acct = (name) => new Account({ provider, address: net[name].address, signer: net[name].private_key });
-const dealer = acct('devnet0');
-const players = [acct('devnet0'), acct('devnet1')];
+const acct = (name) => {
+  const net = Object.values(accts).find((n) => n[name]);
+  if (!net) fail(`no account named ${name} in ${ACCOUNTS}`);
+  return new Account({ provider, address: net[name].address, signer: net[name].private_key });
+};
+const players = SEAT_ACCOUNTS.map(acct);
+// The dealer takes seat 0 too: it holds no key share beyond that seat's, and
+// one fewer funded account is one fewer thing to arrange on a public chain.
+const dealer = players[0];
 
 const abi = JSON.parse(
   readFileSync(join(root, 'cairo/target/dev/zkpoker_PokerGame.contract_class.json'), 'utf8'),
@@ -81,9 +105,52 @@ const cd = new CallData(abi);
 const view = new Contract({ abi, address: GAME, providerOrAccount: provider });
 
 const call = (entrypoint, args) => ({ contractAddress: GAME, entrypoint, calldata: cd.compile(entrypoint, args) });
+// Starknet caps L2 gas PER TRANSACTION. Sepolia's limit is 1,210,000,000, and
+// a shuffle proof verifies at roughly 0.8e9 -- so the work fits, but the fee
+// estimator's safety multiplier pushed the BOUND to 1,223,772,240 and the
+// transaction was refused before it ran:
+//
+//   Max gas amount is too high: GasAmount(1223772240),
+//   maximum allowed gas amount: 1210000000
+//
+// Clamped to the cap rather than lowered blindly: the bound is a ceiling on
+// what may be spent, not a prediction, so trimming it costs nothing while real
+// consumption stays under. If a proof ever genuinely needs more than the cap it
+// fails as out-of-gas, which is the honest signal that the circuit has outgrown
+// a single transaction.
+const L2_GAS_CAP = 1209000000n;
+
 async function send(account, entrypoint, args) {
-  const { transaction_hash } = await account.execute([call(entrypoint, args)]);
-  const r = await provider.waitForTransaction(transaction_hash, { retries: 200, retryInterval: 500 });
+  const calls = [call(entrypoint, args)];
+  let details = {};
+  if (ON_SEPOLIA) {
+    const est = await account.estimateInvokeFee(calls);
+    const src = est.resourceBounds ?? est.resource_bounds;
+    // Copied field by field: the bounds carry BigInts, which JSON cannot
+    // clone, and mutating the estimate in place is a trap waiting for a retry.
+    // BigInts, not the decimal strings the estimator hands back. When bounds
+    // are supplied rather than estimated, starknet.js hashes them directly --
+    // encodeResourceBoundsL1 shifts the values -- so a string throws "Cannot
+    // mix BigInt and other types" from inside the signer.
+    const hex = (v) => BigInt(v);
+    const want = BigInt(src.l2_gas.max_amount);
+    const capped = want > L2_GAS_CAP ? L2_GAS_CAP : want;
+    if (want > L2_GAS_CAP) {
+      console.log(`      (${entrypoint}: bound ${want} exceeds the ${L2_GAS_CAP} cap -- clamping)`);
+    }
+    details = {
+      resourceBounds: {
+        l1_gas: { max_amount: hex(src.l1_gas.max_amount), max_price_per_unit: hex(src.l1_gas.max_price_per_unit) },
+        l1_data_gas: { max_amount: hex(src.l1_data_gas.max_amount), max_price_per_unit: hex(src.l1_data_gas.max_price_per_unit) },
+        l2_gas: { max_amount: hex(capped), max_price_per_unit: hex(src.l2_gas.max_price_per_unit) },
+      },
+    };
+  }
+  const { transaction_hash } = await account.execute(calls, details);
+  // A public chain takes seconds per block, not milliseconds.
+  const r = await provider.waitForTransaction(transaction_hash, {
+    retries: ON_SEPOLIA ? 400 : 200, retryInterval: ON_SEPOLIA ? 3000 : 500,
+  });
   const status = r.execution_status ?? r.finality_status;
   if (status && String(status).includes('REVERTED')) fail(`${entrypoint} reverted: ${r.revert_reason}`);
   return transaction_hash;
@@ -288,6 +355,34 @@ for (let seat = 0; seat < SEATS; seat++) {
 }
 
 step('blinds and betting to showdown');
+// Every seat must have approved the game before a blind can be pulled.
+//
+// This script had no approve step at all and still passed on devnet, because
+// scripts/smoke_local.mjs had run against the same node earlier and left an
+// allowance behind. On a fresh chain there is none, and post_blinds died with
+// "ERC20: insufficient allowance" -- a test quietly depending on state another
+// test created, which is worth strictly more than the bug it hid.
+//
+// The allowance is what makes post_blinds safe to leave permissionless: a
+// caller moves the player's money only in the amount, and to the destination,
+// that the contract chose.
+{
+  const erc20 = new CallData([
+    { type: 'function', name: 'approve', state_mutability: 'external',
+      inputs: [{ name: 'spender', type: 'core::starknet::contract_address::ContractAddress' },
+               { name: 'amount', type: 'core::integer::u256' }],
+      outputs: [{ type: 'core::bool' }] }]);
+  for (let s = 0; s < SEATS; s++) {
+    const { transaction_hash } = await players[s].execute([{
+      contractAddress: TOKEN, entrypoint: 'approve',
+      calldata: erc20.compile('approve', { spender: GAME, amount: { low: 10n ** 18n, high: 0n } }),
+    }]);
+    await provider.waitForTransaction(transaction_hash, {
+      retries: ON_SEPOLIA ? 400 : 200, retryInterval: ON_SEPOLIA ? 3000 : 500,
+    });
+  }
+  ok('both seats approved the game to pull their blinds');
+}
 await send(dealer, 'post_blinds', { table_id: TABLE });
 ok(`blinds posted, pot ${await view.get_pot(TABLE)}`);
 
