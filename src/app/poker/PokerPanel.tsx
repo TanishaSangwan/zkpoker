@@ -26,6 +26,7 @@ import Felt from './components/Felt';
 import PhasePanel from './components/PhasePanel';
 import RevealPanel from './components/RevealPanel';
 import { loadOrCreateSeatKey, seatKeyIsPersisted, type SeatIdentity } from '@/lib/identity';
+import { loadHoleOpening } from '@/lib/reveal';
 import type { Ciphertext } from '@/lib/deck';
 import { useProvingEnvironment } from './useProvingEnvironment';
 
@@ -261,7 +262,7 @@ export default function PokerPanel() {
             account={account} provider={provider} contract={contract}
             chainId={String(providerIndex)} refresh={refresh}
           />
-          <YourHand table={table} yourSeat={yourSeat} />
+          <YourHand table={table} yourSeat={yourSeat} chainId={String(providerIndex)} contract={contract} />
         </>
       ) : table && !table.exists ? (
         <CreateTable
@@ -432,17 +433,55 @@ function Field({ label, value, onChange }: { label: string; value: string; onCha
  * driven from here they show what the CONTRACT has recorded, which is the only
  * thing that can be checked.
  */
-function YourHand({ table, yourSeat }: any) {
+function YourHand({ table, yourSeat, chainId, contract }: any) {
+  // Read the cards back from local state, not from the chain.
+  //
+  // A hole card is only ON-CHAIN once it has been shown at showdown, so a view
+  // that renders only what the contract knows shows a player nothing but the
+  // backs of their own cards for the entire hand. The card is recovered
+  // locally at dealing time -- c2 minus the combined share -- and stored with
+  // the opening that will reopen the commitment later, so it is already here.
+  //
+  // Nobody else can compute it: it needs every party's share for this
+  // position, and this seat's own share never leaves this browser.
+  const [local, setLocal] = useState<Record<number, number | null>>({});
+  useEffect(() => {
+    if (yourSeat === null) return;
+    const next: Record<number, number | null> = {};
+    for (const slot of [0, 1]) {
+      const o = loadHoleOpening({ chainId, contract, tableId: table.tableId, seat: yourSeat, slot });
+      next[slot] = o ? o.card : null;
+    }
+    setLocal(next);
+  }, [yourSeat, chainId, contract, table.tableId, table.seats]);
+
   if (yourSeat === null) return null;
   const seat = table.seats[yourSeat];
+
   return (
     <div className={styles.section}>
       <div className={styles.sectionHead}>
         <div className={styles.sectionTitle}>Your hand</div>
         <div className={styles.sectionHint}>
-          Shares committed at dealing time bind the card — no shopping for a friendlier share set
-          after seeing the board.
+          Recovered on this device from every party&apos;s share. Nobody else can compute it —
+          opening it needs your share, and yours never leaves this browser.
         </div>
+      </div>
+      <div className={styles.feltCards} style={{ justifyContent: 'flex-start', marginBottom: 10 }}>
+        {[0, 1].map((slot) => {
+          const card = seat.holeRevealed[slot] ? seat.holeCards[slot] : local[slot];
+          if (card === null || card === undefined) {
+            return <div key={slot} className={styles.cardBack} style={{ width: 44, height: 62 }} />;
+          }
+          const suit = Math.floor(card / 13);
+          const red = suit === 1 || suit === 2;
+          return (
+            <div key={slot} className={styles.cardFace}
+              style={{ width: 44, height: 62, fontSize: 18, color: red ? '#c0392b' : undefined }}>
+              {cardName(card)}
+            </div>
+          );
+        })}
       </div>
       <div className={styles.stateGrid}>
         {[0, 1].map((slot) => (
@@ -450,14 +489,23 @@ function YourHand({ table, yourSeat }: any) {
             <div className={styles.stateLabel}>slot {slot}</div>
             <div className={styles.stateValue}>
               {seat.holeRevealed[slot]
-                ? cardName(seat.holeCards[slot])
-                : seat.holeCommitted[slot]
-                  ? 'committed, not revealed'
-                  : 'no shares yet'}
+                ? `${cardName(seat.holeCards[slot])} — shown on-chain`
+                : local[slot] != null
+                  ? `${cardName(local[slot]!)} — known only to you`
+                  : seat.holeCommitted[slot]
+                    ? 'committed, but this browser has no opening stored'
+                    : 'not dealt yet'}
             </div>
           </div>
         ))}
       </div>
+      {!seat.holeRevealed[0] && local[0] == null && seat.holeCommitted[0] ? (
+        <div className={styles.caution}>
+          This seat committed to a hand but this browser holds no opening for it — dealt in a
+          different browser, or storage was cleared. Without the opening you cannot show at
+          showdown, and mucking forfeits.
+        </div>
+      ) : null}
     </div>
   );
 }
