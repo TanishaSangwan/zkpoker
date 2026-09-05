@@ -75,6 +75,22 @@ export default function RevealPanel(p: Props) {
     return () => { t.close(); };
   }, [table.tableId]);
 
+  // Wake the DLEQ prover as soon as there is a deck, not when the clock is
+  // running.
+  //
+  // initDleqProver loads garaga's wasm for the MSM hints. It is idempotent and
+  // cheap afterwards, but the FIRST call is not, and every showdown path used
+  // to pay it inside a ten-second deadline -- so a tab's first reveal was its
+  // slowest, which is exactly the one that gets mucked. Paying it during
+  // dealing costs nothing: there is no clock there.
+  useEffect(() => {
+    if (!table.deckOpened) return;
+    void initDleqProver().catch(() => {
+      // Reported by the first action that actually needs it; a warm-up that
+      // fails must not put an error on screen by itself.
+    });
+  }, [table.deckOpened]);
+
   const keys = useMemo(() => {
     const m = new Map<number, Point>();
     for (const s of table.seats) if (s.occupied && s.keyRegistered && s.pk) m.set(s.seat, s.pk);

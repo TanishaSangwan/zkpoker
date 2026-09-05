@@ -261,10 +261,17 @@ for (;;) {
         // A seat that declines to show simply does not win; mucking forfeits
         // rather than blocking, so a hand where somebody stays quiet still
         // resolves for everyone else.
+        // Mucked seats are NOT contenders. Counting them was a live-lock:
+        // a seat that muck or the clock removed can never reveal, so
+        // `shown === contenders` was unreachable and the keeper waited on a
+        // hand that was already decided. settle_from_reveals itself treats a
+        // muck as a forfeit rather than a veto, so there was nothing to wait
+        // for.
         let contenders = 0, shown = 0;
         for (let seat = 0; seat < maxSeats; seat++) {
           if (BigInt(await view.get_seat_owner(TABLE, String(seat))) === 0n) continue;
           if (await view.get_seat_folded(TABLE, String(seat))) continue;
+          if (await view.get_seat_mucked(TABLE, String(seat))) continue;
           contenders += 1;
           if (await view.get_hole_revealed(TABLE, String(seat), 0)
               && await view.get_hole_revealed(TABLE, String(seat), 1)) shown += 1;
