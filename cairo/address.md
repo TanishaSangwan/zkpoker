@@ -1,6 +1,6 @@
 # Deployments
 
-## Starknet Sepolia — 2026-09-06
+## Starknet Sepolia — 2026-09-06 (K=16 redeploy)
 
 The real deployment. Public, permanent, and readable by anyone at
 `sepolia.voyager.online`. Unlike the devnet record below, these addresses do
@@ -8,12 +8,23 @@ not come back if something is wiped — a redeploy produces new ones.
 
 | | class hash | address |
 |---|---|---|
-| `UltraKeccakZKHonkVerifier` (shuffle) | `0x052273e9c0b297c2aabe7f97fa2d10727a6ba113c44c69d9123eda277a3ea8c1` | `0x04e66d8d6f84d246149e98c702813ba68b9aab6fd56dd2306914f0377804baa9` |
-| `UltraKeccakZKHonkVerifier` (deck open) | `0x02823287183c4ef5f5b0a7b101b54a211819f55f859d4a6af54d68afde8d0a24` | `0x07a82f384e34a26370b927d2867ab25acc45c018c1cc635a894c7da57c2d957f` |
-| `SchnorrKeyVerifier` | `0x05c89ad6970fcccd1ae338de0509b189f9a37004470898d451ebb4be92f8537e` | `0x06ae1170b02d132327b4fb3acbc81b58102462a44df633d232006443c5540d39` |
-| `DleqVerifier` | `0x07258c8fea11a1b883e1bf8ec83d7d60898d33d09f6e7fd6e5e2efe06b793329` | `0x07ed3652358eb9308a83552c6562ce7e751ae3004d070b3e3c0c4ab8071bda8d` |
-| `VerifierAdapter` | `0x02de3b5b72e02327798056f5379517a5d1f580b54e07d439c1fbcb04909a7183` | `0x01e508a18df3eb3a3c4a244389b38376e4c357e2ec75d3075e4645113536a76d` |
-| `PokerGame` | `0x00cf36ca2c27999cf4241476183a0c7fb0d7f536f468add2c546a192d5ca7fee` | `0x06b3845ba0519a064054b6465aaa115aea929d814afc0719e8425d1bb5f64359` |
+| `UltraKeccakZKHonkVerifier` (shuffle) | `0x052273e9c0b297c2aabe7f97fa2d10727a6ba113c44c69d9123eda277a3ea8c1` | `0x00d45865acfa430f44d626c47faa3a4b4809101ee22a82b82aa64b56f6390216` |
+| `UltraKeccakZKHonkVerifier` (deck open, **K=16**) | `0x06b787bfdf874ded92d4b3e96cc445050e310dc920bb7c150e2736241cf99ded` | `0x035ef5c1e0e81001c11e68f86bc5018c5d7530c8b69c399b5f1555aeab07b26e` |
+| `SchnorrKeyVerifier` | `0x05c89ad6970fcccd1ae338de0509b189f9a37004470898d451ebb4be92f8537e` | `0x055ffb43ea1027212a8749f2888d6a482fa322cff768437b2c5589bdaabcc28d` |
+| `DleqVerifier` | `0x07258c8fea11a1b883e1bf8ec83d7d60898d33d09f6e7fd6e5e2efe06b793329` | `0x055aeac49f052f9abd369f4cf4f4a8d0c44b1cbb85aab0aa38c7297dc6030663` |
+| `VerifierAdapter` | `0x02de3b5b72e02327798056f5379517a5d1f580b54e07d439c1fbcb04909a7183` | `0x077ef55a6b9ad68ad6d3c9233100d736c49bbd6e7062337d3c788378b2aebb72` |
+| `PokerGame` | `0x049dbee252721c706180cb61ab2999865cd153d780359b41990b52a49e97ee5a` | `0x038387676d4ab0c1738089f026a48e668a1c9a410ee3917ac4b32a9d50a6458d` |
+
+Redeployed 2026-09-06 for **K=16** deck opening (§6.2). Only two classes are
+new — the deck-open verifier and `PokerGame`; the shuffle, Schnorr, DLEQ and
+adapter classes were already declared and were re-used, which is why their
+class hashes are unchanged and only their addresses moved. The superseded
+`PokerGame` at `0x06b3845b…` still exists on-chain and still works; it opens
+decks in chunks of 5.
+
+| superseded | address |
+|---|---|
+| `PokerGame` (K=5) | `0x06b3845ba0519a064054b6465aaa115aea929d814afc0719e8425d1bb5f64359` |
 
 Deployed with `NETWORK=sepolia ./scripts/deploy_local.sh` from the sncast
 account `sepolia` (`0x719eb8a2f1673e9afc94de57c69b69c6c0cfe555711f219c62ddcf953c78cac`),
