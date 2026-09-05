@@ -722,6 +722,94 @@ would produce a proof the on-chain verifier rejects (§ the `public_inputs_offse
 incompatibility in `circuits/shuffle_verifier/README.md`), so measuring it would
 have measured nothing.
 
+### 9.2 BLOCKER, found 2026-09-05: beta.16 cannot consume `a_0`
+
+Building the browser client turned up a defect that no earlier measurement
+could have caught, and it stops the first shuffle of every hand.
+
+`a_0` is `(identity, M_i)`, and the identity is encoded `(0, 0)` — there is no
+room for anything else, because the deck is four bare fields per card and
+Noir's `EmbeddedCurvePoint` carries a third component, `is_infinite`. The
+shuffle circuit rebuilds each ciphertext with `EmbeddedCurvePoint::new(x, y)`,
+which sets `is_infinite = false`, and then adds `r·G` to it.
+
+| Toolchain | `deck_in = a_0` |
+|---|---|
+| nargo/acvm **1.0.0-beta.22** (project pin) | **solves** |
+| acvm **1.0.0-beta.16** (what the deployed verifier requires) | **fails** |
+
+The beta.16 failure is:
+
+```
+Failed to solve blackbox function: embedded_curve_add, reason:
+Point (0x0…0, 0x0…0) is not on curve
+```
+
+Reproduced three ways: in the browser through the client, in Node against the
+beta.16 circuit build, and by contrast with `nargo execute` under beta.22,
+which solves the identical inputs. The two toolchains' ACIR is not even
+mutually deserialisable, so they cannot be mixed to work around it.
+
+**Why seven rounds of review missed it.** §9.0's browser-proving measurement
+used `circuits/shuffle_verifier/example_proof/beta16_build/Prover.toml`, and
+that fixture is a **mid-chain** shuffle: its `deck_in` contains *no zeros at
+all*. Every ciphertext in it is a real point. So the identity path was never
+executed under beta.16 — only under beta.22, where it works. §10's claim that
+the pinned commitment was "verified end to end" by solving the untouched
+shuffle circuit with `deck_in = a_0` is true, and was done under beta.22,
+which is **not** the toolchain that produces proofs the deployed verifier
+accepts.
+
+Only the first link is affected. Every later shuffle consumes a deck whose
+`c1` components are all real points, because link 1 adds `r·G` to each.
+
+**There is no client-side fix.** `a_0`'s encoding is pinned by
+`INITIAL_DECK_COMMITMENT` in the contract and the circuit is what reads it.
+Closing this means constructing that point with an explicit `is_infinite`
+rather than `new`, recompiling under beta.16, and regenerating and
+redeploying the verifier — a circuit change, with a new VK. Until then
+`src/lib/shuffle.ts` detects the exact error and explains it rather than
+surfacing a wasm stack trace.
+
+---
+
+### 9.3 The deck is delivered off-chain, and the timeout blames the wrong seat
+
+`submit_shuffle(table_id, new_commitment, proof)` publishes a commitment and a
+proof. It does **not** publish the deck — decks are private, with only
+Poseidon2 commitments public (§7.2), which is what keeps the verifier at four
+public inputs. So each shuffler must send the deck itself to the next one
+off-chain.
+
+`claim_shuffle_timeout` convicts `shuffle_order[shuffle_turn]` — the seat whose
+turn it is. But the seat that can stall the chain is the **previous** one: it
+posts its commitment on-chain, satisfying its own deadline, then never sends
+the deck. The next player cannot shuffle, because they have nothing to shuffle
+and could not satisfy the chain-head check if they invented one. When their
+deadline expires, **they** are convicted and **their** stake is forfeited.
+
+So the griefer pays nothing and their victim pays everything — the exact
+inversion the forfeit was added to prevent (§8.1).
+
+Not fixed here; it needs a protocol decision, and there are at least three
+shapes:
+
+- **Publish the deck as calldata** on `submit_shuffle`. 416 felts, not stored,
+  and Starknet settles only state diffs — the same argument that already makes
+  §5's calldata affordable. Delivery becomes unforgeable and the timeout
+  becomes correct, at a real but bounded calldata cost.
+- **A delivery receipt**: the next player acknowledges on-chain, and the clock
+  only starts once they have. Cheap, but adds a round trip per link and a new
+  way to stall.
+- **Make the accusation path cover it**, as it covers withheld shares: let the
+  stalled player name their predecessor rather than being convicted by default.
+
+The client sends decks over the same encrypted transport as shares and shows
+"waiting for the deck from seat N", which makes the stall visible — but visible
+is not the same as attributable, and only the chain can attribute it.
+
+---
+
 ### 9.1 Why the chain is NOT capped at `k < n` — rejected
 
 Capping the chain looks like free money: "unbiased as long as ≥1 shuffler is
@@ -836,13 +924,40 @@ but "should be" is not "measured," and the entire client-side story rests on it.
   Chromium: ~5.2 s client-side per shuffle (375 ms witness + ~4.8 s proof) on 6
   threads, 9.9 s single-threaded. The browser's VK is byte-identical to the
   deployed verifier's. See §9.0 and `scripts/browser-proving/`.
-- Any client UI for the above.
+- ~~Any client UI for the above~~ — **built, 2026-09-05.** `src/lib/` carries
+  the client crypto (Grumpkin, Schnorr, DLEQ individual + aggregate, the deck
+  and its Poseidon2 commitments, the shuffle prover, encrypted share exchange,
+  seat-key custody) and `src/app/poker/` the table: seating, key registration,
+  the shuffle chain, betting with the action clock, timeouts and settlement.
+  `/poker/selftest` is a deployment check that proves one real shuffle and
+  reports whether the host is cross-origin isolated.
+
+  Verified rather than asserted: `scripts/check_client_crypto.mjs` bundles the
+  client modules, generates fixtures, and writes
+  `cairo-verifier/tests/test_client_vectors.cairo`, where the **real**
+  `SchnorrKeyVerifier` and `DleqVerifier` accept them — 19 tests, including the
+  aggregate opening a named card through `verify_card_reveal`. bb.js's
+  `poseidon2Hash` over `a_0` reproduces `INITIAL_DECK_COMMITMENT` byte for
+  byte, so the browser computes commitments in the circuit's own hash.
+  `scripts/check_browser_client.mjs` drives the production build headlessly and
+  confirms COOP/COEP, cross-origin isolation and 6-thread proving.
+
+  Two things were recorded rather than papered over: §9.2's beta.16 blocker,
+  which stops the first shuffle of every chain, and §9.3's deck-delivery
+  griefing gap. Neither is a UI bug and neither has a client-side fix.
+
+  Not wired up: deck opening (`src/lib/deckOpen.ts` exists and mirrors the
+  contract's chunking and padding, but `circuits/deck_open` has no beta.16
+  build staged), and the reveal/showdown and accusation flows, which need the
+  opening first.
 - ~~Bet-matching and turn-order enforcement~~ — **done.** `bet`/`fold`/`check`
   are turn-ordered; a street cannot end until every seat still in the hand has
   acted since the last raise and matched the high; a raise reopens the action.
 
 **To be deleted:** V1 commit-reveal (`commit_deal`/`reveal_seed`/`shuffle.cairo`),
-`MockShuffleVerifier`, the seed-based fairness UI.
+`MockShuffleVerifier`. ~~The seed-based fairness UI~~ — **deleted 2026-09-05**
+(`src/app/poker/fairness.ts` and `pokerActions.ts` are gone; nothing in the
+client calls the V1 entrypoints any more).
 
 ---
 

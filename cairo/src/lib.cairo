@@ -850,6 +850,26 @@ pub trait IPokerGame<TState> {
     fn get_shuffle_complete(self: @TState, table_id: felt252) -> bool;
     fn get_table_voided(self: @TState, table_id: felt252) -> bool;
     fn get_shuffle_verifier(self: @TState) -> ContractAddress;
+
+    // ── Views the client needs, added when the browser client was built ──
+    //
+    // Every one of these was previously reachable ONLY by replaying events.
+    // That works, but it makes core state depend on event indexing: an RPC
+    // that paginates, prunes, or lags leaves the client rendering a table
+    // that does not exist. These are pure reads of storage the contract
+    // already keeps, so they add no surface -- just a way to ask directly.
+    fn get_seat_key_registered(self: @TState, table_id: felt252, seat: felt252) -> bool;
+    // (x, y) of a seat's registered ElGamal key share, or (0, 0) if unregistered.
+    fn get_seat_pk(self: @TState, table_id: felt252, seat: felt252) -> (u256, u256);
+    // The table's joint key, set by begin_shuffle and checked against the sum
+    // of the shares by the adapter. (0, 0) before the shuffle opens.
+    fn get_joint_pk(self: @TState, table_id: felt252) -> (u256, u256);
+    fn get_seat_folded(self: @TState, table_id: felt252, seat: felt252) -> bool;
+    fn get_shuffle_started(self: @TState, table_id: felt252) -> bool;
+    fn get_position_opened(self: @TState, table_id: felt252, position: u32) -> bool;
+    // 0 when this seat has not committed its shares for that slot yet.
+    fn get_hole_commitment(self: @TState, table_id: felt252, seat: felt252, slot: u32) -> felt252;
+    fn get_deck_open_chunk(self: @TState, table_id: felt252) -> u32;
     fn get_pot(self: @TState, table_id: felt252) -> u128;
     fn get_seed_hash(self: @TState, table_id: felt252) -> felt252;
     fn get_revealed_seed(self: @TState, table_id: felt252) -> felt252;
@@ -3208,6 +3228,45 @@ pub mod PokerGame {
             self: @ContractState, table_id: felt252, seat: felt252, slot: u32,
         ) -> bool {
             self.hole_revealed.entry((table_id, seat, slot)).read()
+        }
+
+        fn get_seat_key_registered(
+            self: @ContractState, table_id: felt252, seat: felt252,
+        ) -> bool {
+            self.seat_key_registered.entry((table_id, seat)).read()
+        }
+
+        fn get_seat_pk(self: @ContractState, table_id: felt252, seat: felt252) -> (u256, u256) {
+            (
+                self.seat_pk_x.entry((table_id, seat)).read(),
+                self.seat_pk_y.entry((table_id, seat)).read(),
+            )
+        }
+
+        fn get_joint_pk(self: @ContractState, table_id: felt252) -> (u256, u256) {
+            (self.joint_pk_x.entry(table_id).read(), self.joint_pk_y.entry(table_id).read())
+        }
+
+        fn get_seat_folded(self: @ContractState, table_id: felt252, seat: felt252) -> bool {
+            self.seat_folded.entry((table_id, seat)).read()
+        }
+
+        fn get_shuffle_started(self: @ContractState, table_id: felt252) -> bool {
+            self.shuffle_started.entry(table_id).read()
+        }
+
+        fn get_position_opened(self: @ContractState, table_id: felt252, position: u32) -> bool {
+            self.position_opened.entry((table_id, position)).read()
+        }
+
+        fn get_hole_commitment(
+            self: @ContractState, table_id: felt252, seat: felt252, slot: u32,
+        ) -> felt252 {
+            self.hole_commitment.entry((table_id, seat, slot)).read()
+        }
+
+        fn get_deck_open_chunk(self: @ContractState, table_id: felt252) -> u32 {
+            self.deck_open_chunk.entry(table_id).read()
         }
 
         fn get_deck_opened(self: @ContractState, table_id: felt252) -> bool {

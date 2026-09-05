@@ -6,7 +6,12 @@
     "dev": "next dev --webpack",
     "build": "next build --webpack",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "circuits": "node scripts/build_client_circuits.mjs",
+    "abi": "node scripts/gen_abi.mjs",
+    "check:abi": "node scripts/gen_abi.mjs --check",
+    "check:crypto": "node scripts/check_client_crypto.mjs",
+    "check:browser": "node scripts/check_browser_client.mjs"
   },
   "dependencies": {
     "@aztec/bb.js": "3.0.0-nightly.20251104",
@@ -26,6 +31,7 @@
     "@types/node": "24.10.2",
     "@types/react": "19.2.7",
     "esbuild": "^0.28.2",
+    "puppeteer-core": "^25.10.0",
     "typescript": "^5.9.3"
   },
   "packageManager": "yarn@1.22.22+sha512.a6b2f7906b721bba3d67d4aff083df04dad64c399707841b7acf00f6b133b7ac24255f2652fa22ae3534329dc6180534e98d17432037ff6fd140556e2bb3137e"

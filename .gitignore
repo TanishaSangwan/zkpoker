@@ -76,3 +76,6 @@ circuits/*/*/target/
 
 # esbuild scratch for scripts/check_client_crypto.mjs
 node_modules/.cache/
+
+# Derived proving artifacts (~12MB), rebuilt by scripts/build_client_circuits.mjs
+/public/circuits/

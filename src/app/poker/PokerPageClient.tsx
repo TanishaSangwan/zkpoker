@@ -22,9 +22,11 @@ export default function PokerPageClient() {
       <header className={styles.hero}>
         <h1 className={styles.heroTitle}>PokerGame</h1>
         <p className={styles.heroSub}>
-          Drives cairo/src/lib.cairo's PokerGame contract directly — table
-          lifecycle, betting, commit-reveal fairness, and on-chain showdown.
-          See the banner below if it isn't deployed on your network yet.
+          Mental poker on Starknet, with no trusted dealer. Every seat shuffles
+          the deck and proves it did so honestly; every card needs a decryption
+          share from <em>every</em> player. Key generation, shuffling and proving
+          all happen in this browser — the permutation is the secret the protocol
+          protects, so it never leaves your machine.
         </p>
       </header>
 
@@ -33,11 +35,11 @@ export default function PokerPageClient() {
       </main>
 
       <footer className={uni.footer}>
-        <a href="https://github.com/PhilippeR26/Starknet-WalletAccount" target="_blank" rel="noreferrer">
-          Repo
-        </a>
+        <span>Starknet.js v10.4.0</span>
         <span className={uni.footerDot}>·</span>
-        <span>Powered by Starknet.js v10.4.0</span>
+        <span>Noir + UltraHonk via bb.js</span>
+        <span className={uni.footerDot}>·</span>
+        <span>Garaga 1.1.0 on Grumpkin</span>
       </footer>
     </div>
   );
