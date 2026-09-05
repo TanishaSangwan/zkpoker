@@ -111,6 +111,8 @@ export async function runAggregate(args: {
   mySeat: number;
   mySecret: bigint;
   timeoutMs?: number;
+  /** How long a non-proposer waits for the proposer before starting itself. */
+  proposerGraceMs?: number;
   onProgress?: (phase: string, outstanding: number[]) => void;
 }): Promise<AggregateResult> {
   const { transport, tableId, position, h, jointKey, keys, shares, mySeat, mySecret } = args;
@@ -146,7 +148,9 @@ export async function runAggregate(args: {
   const send = (kind: Envelope['kind'], body: unknown) =>
     transport.publish({
       tableId, position, from: mySeat, kind, to: null, body,
-      session: session ?? undefined, ephemeral: true,
+      // '' means "this run is unsessioned" -- carried as absent on the wire.
+      session: session ? session : undefined,
+      ephemeral: true,
     });
 
   const done = new Promise<AggregateResult>((resolve, reject) => {
@@ -154,14 +158,22 @@ export async function runAggregate(args: {
       if (e.tableId !== tableId || e.position !== position || e.from === mySeat) return;
       try {
         // Adopt the proposer's run; ignore every other.
+        //
+        // An UNSESSIONED message from the proposer is accepted and adopted as
+        // an unsessioned run (session = ''). Requiring a session id here
+        // deadlocked the table in silence against any client that does not
+        // send one -- an older build, or a different implementation -- because
+        // the message was ignored forever and nothing ever reported why. A
+        // missing id costs the stale-run filtering; it must not cost the
+        // protocol.
         if (session === null) {
-          if (e.from !== proposer || !e.session) return;
-          session = e.session;
-          // Only now can this seat commit: its own envelope has to carry the
-          // run id, and until the proposer speaks there is no run to join.
+          if (e.from !== proposer) return;
+          session = e.session ?? '';
+          // Only now can this seat commit: until the proposer speaks there is
+          // no run to join.
           session_started();
         }
-        if (e.session && e.session !== session) return;
+        if (session && e.session && e.session !== session) return;
         const body = e.body as any;
         if (e.kind === 'nonce-commit') state.acceptCommitment(e.from, BigInt(body.commitment));
         else if (e.kind === 'nonce-reveal') {
@@ -235,6 +247,22 @@ export async function runAggregate(args: {
     }
     if (mySeat === proposer) session_started();
 
+    // If the proposer never speaks, start anyway rather than waiting out the
+    // full timeout in silence.
+    //
+    // A non-proposer that only ever reacts is hostage to one specific seat
+    // being present and running compatible code. After a short grace period
+    // this seat opens an unsessioned run itself; the proposer, if it appears,
+    // adopts nothing but its own and the duplicate-commitment rule keeps the
+    // two from being mistaken for equivocation.
+    const graceMs = Number(args.proposerGraceMs ?? 8000);
+    const grace = setTimeout(() => {
+      if (session === null && state.phase === 'committing') {
+        session = '';
+        session_started();
+      }
+    }, graceMs);
+
     // Re-announce whatever this seat owes for the CURRENT round, until the
     // round moves on.
     //
@@ -259,7 +287,7 @@ export async function runAggregate(args: {
         advanceMe();
       }
     }, 2000);
-    const clearAnnounce = () => clearInterval(announce);
+    const clearAnnounce = () => { clearInterval(announce); clearTimeout(grace); };
   });
 
   return done;

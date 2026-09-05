@@ -129,7 +129,17 @@ export default function RevealPanel(p: Props) {
           shares.set(e.from, dealing.acceptShare({ from, h, msg: normalise(msg) }));
           setBusy(`waiting on seat ${outstanding().join(', ') || '—'}`);
           if (outstanding().length === 0) { stop(); clearTimeout(timer); resolve(); }
-        } catch (err) { stop(); clearTimeout(timer); reject(err); }
+        } catch (err) {
+          // One bad envelope must not abort the gather. The relay replays
+          // history to every new subscriber, so a client legitimately sees
+          // messages from earlier attempts and from seats it cannot decrypt
+          // for -- rejecting on the first of those meant a single stale frame
+          // killed a reveal that had every share it needed. A share that does
+          // not verify is dropped and named; the wait continues, and the
+          // timeout is what reports a seat that genuinely never sent one.
+          say(`ignored a bad share for position ${position} from seat ${e.from}: ` +
+              `${String((err as Error)?.message ?? err).slice(0, 90)}`);
+        }
       });
       const timer = setTimeout(() => {
         stop();
@@ -379,11 +389,25 @@ export default function RevealPanel(p: Props) {
     await initDleqProver();
     const { c1, c2 } = await L.openedAt(pos);
     const shares = await L.gatherShares(pos, c1, false);
+    // Report the ROUND, not just "working".
+    //
+    // Without this the UI kept showing the last message gatherShares set --
+    // "waiting on seat —", meaning it had every share it needed -- for the
+    // entire three-round aggregate, so a table that was mid-protocol looked
+    // identical to one stuck collecting shares. The phase and who is
+    // outstanding is the whole diagnostic for an n-of-n round.
+    setBusy(`position ${pos}: shares in, starting the aggregate`);
     const agg = await dealing.runAggregate({
       transport: liveOnly.current!, tableId: L.table.tableId, position: pos, h: c1,
       jointKey: L.table.jointKey!, keys: L.keys, shares,
       mySeat: yourSeat!, mySecret: L.identity!.secret,
+      onProgress: (phase, outstanding) => {
+        const who = outstanding.length ? `waiting on seat ${outstanding.join(', ')}` : 'all in';
+        setBusy(`position ${pos}: ${phase} round — ${who}`);
+        say(`pos ${pos} ${phase}: ${who}`);
+      },
     });
+    setBusy(null);
     const community = pos >= 2 * L.table.maxSeats;
     if (!community) return;
     const index = pos - 2 * L.table.maxSeats;
@@ -420,9 +444,9 @@ export default function RevealPanel(p: Props) {
       const communityIndex = pos - 2 * latest.current.table.maxSeats;
       if (communityIndex >= 0 && latest.current.table.street < streetFor(communityIndex)) return;
       joined.current.add(pos);
-      void runFor(pos).catch(() => {
+      void runFor(pos).catch((err) => {
         joined.current.delete(pos); // let a fresh run be joined
-        say(`aggregate for position ${pos} did not finish`);
+        say(`aggregate for position ${pos} failed: ${String(err?.message ?? err).slice(0, 110)}`);
       });
     });
     return stop;
@@ -455,9 +479,9 @@ export default function RevealPanel(p: Props) {
       if (joined.current.has(pos)) continue;
       joined.current.add(pos);
       say(`board ${index} is due -- starting the reveal`);
-      void runFor(pos).catch(() => {
+      void runFor(pos).catch((err) => {
         joined.current.delete(pos);
-        say(`reveal for board ${index} did not finish`);
+        say(`reveal for board ${index} failed: ${String(err?.message ?? err).slice(0, 110)}`);
       });
     }
   }, [autoServe, deckIsOpen, yourSeat, mySecretHex, table.street, table.community, table.jointKey, table.maxSeats, runFor, say]);
@@ -553,6 +577,15 @@ export default function RevealPanel(p: Props) {
             <span className={styles.chip}>
               {served.current.size}/{owed.length} shares served
             </span>
+            <span className={styles.chip}>
+              parties: {[...keys.keys()].sort((a, b) => a - b).join(', ') || 'none'}
+            </span>
+            {/* Both auto-effects return early without a joint key, silently.
+                An n-of-n aggregate then stalls with no error anywhere. */}
+            <span className={table.jointKey ? styles.chip : styles.caution}>
+              joint key: {table.jointKey ? 'yes' : 'MISSING'}
+            </span>
+            <span className={styles.chip}>street {table.street}</span>
           </div>
 
           {autoLog.length ? (
