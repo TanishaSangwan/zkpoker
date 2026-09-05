@@ -1,5 +1,60 @@
 # Deployments
 
+## Starknet Sepolia — 2026-09-06
+
+The real deployment. Public, permanent, and readable by anyone at
+`sepolia.voyager.online`. Unlike the devnet record below, these addresses do
+not come back if something is wiped — a redeploy produces new ones.
+
+| | class hash | address |
+|---|---|---|
+| `UltraKeccakZKHonkVerifier` (shuffle) | `0x052273e9c0b297c2aabe7f97fa2d10727a6ba113c44c69d9123eda277a3ea8c1` | `0x04e66d8d6f84d246149e98c702813ba68b9aab6fd56dd2306914f0377804baa9` |
+| `UltraKeccakZKHonkVerifier` (deck open) | `0x02823287183c4ef5f5b0a7b101b54a211819f55f859d4a6af54d68afde8d0a24` | `0x07a82f384e34a26370b927d2867ab25acc45c018c1cc635a894c7da57c2d957f` |
+| `SchnorrKeyVerifier` | `0x05c89ad6970fcccd1ae338de0509b189f9a37004470898d451ebb4be92f8537e` | `0x06ae1170b02d132327b4fb3acbc81b58102462a44df633d232006443c5540d39` |
+| `DleqVerifier` | `0x07258c8fea11a1b883e1bf8ec83d7d60898d33d09f6e7fd6e5e2efe06b793329` | `0x07ed3652358eb9308a83552c6562ce7e751ae3004d070b3e3c0c4ab8071bda8d` |
+| `VerifierAdapter` | `0x02de3b5b72e02327798056f5379517a5d1f580b54e07d439c1fbcb04909a7183` | `0x01e508a18df3eb3a3c4a244389b38376e4c357e2ec75d3075e4645113536a76d` |
+| `PokerGame` | `0x00cf36ca2c27999cf4241476183a0c7fb0d7f536f468add2c546a192d5ca7fee` | `0x06b3845ba0519a064054b6465aaa115aea929d814afc0719e8425d1bb5f64359` |
+
+Deployed with `NETWORK=sepolia ./scripts/deploy_local.sh` from the sncast
+account `sepolia` (`0x719eb8a2f1673e9afc94de57c69b69c6c0cfe555711f219c62ddcf953c78cac`),
+itself deployed in
+[`0x341b99f5…`](https://sepolia.voyager.online/tx/0x0341b99f5767facadb1636d1add6dae160957a2907b6510b62c1c91143d1b3fe).
+
+The buy-in token is **canonical STRK**
+(`0x4718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d`), which
+sits at the same address on devnet, Sepolia and Mainnet. No mock: sncast builds
+release, so `cairo/`'s feature-gated `MockErc20` is not in the artifact, and a
+public deployment should not ship a token whose `mint()` is open to anyone.
+
+Verified live after deploying: 95 entrypoints, including the whole blind
+structure (`set_blinds`, `reveal_draw_card`, `post_blinds`, `start_next_hand`);
+`get_shuffle_verifier()` returns the adapter above; view calls answer.
+
+### What it cost
+
+**516.58 STRK**, against a pre-flight estimate of 516. Declares dominate, and
+they scale with contract size:
+
+| | declare |
+|---|---|
+| shuffle verifier | 126.85 |
+| deck-open verifier | 125.97 |
+| `PokerGame` (65,770 CASM felts) | 149.69 |
+| `SchnorrKeyVerifier` | 61.28 |
+| `DleqVerifier` | 38.15 |
+| `VerifierAdapter` | 14.34 |
+
+Worth recording because it is the kind of number nobody has to hand: at
+Sepolia's L2 gas price that day (`0x703f3d99c`, ~30.1 Gfri), declaring this
+stack cost about half a thousand STRK. Budget for a redeploy accordingly — and
+note that `PokerGame` alone is ~150 STRK, which is what a constructor change
+costs.
+
+`pool` is the deploying account. There is no STRK20 privacy pool wired in, and
+`privacy_invoke` is the only entrypoint that reads it — nothing in the poker
+flow touches it. It is constructor-fixed, so pointing it at a real pool means
+redeploying `PokerGame`.
+
 ## Local devnet — 2026-09-05 (redeployed with the blind structure)
 
 Deployed by `scripts/deploy_local.sh` against `starknet-devnet --seed 0`, and
@@ -61,7 +116,8 @@ That last pair is the point of running this at all. A mock verifier will accept
 any DLEQ; only the deployed one proves that the card deciding the blinds really
 is the card the committed deck holds at that position.
 
-Sepolia/mainnet: not deployed. Record here when they are.
+Mainnet: not deployed, and not advisable yet — PROTOCOL.md §8 and §9 still
+record open liveness and trust gaps.
 
 ## Inherited from the starter kit (not this project's contract)
 

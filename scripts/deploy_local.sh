@@ -107,7 +107,17 @@ say() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 # cairo/ only, so a profile name is invisible from the verifier packages and
 # fails with "Profile not found in global config", which reads like a missing
 # install rather than a missing file.
+# --wait on a public network, not on devnet.
+#
+# Devnet mines a block per transaction, so the next nonce is ready the instant
+# the previous call returns. A real chain is not: firing six declares
+# back-to-back builds each one against a nonce the node has not seen used yet,
+# and every call after the first fails "Invalid transaction nonce". Waiting for
+# acceptance is what makes the sequence a sequence.
 SN=(sncast --account "$ACCOUNT" --accounts-file "$ACCOUNTS_FILE" --json)
+if [ "$NETWORK" != devnet ]; then
+  SN+=(--wait --wait-timeout 600 --wait-retry-interval 5)
+fi
 SNARGS=(--url "$RPC")
 
 # sncast prints a human table by default; --json makes it parseable. `declare`
@@ -115,8 +125,16 @@ SNARGS=(--url "$RPC")
 # class errors, so an already-declared class is treated as success and the
 # hash recovered from the error.
 declare_contract() {
-  local dir="$1" name="$2" out hash
-  out="$(cd "$ROOT/$dir" && "${SN[@]}" declare "${SNARGS[@]}" --contract-name "$name" 2>&1 || true)"
+  local dir="$1" name="$2" out hash attempt
+  # A nonce error is transient on a public chain -- the node has simply not
+  # caught up with a transaction it already accepted -- so it is retried rather
+  # than treated as a failed declare. Anything else fails immediately.
+  for attempt in 1 2 3 4 5; do
+    out="$(cd "$ROOT/$dir" && "${SN[@]}" declare "${SNARGS[@]}" --contract-name "$name" 2>&1 || true)"
+    printf '%s' "$out" | grep -q "Invalid transaction nonce" || break
+    echo "  ($name: nonce not settled yet, retry $attempt)" >&2
+    sleep 15
+  done
   hash="$(printf '%s' "$out" | python3 -c '
 import sys, json, re
 raw = sys.stdin.read()
@@ -140,8 +158,13 @@ print(m.group(0) if m else "", end="")
 
 deploy_contract() {
   local hash="$1"; shift
-  local out addr
-  out="$(cd "$ROOT/cairo" && "${SN[@]}" deploy "${SNARGS[@]}" --class-hash "$hash" "$@" 2>&1 || true)"
+  local out addr attempt
+  for attempt in 1 2 3 4 5; do
+    out="$(cd "$ROOT/cairo" && "${SN[@]}" deploy "${SNARGS[@]}" --class-hash "$hash" "$@" 2>&1 || true)"
+    printf '%s' "$out" | grep -q "Invalid transaction nonce" || break
+    echo "  (deploy $hash: nonce not settled yet, retry $attempt)" >&2
+    sleep 15
+  done
   addr="$(printf '%s' "$out" | python3 -c '
 import sys, json
 for line in sys.stdin.read().splitlines():

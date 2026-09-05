@@ -7,7 +7,7 @@ import { ProviderInterface, RpcProvider } from "starknet";
 export const addrSTRK = "0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d";
 
 // Frontend RPC providers, indexed. The STRK20 privacy pool lives on Mainnet (0)
-// and Sepolia (2); index 1 is a spare public testnet endpoint; index 3 is a
+// and Sepolia (2); index 1 is a spare public Sepolia endpoint; index 3 is a
 // local `starknet-devnet` instance (no STRK20 pool there — see Strk20Networks
 // below — but PokerGame's own entrypoints work fine against it). Point
 // NEXT_PUBLIC_DEVNET_RPC_URL at a non-default devnet host/port if needed;
@@ -16,10 +16,27 @@ export const addrSTRK = "0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab0720185
 export const devnetRpcUrl = process.env.NEXT_PUBLIC_DEVNET_RPC_URL ?? "http://127.0.0.1:5050";
 export const DEVNET_PROVIDER_INDEX = 3;
 
+// Sepolia falls back to a PUBLIC endpoint when there is no Alchemy key.
+//
+// Without this, index 2's URL was the Alchemy host with the literal string
+// "undefined" glued on the end, so a project that had never set the key showed
+// a Sepolia deployment it could not read — and said nothing useful about why.
+// The key is still preferred when present: public endpoints rate-limit, and
+// this app polls.
+//
+// NEXT_PUBLIC_SEPOLIA_RPC_URL overrides both, which is the escape hatch for a
+// public node going away — the one this defaults to replaced two that had.
+const alchemyKey = process.env.NEXT_PUBLIC_PROVIDER_URL;
+export const sepoliaRpcUrl =
+    process.env.NEXT_PUBLIC_SEPOLIA_RPC_URL
+    ?? (alchemyKey
+        ? "https://starknet-sepolia.g.alchemy.com/starknet/version/rpc/v0_10/" + alchemyKey
+        : "https://api.cartridge.gg/x/starknet/sepolia");
+
 export const myFrontendProviders: ProviderInterface[] = [
-    new RpcProvider({ nodeUrl: "https://starknet-mainnet.g.alchemy.com/starknet/version/rpc/v0_10/" + process.env.NEXT_PUBLIC_PROVIDER_URL }),
-    new RpcProvider({ nodeUrl: "https://starknet-testnet.public.blastapi.io/rpc/v0_7" }),
-    new RpcProvider({ nodeUrl: "https://starknet-sepolia.g.alchemy.com/starknet/version/rpc/v0_10/" + process.env.NEXT_PUBLIC_PROVIDER_URL }),
+    new RpcProvider({ nodeUrl: "https://starknet-mainnet.g.alchemy.com/starknet/version/rpc/v0_10/" + alchemyKey }),
+    new RpcProvider({ nodeUrl: "https://starknet-sepolia.drpc.org" }),
+    new RpcProvider({ nodeUrl: sepoliaRpcUrl }),
     new RpcProvider({ nodeUrl: devnetRpcUrl })];
 
 // Display label for every provider index, including ones with no STRK20 pool
