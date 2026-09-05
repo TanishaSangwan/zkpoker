@@ -31,8 +31,12 @@ function seatStyle(index: number, total: number): React.CSSProperties {
 }
 
 function Seat({
-  seat, total, you, onTurn, dealer,
-}: { seat: SeatState; total: number; you: boolean; onTurn: boolean; dealer: boolean }) {
+  seat, total, you, onTurn, dealer, known,
+}: {
+  seat: SeatState; total: number; you: boolean; onTurn: boolean; dealer: boolean;
+  /** Cards this client knows locally for THIS seat -- only ever its own. */
+  known?: (number | null)[];
+}) {
   const cls = [
     styles.seat,
     !seat.occupied ? styles.seatEmpty : '',
@@ -53,25 +57,33 @@ function Seat({
             {!seat.keyRegistered ? <span className={styles.seatBadge} style={{ background: '#c0392b' }}>no key</span> : null}
             {onTurn && !seat.folded ? <span className={styles.seatBadge} style={{ background: '#f5c542', color: '#222' }}>turn</span> : null}
           </div>
-          {/* Hole cards: shown face-up only once REVEALED on-chain. A player's
-              own cards are known locally long before that, but rendering them
-              here would put private state in the shared view -- your own cards
-              belong in the "your hand" panel, which says where they came from. */}
+          {/* Hole cards.
+              Face-up in two cases and no others: the card has been REVEALED
+              on-chain, so everyone can see it, or it is THIS client's own seat
+              and it worked the card out locally. `known` is only ever passed
+              for the viewer's own seat -- a client cannot compute anyone
+              else's, since that needs a share it never receives. */}
           <div className={styles.feltCards} style={{ marginTop: 4 }}>
-            {[0, 1].map((slot) =>
-              seat.holeRevealed[slot] ? (
-                <Card key={slot} card={seat.holeCards[slot]} />
-              ) : seat.holeCommitted[slot] ? (
-                <div key={slot} className={styles.cardBack} title="shares committed, not revealed" />
-              ) : (
+            {[0, 1].map((slot) => {
+              const revealed = seat.holeRevealed[slot];
+              const mine = you ? known?.[slot] : null;
+              if (revealed) return <Card key={slot} card={seat.holeCards[slot]} />;
+              if (mine != null) {
+                return (
+                  <div key={slot} title="known only to you -- not yet shown on-chain">
+                    <Card card={mine} />
+                  </div>
+                );
+              }
+              return (
                 <div
                   key={slot}
                   className={styles.cardBack}
-                  style={{ opacity: 0.25 }}
-                  title="no shares committed yet"
+                  style={seat.holeCommitted[slot] ? undefined : { opacity: 0.25 }}
+                  title={seat.holeCommitted[slot] ? 'shares committed, not revealed' : 'no shares committed yet'}
                 />
-              ),
-            )}
+              );
+            })}
           </div>
         </>
       )}
@@ -79,7 +91,13 @@ function Seat({
   );
 }
 
-export default function Felt({ table, yourSeat }: { table: TableState; yourSeat: number | null }) {
+export default function Felt({
+  table, yourSeat, yourCards,
+}: {
+  table: TableState; yourSeat: number | null;
+  /** The viewer's own hole cards, recovered locally. Never anyone else's. */
+  yourCards?: (number | null)[];
+}) {
   const dealerSeat = table.seats.find((s) => s.owner.toLowerCase() === table.dealer.toLowerCase())?.seat ?? -1;
 
   return (
@@ -104,6 +122,7 @@ export default function Felt({ table, yourSeat }: { table: TableState; yourSeat:
           you={yourSeat === s.seat}
           onTurn={!table.roundComplete && table.actionTurn === s.seat && table.phase === 'betting'}
           dealer={s.seat === dealerSeat}
+          known={yourSeat === s.seat ? yourCards : undefined}
         />
       ))}
     </div>

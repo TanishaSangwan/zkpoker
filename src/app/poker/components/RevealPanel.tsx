@@ -462,6 +462,32 @@ export default function RevealPanel(p: Props) {
     }
   }, [autoServe, deckIsOpen, yourSeat, mySecretHex, table.street, table.community, table.jointKey, table.maxSeats, runFor, say]);
 
+  // ── deal your own cards without being asked ───────────────────────────
+  //
+  // No decision here either: you collect a share from every party, verify each
+  // against its sender's registered key, combine them, and commit. You cannot
+  // play the hand without doing it, and the commitment has to be posted before
+  // betting -- that ordering is what stops a player shopping for a friendlier
+  // share set after seeing the board.
+  //
+  // Retried rather than latched: the first attempt can legitimately fail
+  // because another seat has not served its share yet, and giving up would
+  // strand the player at a table they could still join.
+  const dealing2 = useRef(false);
+  useEffect(() => {
+    if (!autoServe || !deckIsOpen || yourSeat === null || !mySecretHex) return;
+    if (dealing2.current) return;
+    const me = table.seats[yourSeat];
+    if (!me || (me.holeCommitted[0] && me.holeCommitted[1])) return;
+    dealing2.current = true;
+    say('dealing my hole cards');
+    void dealMyHoleCards().finally(() => {
+      // Cleared, not held: a failure here usually means somebody has not sent
+      // their share yet, and the next poll should try again.
+      dealing2.current = false;
+    });
+  }, [autoServe, deckIsOpen, yourSeat, mySecretHex, table.seats, say]);
+
   // ── accusations ────────────────────────────────────────────────────────
   const [accSeat, setAccSeat] = useState('0');
   const [accPos, setAccPos] = useState('0');
@@ -508,8 +534,10 @@ export default function RevealPanel(p: Props) {
               Deal my hole cards
             </button>
             <span className={styles.fieldHint}>
-              Collects a share from every seat, verifies each one locally, and commits to the
-              combination <em>before</em> betting.
+              Happening automatically — this button is only a retry. Collects a share from every
+              seat, verifies each against that seat&apos;s registered key, and commits to the
+              combination <em>before</em> betting, which is what stops anyone shopping for a
+              friendlier share set after seeing the board.
             </span>
           </div>
 
