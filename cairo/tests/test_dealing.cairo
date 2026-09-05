@@ -1432,6 +1432,83 @@ fn test_mucking_passes_the_turn_and_forfeits() {
 }
 
 #[test]
+fn test_every_seat_mucking_voids_the_hand_instead_of_stranding_it() {
+    // Found by play, 2026-09-06: at a three-handed table every seat showed one
+    // hole card and was mucked by the ten-second clock before the second. All
+    // three had forfeited, so there was no contender -- and settlement used to
+    // revert NO_CONTENDERS, which left table_settled false and the pot sitting
+    // in this contract until the 24-hour reclaim timeout. A whole day of
+    // nothing, for a state the timeouts reach on their own.
+    let game = setup_showdown();
+
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.muck(TABLE_1, SEAT_0);
+    stop_cheat_caller_address(game.contract_address);
+    start_cheat_caller_address(game.contract_address, BOB());
+    game.muck(TABLE_1, SEAT_1);
+    stop_cheat_caller_address(game.contract_address);
+
+    let mut spy = spy_events();
+    game.settle_from_reveals(TABLE_1);
+
+    // Voided, NOT settled. Both matter: voiding is what lets every seat
+    // reclaim at once, and leaving `settled` false is what keeps
+    // reclaim_stalled_bet callable at all.
+    assert(game.get_table_voided(TABLE_1), 'hand not voided');
+    assert(!game.get_table_settled(TABLE_1), 'must not be marked settled');
+    spy
+        .assert_emitted(
+            @array![
+                (
+                    game.contract_address,
+                    PokerGame::Event::TableVoided(
+                        PokerGame::TableVoided { table_id: TABLE_1, stalled_seat: 0 },
+                    ),
+                ),
+            ],
+        );
+}
+
+#[test]
+fn test_a_voided_all_muck_hand_refunds_without_waiting() {
+    // The point of voiding rather than reverting: no 24-hour wait. This
+    // asserts the money is actually reachable, not merely that a flag got set.
+    let game = setup_showdown();
+    let staked = game.get_seat_contributed(TABLE_1, SEAT_0);
+    assert(staked != 0, 'fixture must have money in');
+
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.muck(TABLE_1, SEAT_0);
+    stop_cheat_caller_address(game.contract_address);
+    start_cheat_caller_address(game.contract_address, BOB());
+    game.muck(TABLE_1, SEAT_1);
+    stop_cheat_caller_address(game.contract_address);
+    game.settle_from_reveals(TABLE_1);
+
+    // No time is cheated forward. Before this change the same call reverted
+    // TOO_EARLY until created_at + SETTLE_TIMEOUT_SECS.
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.reclaim_stalled_bet(TABLE_1, SEAT_0);
+    stop_cheat_caller_address(game.contract_address);
+    assert(game.get_seat_contributed(TABLE_1, SEAT_0) == 0, 'seat 0 not refunded');
+
+    start_cheat_caller_address(game.contract_address, BOB());
+    game.reclaim_stalled_bet(TABLE_1, SEAT_1);
+    stop_cheat_caller_address(game.contract_address);
+    assert(game.get_seat_contributed(TABLE_1, SEAT_1) == 0, 'seat 1 not refunded');
+    // Everything that went in has come back out, so nothing is left stranded.
+    assert(game.get_pot(TABLE_1) == 0, 'pot not emptied');
+}
+
+// The premature case stays a REVERT, and that asymmetry is the whole rule:
+// voiding is gated on there being no contender left, not on nobody having
+// shown yet. A seat that has not mucked is still entitled to show, so
+// settlement then is early rather than terminal -- and if it voided instead,
+// anyone could cancel a hand the instant the showdown opened by calling
+// settlement before the first reveal. See
+// test_settle_from_reveals_all_muck_rejected, which covers exactly that.
+
+#[test]
 fn test_running_out_of_time_is_mucking() {
     let (game, _v) = setup_opened_at_showdown();
     let deadline = game.get_showdown_deadline(TABLE_1);

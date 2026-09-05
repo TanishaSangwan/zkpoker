@@ -1096,28 +1096,50 @@ alone gets wrong), a refused out-of-turn show, mucking passing the turn while
 leaving the pot untouched, a timeout mucking the seat, and the clock refusing
 to be claimed early.
 
-### 9.8.1 An all-muck showdown strands the pot — known gap
+### 9.8.1 An all-muck showdown — found by play, FIXED
 
 Found by play, 2026-09-06. Every seat at a three-handed table revealed its
 first hole card and was mucked by the clock before the second. That left three
-mucked seats and no contender, so `settle_from_reveals` reverts
-`NO_CONTENDERS` and the pot sits until `SETTLE_TIMEOUT_SECS` (24 h), after
-which each seat reclaims its own contribution via `reclaim_stalled_bet`.
+mucked seats and no contender, and `settle_from_reveals` reverted
+`NO_CONTENDERS` — so `table_settled` stayed false and the pot sat in the
+contract until `SETTLE_TIMEOUT_SECS` (24 h) let each seat reclaim its own
+contribution. Nobody was robbed, but a day of nothing is a poor answer to a
+state the timeouts reach on their own.
 
-Nobody is robbed — the money returns to whoever put it in — but a 24-hour
-freeze is a poor answer to a case the timeouts can produce on their own.
+**Contract fix.** A showdown that ends with no contender now VOIDS the hand
+instead of reverting. `reclaim_stalled_bet` refunds a voided table
+immediately, so every seat gets back exactly what it put in, at once.
 
-The client cause is fixed (see below), so this should no longer be reachable
-by honest play: both reveals now go in one multicall with their aggregates
-built concurrently, and the table polls at 1.5 s while the clock runs. The
-CONTRACT hole remains, and the right fix is for a showdown that ends with no
-contender to void the hand rather than leave it unsettled — voiding already
-releases every contribution for immediate reclaim, which is the same outcome
-without the wait. Not done here because it needs a redeploy.
+Refunding rather than awarding is the honest answer: no hand was tabled, so
+nobody proved entitlement to the pot, and picking a seat anyway — the last
+aggressor, the lowest index — would pay out on something the contract never
+verified. Same reasoning as `dispute_deck`.
+
+It is not forgeable into a way to cancel a losing hand. A seat becomes mucked
+only by its own `muck` or by `claim_showdown_timeout` after its deadline, both
+irreversible within the hand, and `fold` refuses to leave fewer than two
+active seats. Reaching zero contenders costs every player their claim on the
+pot, so there is nothing to gain.
+
+The asymmetry is deliberate: voiding is gated on there being no contender
+LEFT, not on nobody having shown YET. A seat that has not mucked is still
+entitled to show, so settlement then is early rather than terminal — and if
+that voided, anyone could cancel a hand the instant the showdown opened by
+calling settlement before the first reveal. That case still reverts
+`HOLE_NOT_REVEALED`.
+
+**Client fixes**, so honest play should not reach the all-muck state at all:
+both reveals go in one multicall with their aggregates built concurrently, the
+table polls at 1.5 s while the clock runs, and garaga's wasm is warmed when
+the deck opens rather than inside the deadline — a tab's first reveal used to
+be its slowest, which is exactly the one that gets mucked.
 
 Worth stating plainly: the ten-second clock is short enough that its edge
 cases are reachable. It was chosen deliberately, and the cost is that any
 client slower than one round-trip per card loses hands it should have won.
+
+Covered by `test_every_seat_mucking_voids_the_hand_instead_of_stranding_it`
+and `test_a_voided_all_muck_hand_refunds_without_waiting`.
 
 ---
 

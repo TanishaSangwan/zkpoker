@@ -4394,7 +4394,39 @@ pub mod PokerGame {
                 s += 1;
             };
             let cs = contenders.span();
-            assert(cs.len() != 0, errors::NO_CONTENDERS);
+
+            // NOBODY LEFT TO PAY: every seat still in the hand has mucked,
+            // either by choice or by letting the showdown clock run out.
+            //
+            // This used to revert NO_CONTENDERS, and reverting stranded the
+            // pot. table_settled was never set, so the money sat in this
+            // contract until SETTLE_TIMEOUT_SECS (24 h) let each seat reclaim
+            // its own contribution -- a whole day of nothing, for a state the
+            // timeouts produce on their own. Found by play: at a three-handed
+            // table every seat showed one hole card and was mucked before the
+            // second, so all three forfeited and the hand could not resolve.
+            //
+            // Voided instead, which reaches the same distribution at once:
+            // reclaim_stalled_bet refunds a voided table immediately, and
+            // every seat gets back exactly what it put in.
+            //
+            // Refunding rather than awarding is the honest answer. No hand was
+            // tabled, so nobody proved entitlement to the pot, and picking a
+            // seat anyway -- the last aggressor, the lowest index -- would be
+            // paying out on something this contract never verified. That is
+            // the same reasoning dispute_deck uses.
+            //
+            // Not forgeable into a way to cancel a losing hand: a seat becomes
+            // mucked only by its own `muck` or by claim_showdown_timeout after
+            // its deadline, both irreversible for the hand, and `fold` refuses
+            // to leave fewer than two active seats. So reaching zero
+            // contenders costs every player their claim on the pot -- there is
+            // nothing here to gain.
+            if cs.len() == 0 {
+                self.table_voided.entry(table_id).write(true);
+                self.emit(TableVoided { table_id, stalled_seat: 0 });
+                return;
+            }
 
             // Uncontested: everyone else folded, so no cards are needed and
             // none should be demanded. Showing a winning hand nobody
