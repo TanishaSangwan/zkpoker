@@ -17,6 +17,8 @@ import * as constants from '@/utils/constants';
 import { useStoreWallet } from '../components/Wallet/walletContext';
 import { useFrontendProvider } from '../components/client/provider/providerContext';
 import SelectWallet from '../components/client/WalletHandle/SelectWallet';
+import ConnectDevnet from '../components/client/WalletHandle/ConnectDevnet';
+import { useDevnetAccount } from '../components/client/provider/devnetAccountContext';
 import { useTableState } from './useTableState';
 import { asU256, decodeError, erc20ApproveCall, executeAndWait, pgCall, shortHex, toFelt } from './contract';
 import Felt from './components/Felt';
@@ -27,8 +29,24 @@ import type { Ciphertext } from '@/lib/deck';
 import { useProvingEnvironment } from './useProvingEnvironment';
 
 export default function PokerPanel() {
-  const account = useStoreWallet((s) => s.account);
-  const address = useStoreWallet((s) => s.address);
+  // Two possible signers, and PokerPanel is where they are reconciled.
+  //
+  // A real wallet gives a WalletAccountV6 through walletContext; a local
+  // devnet gives a plain starknet.js Account built from one of devnet's
+  // predeployed private keys (ConnectDevnet -> devnetAccountContext). Neither
+  // store knows about the other, so if this component only read one of them --
+  // as an earlier version of this rewrite did -- connecting to devnet appeared
+  // to work and then every action said "connect a wallet first".
+  //
+  // Devnet wins when both are present: if you have deliberately connected a
+  // local sandbox account, that is the one you meant to act as.
+  const walletAccount = useStoreWallet((s) => s.account);
+  const walletAddress = useStoreWallet((s) => s.address);
+  const devnetAccount = useDevnetAccount((s) => s.account);
+  const devnetAddress = useDevnetAccount((s) => s.address);
+  const devnetConnected = useDevnetAccount((s) => s.connected);
+  const account = (devnetConnected ? devnetAccount : walletAccount) as typeof walletAccount;
+  const address = devnetConnected ? devnetAddress : walletAddress;
   const providerIndex = useFrontendProvider((s) => s.currentFrontendProviderIndex);
   const setProviderIndex = useFrontendProvider((s) => s.setCurrentFrontendProviderIndex);
   const provider = constants.myFrontendProviders[providerIndex];
@@ -143,6 +161,7 @@ export default function PokerPanel() {
                 : 'single-threaded proving (no cross-origin isolation)'}
           </div>
         </div>
+        <ConnectDevnet />
         <div className={styles.tableIdRow}>
           <input className={styles.input} value={tableIdInput}
             onChange={(e) => setTableIdInput(e.target.value)} placeholder="table id" />

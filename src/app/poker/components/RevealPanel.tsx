@@ -18,11 +18,13 @@ import type { SeatIdentity } from '@/lib/identity';
 import { fromWire, type Point, cardToName } from '@/lib/grumpkin';
 import { randomScalar } from '@/lib/grumpkin';
 import * as dealing from '@/lib/dealing';
+import { initProver as initDleqProver } from '@/lib/dleq';
 import {
   cardFromShare, commitHoleSharesArgs, loadHoleOpening, revealCommunityArgs,
   revealHoleArgs, saveHoleOpening,
 } from '@/lib/reveal';
 import { BroadcastTransport, type Transport } from '@/lib/shares';
+import { RelayTransport, relayUrl } from '@/lib/relayTransport';
 import { communityPosition, seatHolePositions } from '@/lib/deck';
 
 type Props = {
@@ -43,9 +45,19 @@ export default function RevealPanel(p: Props) {
   const [note, setNote] = useState<string | null>(null);
   const transport = useRef<Transport | null>(null);
 
+  // A relay when one is configured, BroadcastChannel otherwise. The fallback
+  // only spans tabs of this browser, which demonstrates a table and cannot
+  // host a game between two people -- so the relay is what makes the share
+  // exchange real. Either way every hole share is encrypted to its recipient
+  // before it leaves, so the transport is never trusted.
+  const [transportKind, setTransportKind] = useState<'relay' | 'local'>('local');
   useEffect(() => {
-    const t = new BroadcastTransport(table.tableId);
+    const url = relayUrl();
+    const t: Transport & { close: () => void } = url
+      ? new RelayTransport(table.tableId, url)
+      : new BroadcastTransport(table.tableId);
     transport.current = t;
+    setTransportKind(url ? 'relay' : 'local');
     return () => t.close();
   }, [table.tableId]);
 
@@ -58,6 +70,13 @@ export default function RevealPanel(p: Props) {
   async function run(label: string, fn: () => Promise<string | void>) {
     setBusy(label); setError(null); setNote(null);
     try {
+      // Every action here ends in a DLEQ somewhere -- sending a share,
+      // aggregating, answering an accusation -- and building one needs
+      // garaga's wasm loaded for the MSM hints. Doing it here rather than in
+      // an effect means it cannot lose a race with the first click, which is
+      // exactly how this failed: 'dleq: call initProver() first' on the very
+      // first share button. Idempotent, so the cost is one check per action.
+      await initDleqProver();
       const out = await fn();
       if (typeof out === 'string') setNote(out);
       refresh();
@@ -231,6 +250,27 @@ export default function RevealPanel(p: Props) {
           Every card needs a share from every seat. Nobody can read your hole cards — decrypting one
           needs your own share, and pooling everything else leaves them one short.
         </div>
+      </div>
+
+      {/* Which transport is carrying shares. Prominent because it decides
+          whether a game between two people is possible at all, and because
+          the failure is silent: with BroadcastChannel the buttons work, the
+          messages go nowhere a second client can hear, and both sides sit
+          waiting for shares that were genuinely sent. */}
+      <div className={transportKind === 'relay' ? styles.chip : styles.caution}>
+        {transportKind === 'relay' ? (
+          <>
+            <strong>Relay:</strong> shares reach other clients, each encrypted to its recipient&apos;s
+            registered key. The relay cannot read them.
+          </>
+        ) : (
+          <>
+            <strong>No relay.</strong> Shares are going over BroadcastChannel, which only reaches
+            other <em>tabs of this browser</em> — another player&apos;s client will never receive
+            them, and both sides will wait forever. Start <code>node scripts/relay.mjs</code> and
+            reload.
+          </>
+        )}
       </div>
 
       {yourSeat !== null ? (

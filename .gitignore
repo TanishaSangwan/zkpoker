@@ -79,3 +79,6 @@ node_modules/.cache/
 
 # Derived proving artifacts (~12MB), rebuilt by scripts/build_client_circuits.mjs
 /public/circuits/
+
+# Terminal-seat state for scripts/duel.mjs (contains a seat secret)
+.duel-*.json

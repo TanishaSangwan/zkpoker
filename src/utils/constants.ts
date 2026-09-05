@@ -97,3 +97,16 @@ export const PokerGameDevnet = process.env.NEXT_PUBLIC_POKERGAME_DEVNET ?? "0x0"
 // has no real STRK/addrSTRK deployment to point at instead. mint(to, amount)
 // on it is open to anyone, which is exactly what local testing wants.
 export const defaultDevnetToken = process.env.NEXT_PUBLIC_DEVNET_TOKEN ?? "0x0";
+
+// ─── share relay (scripts/relay.mjs) ────────────────────────────────────
+// Where the off-chain share exchange sends its messages. Defaults to the
+// local relay, the same way devnetRpcUrl defaults to a local devnet — a
+// value that only ever works when it is set is a value that is usually
+// wrong. Set NEXT_PUBLIC_RELAY_URL to "0" to disable it and fall back to
+// BroadcastChannel, which reaches only other tabs of the same browser.
+//
+// The relay is trusted with nothing: hole-card shares are encrypted to the
+// recipient's registered key before they reach it, each carries a DLEQ the
+// recipient verifies, and a relay that drops messages is the liveness case
+// the on-chain accusation path handles. See scripts/relay.mjs's header.
+export const shareRelayUrl = process.env.NEXT_PUBLIC_RELAY_URL ?? "http://127.0.0.1:3100";

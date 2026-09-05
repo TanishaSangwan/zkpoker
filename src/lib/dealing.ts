@@ -53,6 +53,9 @@ export type ShareMessage = {
 
 /** This party's share for one position, with the proof that binds it. */
 export function shareFor(secret: bigint, h: Point): ShareMessage {
+  // Synchronous on purpose (a share is pure arithmetic plus a hint), so the
+  // caller must have awaited initProver() first. `runAggregate` and the UI's
+  // action wrapper both do.
   const proof = dleq.prove(secret, h);
   if (proof.d === null) throw new Error('dealing: degenerate share');
   return { d: { x: proof.d.x, y: proof.d.y }, s: proof.s, e: proof.e };
@@ -112,6 +115,10 @@ export async function runAggregate(args: {
 }): Promise<AggregateResult> {
   const { transport, tableId, position, h, jointKey, keys, shares, mySeat, mySecret } = args;
   const say = args.onProgress ?? (() => {});
+  // Idempotent, and cheap after the first call. Here as well as at the UI
+  // layer because this is a library entry point -- a caller that is not the
+  // panel should not have to know that garaga needs waking up first.
+  await dleq.initProver();
   const session = new AggregateSession(tableId, position, h, keys);
 
   const mine = myContribution(mySecret, h);
