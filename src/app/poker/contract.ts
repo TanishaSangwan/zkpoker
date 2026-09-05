@@ -68,12 +68,14 @@ export const SHOWDOWN_STREET = 4;
  */
 export type Phase =
   | 'no-table' | 'seating' | 'keys' | 'shuffling' | 'opening'
-  | 'dealing' | 'betting' | 'showdown' | 'settled' | 'voided';
+  | 'drawing' | 'posting' | 'dealing' | 'betting' | 'showdown' | 'settled' | 'voided';
 
 export function phaseOf(t: {
   exists: boolean; voided: boolean; settled: boolean;
   shuffleStarted: boolean; shuffleComplete: boolean; deckOpened: boolean;
   street: number; seatedCount: number; keysRegistered: number;
+  /** The blind structure, and how far through it the table is. */
+  bigBlind?: bigint; buttonSet?: boolean; blindsPosted?: boolean;
 }): Phase {
   if (!t.exists) return 'no-table';
   if (t.voided) return 'voided';
@@ -82,6 +84,15 @@ export function phaseOf(t: {
   if (!t.shuffleComplete) return 'shuffling';
   if (!t.deckOpened) return 'opening';
   if (t.street === SHOWDOWN_STREET) return 'showdown';
+  // A table with a blind structure is not in its betting round until the
+  // forced bets are up. Skipping these two states offered check/call/raise
+  // while the contract would still refuse every one of them with
+  // BLINDS_NOT_POSTED -- buttons that could only ever fail, on a table that
+  // looked ready and was not.
+  if ((t.bigBlind ?? 0n) > 0n && t.street === 0) {
+    if (!t.buttonSet) return 'drawing';
+    if (!t.blindsPosted) return 'posting';
+  }
   return 'betting';
 }
 

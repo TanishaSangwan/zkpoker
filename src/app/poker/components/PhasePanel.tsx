@@ -570,6 +570,40 @@ export default function PhasePanel(p: Props) {
         </>
       ) : null}
 
+      {table.phase === 'drawing' || table.phase === 'posting' ? (
+        <>
+          <div className={styles.stateGrid}>
+            <Item label="blinds" value={`${table.smallBlind} / ${table.bigBlind}`} />
+            <Item
+              label="button"
+              value={table.buttonSet ? `seat ${table.button}` : 'drawing'}
+            />
+            <Item
+              label="draws in"
+              value={`${table.seats.filter((s) => s.occupied && s.drawRevealed).length} / ${table.seated.length}`}
+            />
+          </div>
+          <p className={styles.fieldHint}>
+            {table.phase === 'drawing' ? (
+              <>
+                Every seat is taking one card from the same committed deck as everything else, and
+                the highest takes the button — so who posts which blind is decided by a card nobody
+                could choose, see early or fake. It needs a decryption share from every player, so
+                it runs between the browsers and cannot be done by a dealer. Nothing to click.
+              </>
+            ) : (
+              <>
+                Button on seat {table.button}. Posting the small and big blinds from the allowances
+                you approved when you sat down. Permissionless and argument-free, so whichever
+                client gets there first does it. Betting opens as soon as they are up — until then
+                the contract refuses every action with BLINDS_NOT_POSTED, which is why there is
+                nothing to press here yet.
+              </>
+            )}
+          </p>
+        </>
+      ) : null}
+
       {busy ? (
         <div className={`${uni.receipt} ${uni.receiptPending}`}>
           <div className={uni.receiptHead}>
@@ -645,6 +679,8 @@ function titleFor(t: TableState): string {
     keys: 'Key registration',
     shuffling: 'Shuffle chain',
     opening: 'Opening the deck',
+    drawing: 'Drawing for the button',
+    posting: 'Posting the blinds',
     dealing: 'Dealing',
     betting: 'Betting',
     showdown: 'Showdown',

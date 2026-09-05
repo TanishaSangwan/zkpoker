@@ -224,6 +224,7 @@ export function useTableState(args: {
         deckOpened: next.deckOpened, street: next.street,
         seatedCount: seated.length,
         keysRegistered: seats.filter((s) => s.occupied && s.keyRegistered).length,
+        bigBlind: next.bigBlind, buttonSet: next.buttonSet, blindsPosted: next.blindsPosted,
       });
       setState(next);
       setError(null);
