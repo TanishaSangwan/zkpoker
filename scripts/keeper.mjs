@@ -72,7 +72,14 @@ const HANDS = Number(process.env.HANDS ?? 0);
 
 const tableName = process.argv[2];
 if (!tableName) { console.error('usage: node scripts/keeper.mjs <TABLE_ID>'); process.exit(1); }
-const TABLE = '0x' + Buffer.from(tableName).toString('hex');
+// The SAME rule the UI's toFelt uses (src/app/poker/contract.ts). It has to
+// be: a keeper watching a different table id from the one the players are at
+// simply sits there saying "waiting for the table to exist" while a full
+// table waits for a shuffle nobody opens. Hex and decimal pass through; only
+// a name is short-string encoded.
+const TABLE = /^0x[0-9a-fA-F]+$/.test(tableName) ? tableName
+  : /^\d+$/.test(tableName) ? '0x' + BigInt(tableName).toString(16)
+  : '0x' + Buffer.from(tableName).toString('hex');
 
 const env = readFileSync(join(root, '.env.local'), 'utf8');
 const GAME = (env.match(/^NEXT_PUBLIC_POKERGAME_DEVNET=(.*)$/m) ?? [])[1]?.trim();

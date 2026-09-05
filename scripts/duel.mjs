@@ -30,7 +30,12 @@ const MY_ACCOUNT = process.env.MY_ACCOUNT ?? 'devnet0';
 
 const [cmd, tableName] = process.argv.slice(2);
 if (!cmd || !tableName) { console.error('usage: node scripts/duel.mjs <cmd> <TABLE_ID>'); process.exit(1); }
-const TABLE = '0x' + Buffer.from(tableName).toString('hex');
+// Same rule as the UI's toFelt and scripts/keeper.mjs: hex and decimal pass
+// through, a name is short-string encoded. A client on a different id from
+// the players is a client watching an empty table.
+const TABLE = /^0x[0-9a-fA-F]+$/.test(tableName) ? tableName
+  : /^\d+$/.test(tableName) ? '0x' + BigInt(tableName).toString(16)
+  : '0x' + Buffer.from(tableName).toString('hex');
 const statePath = join(root, `.duel-${tableName}.json`);
 const state = existsSync(statePath) ? JSON.parse(readFileSync(statePath, 'utf8')) : {};
 const save = () => writeFileSync(statePath, JSON.stringify(state, null, 2) + '\n');
