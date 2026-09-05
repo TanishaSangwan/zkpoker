@@ -295,6 +295,39 @@ positive and negative cases both.
 | **L2 gas to verify** | **811,907,200** | **772,299,520** | **64,607,680** |
 | L1 data gas | 128 | 128 | 128 |
 
+### 6.1 How close the shuffle proof is to Starknet's per-transaction ceiling
+
+Measured on Sepolia, 2026-09-06, and worth stating because nothing on devnet
+reveals it: **Starknet caps L2 gas per TRANSACTION at 1,210,000,000.** A
+shuffle proof verifies at 811,907,200. So it fits — with about **33% of
+headroom**, and nothing else in this protocol comes close to that line.
+
+That margin is a design constraint, not a curiosity. The shuffle circuit's
+cost scales with the deck, so a larger deck, a wider re-randomisation, or a
+second statement folded into the same circuit all spend from those 398 million
+gas. Past the cap the proof cannot be verified in one transaction at all, and
+the fix is not tuning — it is splitting the statement, the way `open_deck`
+already chunks at K=5.
+
+It bites before the limit does. The first attempt on Sepolia was refused
+without running:
+
+```
+Max gas amount is too high: GasAmount(1223772240),
+maximum allowed gas amount: 1210000000
+```
+
+That is the fee estimator's safety multiplier applied to an 0.8e9 estimate,
+not the work itself. The bound is a ceiling on what may be spent rather than a
+prediction, so `scripts/check_showdown.mjs` clamps it to the cap and the same
+proof is accepted. Any client submitting a shuffle on a public chain needs to
+do the same — an estimator's default multiplier puts this transaction over a
+limit the transaction does not actually reach.
+
+Sepolia is also far slower than devnet, which matters for the ten-second
+showdown clock in §9.8: a shuffle proof took **60–70 s** to be accepted rather
+than ~2 s, and a deck-open chunk 21–29 s.
+
 A DLEQ costs **12.6× less** than a SNARK verification, and its calldata is
 **53× smaller**. That gap is the whole reason only the shuffle needs a circuit.
 
