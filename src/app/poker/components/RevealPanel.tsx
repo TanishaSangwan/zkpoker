@@ -539,9 +539,13 @@ export default function RevealPanel(p: Props) {
   const showing = useRef(false);
   useEffect(() => {
     if (!autoShow || yourSeat === null || !mySecretHex) return;
-    if (table.street !== 4 || table.settled) return;
+    if (!table.showdownStarted || table.settled) return;
     const me = table.seats[yourSeat];
-    if (!me || me.folded || showing.current) return;
+    if (!me || me.folded || me.mucked || showing.current) return;
+    // Only on this seat's turn. The contract enforces the order anyway --
+    // showing early would just revert -- but firing at the wrong moment would
+    // burn a transaction and, worse, look like the client being broken.
+    if (table.showdownTurn !== yourSeat) return;
     const pending = [0, 1].filter((slot) => !me.holeRevealed[slot]);
     if (pending.length === 0) return;
     showing.current = true;
@@ -556,7 +560,32 @@ export default function RevealPanel(p: Props) {
       }
       showing.current = false;
     })();
-  }, [autoShow, yourSeat, mySecretHex, table.street, table.settled, table.seats]);
+  }, [autoShow, yourSeat, mySecretHex, table.showdownStarted, table.showdownTurn, table.settled, table.seats]);
+
+  // Muck the seat whose clock has run out.
+  //
+  // Not showing in time IS mucking: there is nothing to reconstruct and nobody
+  // to punish beyond the pot that seat gives up. Callable by anyone, so any
+  // client at the table can unstick a showdown somebody walked away from --
+  // the same reasoning as every other timeout here.
+  const clearing = useRef(false);
+  useEffect(() => {
+    if (!table.showdownStarted || table.settled || !table.showdownDeadline) return;
+    if (!account || !provider || clearing.current) return;
+    const msLeft = table.showdownDeadline * 1000 - Date.now();
+    if (msLeft > 0) return;
+    clearing.current = true;
+    void (async () => {
+      try {
+        await send('claim_showdown_timeout', { table_id: table.tableId });
+        refresh();
+      } catch {
+        // Someone else got there first, or the seat showed just in time.
+      } finally {
+        clearing.current = false;
+      }
+    })();
+  }, [table.showdownStarted, table.showdownDeadline, table.settled, table.showdownTurn, account, provider]);
 
   // ── accusations ────────────────────────────────────────────────────────
   const [accSeat, setAccSeat] = useState('0');
@@ -674,6 +703,18 @@ export default function RevealPanel(p: Props) {
             )}
           </div>
 
+          {table.showdownStarted ? (
+            <div className={styles.stateGrid}>
+              <Item label="showing now"
+                value={table.showdownTurn === yourSeat ? 'you' : `seat ${table.showdownTurn}`} />
+              <Item label="clock" value={<ShowdownClock deadline={table.showdownDeadline} />} />
+              <Item label="order"
+                value={table.seats.filter((s) => s.occupied && !s.folded)
+                  .map((s) => `${s.seat}${s.mucked ? ' (muck)' : s.holeRevealed[0] && s.holeRevealed[1] ? ' ✓' : ''}`)
+                  .join(' → ')} />
+            </div>
+          ) : null}
+
           {table.street >= 4 || table.settled ? (
             <div className={styles.actionsRow}>
               <label className={styles.fieldHint} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -687,6 +728,14 @@ export default function RevealPanel(p: Props) {
                   </button>
                 ),
               )}
+              {table.showdownTurn === yourSeat && !table.seats[yourSeat]?.mucked ? (
+                <button className={styles.chipBtn} disabled={!!busy}
+                  onClick={() => run('Mucking', () => send('muck', {
+                    table_id: table.tableId, seat: String(yourSeat),
+                  }))}>
+                  Muck
+                </button>
+              ) : null}
               <button className={uni.btn} disabled={!!busy}
                 onClick={() => run('Settling', () => send('settle_from_reveals', { table_id: table.tableId }))}>
                 Settle
@@ -773,4 +822,26 @@ function normalise(msg: any): dealing.ShareMessage {
     s: BigInt(msg.s),
     e: BigInt(msg.e),
   };
+}
+
+
+/** Seconds left on the showdown clock, ticking locally between polls. */
+function ShowdownClock({ deadline }: { deadline: number }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 500);
+    return () => clearInterval(id);
+  }, []);
+  if (!deadline) return <>—</>;
+  const left = Math.max(0, Math.ceil((deadline * 1000 - now) / 1000));
+  return <>{left === 0 ? 'out of time' : `${left}s`}</>;
+}
+
+function Item({ label, value }: { label: string; value: React.ReactNode }) {
+  return (
+    <div className={styles.stateItem}>
+      <div className={styles.stateLabel}>{label}</div>
+      <div className={styles.stateValue}>{value}</div>
+    </div>
+  );
 }

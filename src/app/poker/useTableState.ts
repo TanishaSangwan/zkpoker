@@ -23,6 +23,7 @@ export type SeatState = {
   toCall: bigint;
   folded: boolean;
   keyRegistered: boolean;
+  mucked: boolean;
   pk: Point;
   holeCommitted: [boolean, boolean];
   holeRevealed: [boolean, boolean];
@@ -57,6 +58,10 @@ export type TableState = {
   actionTurn: number;
   actionDeadline: number;
   roundComplete: boolean;
+
+  showdownStarted: boolean;
+  showdownTurn: number;
+  showdownDeadline: number;
 
   seats: SeatState[];
   community: { card: number; revealed: boolean }[];
@@ -118,14 +123,19 @@ export function useTableState(args: {
         c.get_published_deck_hash(tableId), c.get_published_deck_seat(tableId),
       ]);
 
+      const [showdownStarted, showdownTurn, showdownDeadline] = await Promise.all([
+        c.get_showdown_started(tableId), c.get_showdown_turn(tableId),
+        c.get_showdown_deadline(tableId),
+      ]);
+
       const n = num(maxSeats);
       const seats: SeatState[] = await Promise.all(
         Array.from({ length: n }, async (_, seat) => {
           const s = seat.toString();
-          const [owner, contributed, folded, keyRegistered, pkRaw] = await Promise.all([
+          const [owner, contributed, folded, keyRegistered, pkRaw, mucked] = await Promise.all([
             c.get_seat_owner(tableId, s), c.get_seat_contributed(tableId, s),
             c.get_seat_folded(tableId, s), c.get_seat_key_registered(tableId, s),
-            c.get_seat_pk(tableId, s),
+            c.get_seat_pk(tableId, s), c.get_seat_mucked(tableId, s),
           ]);
           const occupied = BigInt(owner ?? 0) !== 0n;
           const [streetContributed, toCall] = occupied
@@ -143,7 +153,7 @@ export function useTableState(args: {
             contributed: BigInt(contributed ?? 0),
             streetContributed: BigInt(streetContributed ?? 0),
             toCall: BigInt(toCall ?? 0),
-            folded: !!folded, keyRegistered: !!keyRegistered,
+            folded: !!folded, keyRegistered: !!keyRegistered, mucked: !!mucked,
             pk: pointOrNull(pkRaw),
             holeCommitted: [BigInt(com0 ?? 0) !== 0n, BigInt(com1 ?? 0) !== 0n],
             holeRevealed: [!!hr0, !!hr1],
@@ -179,6 +189,9 @@ export function useTableState(args: {
         publishedDeckSeat: Number(publishedDeckSeat ?? 0),
         actionTurn: Number(actionTurn ?? 0), actionDeadline: num(actionDeadline),
         roundComplete: !!roundComplete,
+        showdownStarted: !!showdownStarted,
+        showdownTurn: Number(showdownTurn ?? 0),
+        showdownDeadline: num(showdownDeadline),
         seats, community, seated,
         phase: 'seating',
       };
@@ -230,7 +243,8 @@ function emptyTable(tableId: string): TableState {
     shuffleTurn: 0, shuffleOrder: [], shuffleDeadline: 0, commitment: 0n, jointKey: null,
     deckOpened: false, deckOpenChunk: 0, publishedDeckHash: 0n, publishedDeckSeat: 0,
     actionTurn: 0, actionDeadline: 0,
-    roundComplete: false, seats: [], community: [], seated: [], phase: 'no-table',
+    roundComplete: false, showdownStarted: false, showdownTurn: 0, showdownDeadline: 0,
+    seats: [], community: [], seated: [], phase: 'no-table',
   };
 }
 

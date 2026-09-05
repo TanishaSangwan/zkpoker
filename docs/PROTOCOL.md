@@ -1054,6 +1054,50 @@ that preceded it.
 
 ---
 
+### 9.8 Showdown order and the muck clock
+
+Hold'em's showdown rules, implemented 2026-09-05.
+
+**Order.** The last player to bet or raise on the river shows first. If everyone
+checked there is no aggressor, and the first seat still in the hand shows
+first. After that it is clockwise — here, ascending seat index, wrapping.
+
+**On-chain, not by convention.** Showing is *information*: a player who has
+already seen a better hand may muck rather than expose their own, so who
+reveals first is worth something. A rule only clients follow is advisory, so
+`reveal_hole_card` refuses out of turn and `bet` records the aggressor per
+street (as `seat + 1`, so `0` means nobody bet).
+
+**Mucking.** A seat may decline to show at its turn. It cannot win, its chips
+stay in the pot, and settlement skips it — mucking forfeits rather than
+blocking, so a hand where somebody stays quiet still resolves for everyone
+else. **Running out of time is mucking**: `SHOWDOWN_SECS = 10`, and
+`claim_showdown_timeout` is callable by anyone, like every other timeout here,
+because the seat holding everyone up will not report itself.
+
+Ten seconds is short deliberately. Showing needs no proving work the player has
+not already done — the shares were exchanged at dealing time and the aggregate
+is assembled from them — so the only thing the clock waits on is a person
+deciding whether to expose a loser, and the cost of running out is exactly what
+a player choosing to muck would have picked anyway.
+
+**Already true, so unchanged:** best five of seven with any combination
+including playing the board (`best_of_7`), ties split evenly (`award`), cards
+speak (the contract reads what a reveal proof bound, never what a caller
+claims), and an uncontested pot needs no cards shown at all.
+
+**Not implemented: show one, show all.** Excluded on request. It would need a
+way to compel a reveal from a seat that has already mucked, and nothing in this
+protocol can produce a share its owner declines to compute.
+
+Six tests pin it: order from the first active seat when all check, order from
+the **river aggressor** when someone bets (the case a "first active seat" rule
+alone gets wrong), a refused out-of-turn show, mucking passing the turn while
+leaving the pot untouched, a timeout mucking the seat, and the clock refusing
+to be claimed early.
+
+---
+
 ### 9.4 The SRS is a third-party runtime dependency
 
 Worth stating because it is invisible until it fails: bb.js does not ship the

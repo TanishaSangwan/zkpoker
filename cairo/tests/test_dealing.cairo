@@ -10,8 +10,9 @@
 // Grumpkin proofs).
 
 use snforge_std::{
-    EventSpyAssertionsTrait, spy_events, start_cheat_block_timestamp, start_cheat_caller_address,
-    stop_cheat_block_timestamp, stop_cheat_caller_address,
+    EventSpyAssertionsTrait, spy_events, start_cheat_block_timestamp,
+    start_cheat_block_timestamp_global, start_cheat_caller_address, stop_cheat_block_timestamp,
+    stop_cheat_caller_address,
 };
 use zkpoker::mocks::IMockVerifierAdminTraitDispatcherTrait;
 use zkpoker::{IErc20DispatcherTrait, IPokerGameDispatcherTrait, IPokerGameSafeDispatcherTrait, PokerGame};
@@ -296,6 +297,26 @@ fn setup_opened_at_flop() -> (
     (game, verifier)
 }
 
+
+// Reaches showdown with the deck open, where a hole card may legally be shown.
+//
+// reveal_hole_card is gated on the showdown having started AND on it being
+// that seat's turn: showing is information, so who reveals first is worth
+// something, and a rule only clients enforce is not a rule. Order is the
+// Hold'em one -- last aggressor on the river, else the first seat still in the
+// hand, then clockwise -- so with everyone checking their way here, SEAT_0
+// shows first.
+//
+// Distinct from the settlement-side `setup_showdown` further down, which
+// starts from a betting fixture and returns only the game.
+fn setup_opened_at_showdown() -> (
+    zkpoker::IPokerGameDispatcher, zkpoker::mocks::IMockVerifierAdminTraitDispatcher,
+) {
+    let (game, verifier) = setup_opened();
+    to_street(game, 4);
+    (game, verifier)
+}
+
 // ─── community cards ────────────────────────────────────────────────────
 
 #[test]
@@ -460,7 +481,7 @@ fn test_commit_hole_shares_bad_slot_rejected() {
 
 #[test]
 fn test_reveal_hole_card_success_and_event() {
-    let (game, _v) = setup_opened();
+    let (game, _v) = setup_opened_at_showdown();
     let c = commitment_for(SHARE_X, SHARE_Y, 'RHO');
     start_cheat_caller_address(game.contract_address, ALICE());
     game.commit_hole_shares(TABLE_1, SEAT_0, 0, c);
@@ -491,7 +512,7 @@ fn test_reveal_hole_card_success_and_event() {
 #[test]
 #[feature("safe_dispatcher")]
 fn test_reveal_hole_card_wrong_shares_rejected() {
-    let (game, _v) = setup_opened();
+    let (game, _v) = setup_opened_at_showdown();
     let c = commitment_for(SHARE_X, SHARE_Y, 'RHO');
     start_cheat_caller_address(game.contract_address, ALICE());
     game.commit_hole_shares(TABLE_1, SEAT_0, 0, c);
@@ -512,7 +533,7 @@ fn test_reveal_hole_card_wrong_shares_rejected() {
 #[test]
 #[feature("safe_dispatcher")]
 fn test_reveal_hole_card_wrong_blinding_rejected() {
-    let (game, _v) = setup_opened();
+    let (game, _v) = setup_opened_at_showdown();
     let c = commitment_for(SHARE_X, SHARE_Y, 'RHO');
     start_cheat_caller_address(game.contract_address, ALICE());
     game.commit_hole_shares(TABLE_1, SEAT_0, 0, c);
@@ -547,7 +568,7 @@ fn test_reveal_hole_card_without_commitment_rejected() {
 #[test]
 #[feature("safe_dispatcher")]
 fn test_reveal_hole_card_twice_rejected() {
-    let (game, _v) = setup_opened();
+    let (game, _v) = setup_opened_at_showdown();
     let c = commitment_for(SHARE_X, SHARE_Y, 'RHO');
     start_cheat_caller_address(game.contract_address, ALICE());
     game.commit_hole_shares(TABLE_1, SEAT_0, 0, c);
@@ -1340,5 +1361,157 @@ fn test_each_community_card_opens_on_its_own_street() {
         assert(game.get_community_revealed(TABLE_1, i), 'card not revealed');
         i += 1;
     }
+}
+
+// ── showdown order and the muck clock ──────────────────────────────────
+//
+// Hold'em's rule: the last player to bet or raise on the river shows first;
+// if everyone checked, the first seat still in the hand does; then clockwise.
+// A player may muck instead of showing, and running out of time IS mucking.
+//
+// This is enforced on-chain rather than by clients because showing is
+// INFORMATION -- a player who has seen a better hand may decline to expose
+// their own -- so who reveals first is worth something, and a rule only
+// clients follow is advisory.
+
+#[test]
+fn test_showdown_starts_with_the_first_active_seat_when_all_checked() {
+    let (game, _v) = setup_opened_at_showdown();
+    assert(game.get_showdown_started(TABLE_1), 'showdown not started');
+    assert(game.get_showdown_turn(TABLE_1) == SEAT_0, 'seat 0 shows first');
+    assert(game.get_showdown_deadline(TABLE_1) != 0, 'clock should run');
+}
+
+#[test]
+#[feature("safe_dispatcher")]
+fn test_cannot_show_out_of_turn() {
+    let (game, _v) = setup_opened_at_showdown();
+    let c = commitment_for(SHARE_X, SHARE_Y, 'RHO');
+    start_cheat_caller_address(game.contract_address, BOB());
+    game.commit_hole_shares(TABLE_1, SEAT_1, 0, c);
+    stop_cheat_caller_address(game.contract_address);
+
+    // SEAT_0 is on turn, so SEAT_1 showing now would leak nothing to itself
+    // but would give SEAT_0 a free look before deciding.
+    let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
+    let outcome = safe.reveal_hole_card(TABLE_1, SEAT_1, 0, SHARE_X, SHARE_Y, 'RHO', 42, proof());
+    match outcome {
+        Result::Ok(_) => panic!("showed out of turn"),
+        Result::Err(p) => assert(*p.at(0) == 'NOT_YOUR_SHOWDOWN_TURN', 'wrong error'),
+    }
+}
+
+#[test]
+fn test_mucking_passes_the_turn_and_forfeits() {
+    let (game, _v) = setup_opened_at_showdown();
+    assert(game.get_showdown_turn(TABLE_1) == SEAT_0, 'seat 0 first');
+
+    // Mucking forfeits rather than blocking, so nothing moves: the seat's
+    // contribution stays exactly where it was and remains in the pot for
+    // whoever does show. Compared before and after rather than asserted
+    // non-zero -- this fixture checks its way to showdown with a buy-in of 0,
+    // so a non-zero assertion would have passed for the wrong reason or, as it
+    // did, failed for one.
+    let before = game.get_seat_contributed(TABLE_1, SEAT_0);
+    let pot_before = game.get_pot(TABLE_1);
+
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.muck(TABLE_1, SEAT_0);
+    stop_cheat_caller_address(game.contract_address);
+
+    assert(game.get_seat_mucked(TABLE_1, SEAT_0), 'seat 0 mucked');
+    assert(game.get_showdown_turn(TABLE_1) == SEAT_1, 'turn passes on');
+    assert(game.get_seat_contributed(TABLE_1, SEAT_0) == before, 'contribution unchanged');
+    assert(game.get_pot(TABLE_1) == pot_before, 'pot unchanged');
+}
+
+#[test]
+fn test_running_out_of_time_is_mucking() {
+    let (game, _v) = setup_opened_at_showdown();
+    let deadline = game.get_showdown_deadline(TABLE_1);
+
+    // Anyone may call it -- the seat holding everyone up will not report
+    // itself, and every other timeout here works the same way.
+    start_cheat_block_timestamp_global(deadline + 1);
+    start_cheat_caller_address(game.contract_address, MALLORY());
+    game.claim_showdown_timeout(TABLE_1);
+    stop_cheat_caller_address(game.contract_address);
+
+    assert(game.get_seat_mucked(TABLE_1, SEAT_0), 'timed-out seat mucked');
+    assert(game.get_showdown_turn(TABLE_1) == SEAT_1, 'turn passes on');
+}
+
+#[test]
+#[feature("safe_dispatcher")]
+fn test_cannot_claim_the_showdown_clock_early() {
+    let (game, _v) = setup_opened_at_showdown();
+    let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
+    let outcome = safe.claim_showdown_timeout(TABLE_1);
+    match outcome {
+        Result::Ok(_) => panic!("mucked a seat that still had time"),
+        Result::Err(p) => assert(*p.at(0) == 'SHOWDOWN_DEADLINE_LIVE', 'wrong error'),
+    }
+    assert(!game.get_seat_mucked(TABLE_1, SEAT_0), 'must not be mucked');
+}
+
+// Same as setup_opened, but with funded seats so bets are possible.
+fn setup_opened_funded() -> (
+    zkpoker::IPokerGameDispatcher,
+    zkpoker::mocks::IMockErc20AdminDispatcher,
+    zkpoker::IErc20Dispatcher,
+) {
+    let (game, _verifier) = deploy_pokergame_with_verifier(POOL());
+    let (token_addr, token, admin) = deploy_mock_token();
+
+    start_cheat_caller_address(game.contract_address, DEALER());
+    game.create_table(TABLE_1, token_addr, 0, TWO_SEATS);
+    stop_cheat_caller_address(game.contract_address);
+
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.join_table(TABLE_1, SEAT_0, NOTE_A);
+    game.register_shuffle_key(TABLE_1, SEAT_0, PK_A_X, PK_A_Y, key_proof());
+    stop_cheat_caller_address(game.contract_address);
+    start_cheat_caller_address(game.contract_address, BOB());
+    game.join_table(TABLE_1, SEAT_1, NOTE_B);
+    game.register_shuffle_key(TABLE_1, SEAT_1, PK_B_X, PK_B_Y, key_proof());
+    stop_cheat_caller_address(game.contract_address);
+
+    start_cheat_caller_address(game.contract_address, DEALER());
+    game.begin_shuffle(TABLE_1, JOINT_X, JOINT_Y);
+    stop_cheat_caller_address(game.contract_address);
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.submit_shuffle(TABLE_1, DECK_1, deck_of(1), proof());
+    stop_cheat_caller_address(game.contract_address);
+    start_cheat_caller_address(game.contract_address, BOB());
+    game.submit_shuffle(TABLE_1, DECK_2, deck_of(1), proof());
+    stop_cheat_caller_address(game.contract_address);
+    open_all(game);
+
+    fund_and_approve(token, admin, ALICE(), game.contract_address, 10_000);
+    fund_and_approve(token, admin, BOB(), game.contract_address, 10_000);
+    (game, admin, token)
+}
+
+#[test]
+fn test_the_river_aggressor_shows_first() {
+    // Someone bets the river, so order starts with THEM rather than with the
+    // lowest seat -- the case a "first active seat" rule alone gets wrong, and
+    // the reason the aggressor is tracked at all.
+    let (game, _admin, _token) = setup_opened_funded();
+    to_street(game, 3);
+
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.check(TABLE_1, SEAT_0);
+    stop_cheat_caller_address(game.contract_address);
+    start_cheat_caller_address(game.contract_address, BOB());
+    game.bet(TABLE_1, SEAT_1, 100);
+    stop_cheat_caller_address(game.contract_address);
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.bet(TABLE_1, SEAT_0, 100);
+    stop_cheat_caller_address(game.contract_address);
+    game.advance_street(TABLE_1);
+
+    assert(game.get_table_street(TABLE_1) == 4, 'expected showdown');
+    assert(game.get_showdown_turn(TABLE_1) == SEAT_1, 'river bettor shows first');
 }
 

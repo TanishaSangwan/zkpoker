@@ -786,6 +786,102 @@ export const pokerGameAbi = [
       },
       {
         "type": "function",
+        "name": "muck",
+        "inputs": [
+          {
+            "name": "table_id",
+            "type": "core::felt252"
+          },
+          {
+            "name": "seat",
+            "type": "core::felt252"
+          }
+        ],
+        "outputs": [],
+        "state_mutability": "external"
+      },
+      {
+        "type": "function",
+        "name": "claim_showdown_timeout",
+        "inputs": [
+          {
+            "name": "table_id",
+            "type": "core::felt252"
+          }
+        ],
+        "outputs": [],
+        "state_mutability": "external"
+      },
+      {
+        "type": "function",
+        "name": "get_showdown_turn",
+        "inputs": [
+          {
+            "name": "table_id",
+            "type": "core::felt252"
+          }
+        ],
+        "outputs": [
+          {
+            "type": "core::felt252"
+          }
+        ],
+        "state_mutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "get_showdown_deadline",
+        "inputs": [
+          {
+            "name": "table_id",
+            "type": "core::felt252"
+          }
+        ],
+        "outputs": [
+          {
+            "type": "core::integer::u64"
+          }
+        ],
+        "state_mutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "get_showdown_started",
+        "inputs": [
+          {
+            "name": "table_id",
+            "type": "core::felt252"
+          }
+        ],
+        "outputs": [
+          {
+            "type": "core::bool"
+          }
+        ],
+        "state_mutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "get_seat_mucked",
+        "inputs": [
+          {
+            "name": "table_id",
+            "type": "core::felt252"
+          },
+          {
+            "name": "seat",
+            "type": "core::felt252"
+          }
+        ],
+        "outputs": [
+          {
+            "type": "core::bool"
+          }
+        ],
+        "state_mutability": "view"
+      },
+      {
+        "type": "function",
         "name": "check",
         "inputs": [
           {
@@ -1927,6 +2023,57 @@ export const pokerGameAbi = [
   },
   {
     "type": "event",
+    "name": "zkpoker::PokerGame::ShowdownTurn",
+    "kind": "struct",
+    "members": [
+      {
+        "name": "table_id",
+        "type": "core::felt252",
+        "kind": "key"
+      },
+      {
+        "name": "seat",
+        "type": "core::felt252",
+        "kind": "data"
+      }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "zkpoker::PokerGame::ShowdownComplete",
+    "kind": "struct",
+    "members": [
+      {
+        "name": "table_id",
+        "type": "core::felt252",
+        "kind": "key"
+      }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "zkpoker::PokerGame::Mucked",
+    "kind": "struct",
+    "members": [
+      {
+        "name": "table_id",
+        "type": "core::felt252",
+        "kind": "key"
+      },
+      {
+        "name": "seat",
+        "type": "core::felt252",
+        "kind": "data"
+      },
+      {
+        "name": "by_timeout",
+        "type": "core::bool",
+        "kind": "data"
+      }
+    ]
+  },
+  {
+    "type": "event",
     "name": "zkpoker::PokerGame::ShuffleComplete",
     "kind": "struct",
     "members": [
@@ -2287,6 +2434,21 @@ export const pokerGameAbi = [
       {
         "name": "DeckDisputed",
         "type": "zkpoker::PokerGame::DeckDisputed",
+        "kind": "nested"
+      },
+      {
+        "name": "ShowdownTurn",
+        "type": "zkpoker::PokerGame::ShowdownTurn",
+        "kind": "nested"
+      },
+      {
+        "name": "ShowdownComplete",
+        "type": "zkpoker::PokerGame::ShowdownComplete",
+        "kind": "nested"
+      },
+      {
+        "name": "Mucked",
+        "type": "zkpoker::PokerGame::Mucked",
         "kind": "nested"
       },
       {

@@ -868,6 +868,23 @@ pub trait IPokerGame<TState> {
     // legal without a separate entrypoint.
     fn settle_from_reveals(ref self: TState, table_id: felt252);
 
+    // Decline to show, at your own turn. Legal and sometimes correct: a player
+    // facing a hand that already beats them gains nothing by exposing their
+    // own. A mucked seat cannot win, and its chips stay in the pot -- so
+    // mucking forfeits rather than blocking, and the hand still resolves for
+    // everyone else.
+    fn muck(ref self: TState, table_id: felt252, seat: felt252);
+
+    // Muck the seat that is out of time. Callable by anyone, like every other
+    // timeout here: the seat holding everyone up will not report itself.
+    fn claim_showdown_timeout(ref self: TState, table_id: felt252);
+
+    // Showdown views: whose turn it is to show, by when, and who has mucked.
+    fn get_showdown_turn(self: @TState, table_id: felt252) -> felt252;
+    fn get_showdown_deadline(self: @TState, table_id: felt252) -> u64;
+    fn get_showdown_started(self: @TState, table_id: felt252) -> bool;
+    fn get_seat_mucked(self: @TState, table_id: felt252, seat: felt252) -> bool;
+
     // Act without putting anything in. Legal only when there is nothing to
     // call -- facing a bet you must call, raise or fold. A street with no
     // betting still needs every seat to act before it can end, which is why
@@ -1052,6 +1069,9 @@ pub mod PokerGame {
         pub const POSITION_NOT_OPENED: felt252 = 'POSITION_NOT_OPENED';
         pub const BAD_COMMUNITY_INDEX: felt252 = 'BAD_COMMUNITY_INDEX';
         pub const STREET_TOO_EARLY: felt252 = 'CARD_NOT_DUE_THIS_STREET';
+        pub const NOT_SHOWDOWN_TURN: felt252 = 'NOT_YOUR_SHOWDOWN_TURN';
+        pub const SHOWDOWN_LIVE: felt252 = 'SHOWDOWN_DEADLINE_LIVE';
+        pub const ALREADY_MUCKED: felt252 = 'SEAT_ALREADY_MUCKED';
         pub const CARD_REVEALED: felt252 = 'CARD_ALREADY_REVEALED';
         pub const BAD_REVEAL: felt252 = 'CARD_REVEAL_REJECTED';
         pub const BAD_SLOT: felt252 = 'BAD_HOLE_SLOT';
@@ -1156,6 +1176,15 @@ pub mod PokerGame {
     // recoverable in a way a missing decryption share is not, so the seat
     // is folded and play continues.
     const ACTION_SECS: u64 = 600;
+
+    // How long a seat has to show its hand once it is that seat's turn at
+    // showdown. Short on purpose: showing needs no proving work the player has
+    // not already done -- the shares were exchanged at dealing time and the
+    // aggregate is assembled from them -- so the only thing this waits for is
+    // a person deciding whether to expose a loser. A hand that stalls here
+    // stalls everyone, and the cost of running out is exactly what a player
+    // choosing to muck would have picked anyway.
+    const SHOWDOWN_SECS: u64 = 10;
 
     #[storage]
     struct Storage {
@@ -1293,6 +1322,19 @@ pub mod PokerGame {
         street_contributed: Map<(felt252, u8, felt252), u128>,
         // The amount to call on this street.
         street_high: Map<(felt252, u8), u128>,
+        // Seat that last bet or raised on a street, stored as seat + 1 so that
+        // 0 means "nobody bet". Showdown order starts with the last aggressor
+        // on the final street; when everyone checked there is none, and order
+        // starts from the first seat still in the hand instead.
+        street_aggressor: Map<(felt252, u8), felt252>,
+        // Showdown: whose turn it is to show, and by when.
+        showdown_started: Map<felt252, bool>,
+        showdown_turn: Map<felt252, felt252>,
+        showdown_deadline: Map<felt252, u64>,
+        // A seat that declined to show, or ran out of time. Distinct from
+        // folded: its chips are in the pot and stay there, it simply cannot
+        // win. Cards speak, and a hand nobody showed says nothing.
+        seat_mucked: Map<(felt252, felt252), bool>,
         // Seat index whose turn it is to act.
         action_turn: Map<felt252, u32>,
         // .. and when that action is due. Rewritten every time the turn
@@ -1366,6 +1408,9 @@ pub mod PokerGame {
         Shuffled: Shuffled,
         DeckPublished: DeckPublished,
         DeckDisputed: DeckDisputed,
+        ShowdownTurn: ShowdownTurn,
+        ShowdownComplete: ShowdownComplete,
+        Mucked: Mucked,
         ShuffleComplete: ShuffleComplete,
         TableVoided: TableVoided,
         Checked: Checked,
@@ -1521,6 +1566,28 @@ pub mod PokerGame {
     // The seat on turn says the deck it was handed does not open the
     // commitment it is chained to. Names both sides; convicts neither, because
     // the contract cannot check the claim (§7).
+    #[derive(Drop, starknet::Event)]
+    pub struct ShowdownTurn {
+        #[key]
+        pub table_id: felt252,
+        pub seat: felt252,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    pub struct ShowdownComplete {
+        #[key]
+        pub table_id: felt252,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    pub struct Mucked {
+        #[key]
+        pub table_id: felt252,
+        pub seat: felt252,
+        // True when the seat ran out of time rather than choosing to muck.
+        pub by_timeout: bool,
+    }
+
     #[derive(Drop, starknet::Event)]
     pub struct DeckDisputed {
         #[key]
@@ -1833,6 +1900,97 @@ pub mod PokerGame {
 
         // Start-of-street: action begins with the lowest-numbered seat
         // still in the hand.
+        // ── Showdown order ───────────────────────────────────────────
+        //
+        // Who shows first: the last player to bet or raise on the final
+        // street. If everyone checked there is no aggressor, and order starts
+        // from the first seat still in the hand. After that it is clockwise,
+        // which here means ascending seat index, wrapping.
+        //
+        // Order matters because showing is information: a player who has
+        // already seen a better hand may muck rather than expose their own, so
+        // WHO reveals first is worth something. Enforcing it client-side only
+        // would make it advisory, so it is enforced here.
+        fn start_showdown(ref self: ContractState, table_id: felt252) {
+            if self.showdown_started.entry(table_id).read() {
+                return;
+            }
+            self.showdown_started.entry(table_id).write(true);
+
+            // The river is the street just completed -- SHOWDOWN_STREET - 1.
+            let river = SHOWDOWN_STREET - 1;
+            let aggressor_plus_one = self.street_aggressor.entry((table_id, river)).read();
+            let max_seats = self.table_max_seats.entry(table_id).read();
+
+            let mut first: felt252 = 0;
+            let mut found = false;
+            if aggressor_plus_one != 0 {
+                let seat = aggressor_plus_one - 1;
+                if self.is_active(table_id, seat) {
+                    first = seat;
+                    found = true;
+                }
+            }
+            if !found {
+                let mut i: u32 = 0;
+                while i != max_seats {
+                    let seat: felt252 = i.into();
+                    if self.is_active(table_id, seat) {
+                        first = seat;
+                        found = true;
+                        break;
+                    }
+                    i += 1;
+                };
+            }
+            if found {
+                self.showdown_turn.entry(table_id).write(first);
+                self
+                    .showdown_deadline
+                    .entry(table_id)
+                    .write(get_block_timestamp() + SHOWDOWN_SECS);
+                self.emit(ShowdownTurn { table_id, seat: first });
+            }
+        }
+
+        // Next seat still in the hand that has neither shown both cards nor
+        // mucked, walking clockwise from the current one.
+        fn advance_showdown_turn(ref self: ContractState, table_id: felt252) {
+            let max_seats = self.table_max_seats.entry(table_id).read();
+            let current = self.showdown_turn.entry(table_id).read();
+            let current_u32: u32 = current.try_into().expect(errors::BAD_SEAT);
+
+            let mut step: u32 = 1;
+            let mut next: felt252 = 0;
+            let mut found = false;
+            while step != max_seats + 1 {
+                let idx = (current_u32 + step) % max_seats;
+                let seat: felt252 = idx.into();
+                if self.is_active(table_id, seat)
+                    && !self.seat_mucked.entry((table_id, seat)).read()
+                    && !(self.hole_revealed.entry((table_id, seat, 0)).read()
+                        && self.hole_revealed.entry((table_id, seat, 1)).read()) {
+                    next = seat;
+                    found = true;
+                    break;
+                }
+                step += 1;
+            };
+
+            if found {
+                self.showdown_turn.entry(table_id).write(next);
+                self
+                    .showdown_deadline
+                    .entry(table_id)
+                    .write(get_block_timestamp() + SHOWDOWN_SECS);
+                self.emit(ShowdownTurn { table_id, seat: next });
+            } else {
+                // Everyone has shown or mucked. Nothing left to wait for.
+                self.showdown_deadline.entry(table_id).write(0);
+                self.emit(ShowdownComplete { table_id });
+            }
+        }
+
         fn reset_turn(ref self: ContractState, table_id: felt252) {
             self.action_deadline.entry(table_id).write(get_block_timestamp() + ACTION_SECS);
             let max_seats = self.table_max_seats.entry(table_id).read();
@@ -2185,6 +2343,8 @@ pub mod PokerGame {
                 high_entry.write(put_in);
                 let e = self.epoch_of(table_id, street);
                 self.aggression_epoch.entry((table_id, street)).write(e + 1);
+                // +1 so that 0 can mean "no bet on this street".
+                self.street_aggressor.entry((table_id, street)).write(seat + 1);
             }
             self.mark_acted(table_id, seat);
             // Security review (round 3, Finding 2): tracks what this seat
@@ -2354,6 +2514,9 @@ pub mod PokerGame {
             // Action reopens from the first seat still in the hand.
             self.reset_turn(table_id);
             self.emit(StreetAdvanced { table_id, street: next });
+            if next == SHOWDOWN_STREET {
+                self.start_showdown(table_id);
+            }
         }
 
         fn settle_table(
@@ -3413,6 +3576,18 @@ pub mod PokerGame {
             let committed = self.hole_commitment.entry((table_id, seat, slot)).read();
             assert(committed != 0, errors::NO_HOLE_COMMITMENT);
 
+            // Showdown only, and in order.
+            //
+            // Showing is information -- a player who has seen a better hand
+            // may muck rather than expose their own -- so who reveals first is
+            // worth something, and a rule enforced only by clients is a rule
+            // that does not exist. The order itself is the Hold'em one: last
+            // aggressor on the river, else the first seat still in the hand,
+            // then clockwise.
+            assert(self.showdown_started.entry(table_id).read(), errors::NOT_SHOWDOWN);
+            assert(!self.seat_mucked.entry((table_id, seat)).read(), errors::ALREADY_MUCKED);
+            assert(self.showdown_turn.entry(table_id).read() == seat, errors::NOT_SHOWDOWN_TURN);
+
             // Reopen the dealing-time commitment. Without this the player
             // could substitute a different share set after seeing the
             // board -- the shares are what determine the card, so that
@@ -3447,6 +3622,20 @@ pub mod PokerGame {
             self.hole_revealed.entry((table_id, seat, slot)).write(true);
             self.reentrancy_lock.write(false);
             self.emit(HoleCardRevealed { table_id, seat, slot, card });
+
+            // A hand is shown once BOTH cards are up. Until then the seat
+            // keeps the turn -- half a hand is not a showdown.
+            if self.hole_revealed.entry((table_id, seat, 0)).read()
+                && self.hole_revealed.entry((table_id, seat, 1)).read() {
+                self.advance_showdown_turn(table_id);
+            } else {
+                // Fresh clock for the second card, so a slow second reveal is
+                // not punished by the first one's remaining seconds.
+                self
+                    .showdown_deadline
+                    .entry(table_id)
+                    .write(get_block_timestamp() + SHOWDOWN_SECS);
+            }
         }
 
         fn get_community_card(self: @ContractState, table_id: felt252, index: u32) -> u8 {
@@ -3593,6 +3782,59 @@ pub mod PokerGame {
             self.round_complete(table_id)
         }
 
+        fn muck(ref self: ContractState, table_id: felt252, seat: felt252) {
+            assert(self.table_exists.entry(table_id).read(), errors::NO_TABLE);
+            assert(!self.table_voided.entry(table_id).read(), errors::TABLE_VOIDED);
+            assert(!self.table_settled.entry(table_id).read(), errors::ALREADY_SETTLED);
+            assert(self.showdown_started.entry(table_id).read(), errors::NOT_SHOWDOWN);
+            assert(
+                get_caller_address() == self.seat_owner.entry((table_id, seat)).read(),
+                errors::NOT_SEAT_OWNER,
+            );
+            assert(self.showdown_turn.entry(table_id).read() == seat, errors::NOT_SHOWDOWN_TURN);
+            assert(!self.seat_mucked.entry((table_id, seat)).read(), errors::ALREADY_MUCKED);
+
+            self.seat_mucked.entry((table_id, seat)).write(true);
+            self.emit(Mucked { table_id, seat, by_timeout: false });
+            self.advance_showdown_turn(table_id);
+        }
+
+        fn claim_showdown_timeout(ref self: ContractState, table_id: felt252) {
+            assert(self.table_exists.entry(table_id).read(), errors::NO_TABLE);
+            assert(!self.table_voided.entry(table_id).read(), errors::TABLE_VOIDED);
+            assert(!self.table_settled.entry(table_id).read(), errors::ALREADY_SETTLED);
+            assert(self.showdown_started.entry(table_id).read(), errors::NOT_SHOWDOWN);
+
+            let deadline = self.showdown_deadline.entry(table_id).read();
+            assert(deadline != 0, errors::NOT_SHOWDOWN);
+            assert(get_block_timestamp() > deadline, errors::SHOWDOWN_LIVE);
+
+            // Not showing in time IS mucking. There is nothing to reconstruct
+            // and nobody to punish beyond the pot the seat gives up -- unlike
+            // a withheld decryption share, which stops a card existing at all,
+            // a hand nobody shows simply does not win.
+            let seat = self.showdown_turn.entry(table_id).read();
+            self.seat_mucked.entry((table_id, seat)).write(true);
+            self.emit(Mucked { table_id, seat, by_timeout: true });
+            self.advance_showdown_turn(table_id);
+        }
+
+        fn get_showdown_turn(self: @ContractState, table_id: felt252) -> felt252 {
+            self.showdown_turn.entry(table_id).read()
+        }
+
+        fn get_showdown_deadline(self: @ContractState, table_id: felt252) -> u64 {
+            self.showdown_deadline.entry(table_id).read()
+        }
+
+        fn get_showdown_started(self: @ContractState, table_id: felt252) -> bool {
+            self.showdown_started.entry(table_id).read()
+        }
+
+        fn get_seat_mucked(self: @ContractState, table_id: felt252, seat: felt252) -> bool {
+            self.seat_mucked.entry((table_id, seat)).read()
+        }
+
         fn settle_from_reveals(ref self: ContractState, table_id: felt252) {
             assert(self.table_exists.entry(table_id).read(), errors::NO_TABLE);
             assert(!self.table_voided.entry(table_id).read(), errors::TABLE_VOIDED);
@@ -3614,7 +3856,13 @@ pub mod PokerGame {
                 }
                 let seat: felt252 = s.into();
                 let owner = self.seat_owner.entry((table_id, seat)).read();
-                if owner.is_non_zero() && !self.seat_folded.entry((table_id, seat)).read() {
+                // A mucked seat is not a contender. Its chips stay in the pot
+                // -- mucking forfeits rather than blocking -- but a hand
+                // nobody showed says nothing, and cards speak: only what was
+                // tabled and verified can win.
+                if owner.is_non_zero()
+                    && !self.seat_folded.entry((table_id, seat)).read()
+                    && !self.seat_mucked.entry((table_id, seat)).read() {
                     contenders.append(seat);
                 }
                 s += 1;
