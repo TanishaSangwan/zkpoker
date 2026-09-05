@@ -27,18 +27,78 @@
 # artifact -- and that is the right outcome: a deployment should not contain a
 # token whose mint() is open to anyone. Devnet's predeployed accounts already
 # hold STRK, so buy-ins work with no minting step at all.
-STRK_DEVNET="0x4718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d"
+#
+# STRK lives at the same canonical address on devnet, Sepolia and Mainnet, so
+# this needs no per-network table.
+STRK="0x4718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d"
 set -euo pipefail
 
-ACCOUNT="${ACCOUNT:-devnet0}"
+# ── which network ──────────────────────────────────────────────────────
+#
+# NETWORK picks the RPC, the account and which NEXT_PUBLIC_* pair the result
+# is written to. Devnet stays the default: this script is run far more often
+# against a throwaway node than against a public chain, and a script that
+# deploys to a real network when you forget an argument is a bad script.
+#
+#   ./scripts/deploy_local.sh                       devnet (default)
+#   NETWORK=sepolia ./scripts/deploy_local.sh       Starknet Sepolia
+#
+# Sepolia needs a funded, deployed account named in ACCOUNT. Nothing here
+# creates or funds one -- see the README section this prints on failure.
+NETWORK="${NETWORK:-devnet}"
+case "$NETWORK" in
+  devnet)
+    RPC="${RPC:-http://127.0.0.1:5050}"
+    ACCOUNT="${ACCOUNT:-devnet0}"
+    ENV_GAME="NEXT_PUBLIC_POKERGAME_DEVNET"
+    ENV_TOKEN="NEXT_PUBLIC_DEVNET_TOKEN"
+    ;;
+  sepolia)
+    RPC="${RPC:-https://starknet-sepolia.drpc.org}"
+    ACCOUNT="${ACCOUNT:-sepolia}"
+    ENV_GAME="NEXT_PUBLIC_POKERGAME_SEPOLIA"
+    ENV_TOKEN=""
+    ;;
+  *)
+    echo "unknown NETWORK '$NETWORK' -- use devnet or sepolia"
+    exit 1
+    ;;
+esac
 ACCOUNTS_FILE="${ACCOUNTS_FILE:-$HOME/.starknet_accounts/starknet_open_zeppelin_accounts.json}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-RPC="${RPC:-http://127.0.0.1:5050}"
 
 if ! curl -s -o /dev/null -X POST "$RPC" -H 'content-type: application/json' \
      -d '{"jsonrpc":"2.0","id":1,"method":"starknet_chainId","params":[]}'; then
-  echo "no devnet at $RPC -- start it with: starknet-devnet --seed 0 --host 127.0.0.1 --port 5050"
+  if [ "$NETWORK" = devnet ]; then
+    echo "no devnet at $RPC -- start it with: starknet-devnet --seed 0 --host 127.0.0.1 --port 5050"
+  else
+    echo "no RPC at $RPC -- set RPC to a Starknet $NETWORK endpoint"
+  fi
   exit 1
+fi
+
+# Declaring six contracts is not free on a public chain, and the failure mode
+# for an unfunded account is a wall of fee-estimation JSON. Say it plainly
+# first instead.
+if [ "$NETWORK" != devnet ]; then
+  say_addr="$(ACCOUNT="$ACCOUNT" ACCOUNTS_FILE="$ACCOUNTS_FILE" python3 -c "
+import json, os
+d = json.load(open(os.environ['ACCOUNTS_FILE']))
+for net in d.values():
+    if os.environ['ACCOUNT'] in net:
+        print(net[os.environ['ACCOUNT']]['address']); break
+")"
+  if [ -z "$say_addr" ]; then
+    echo "no account named '$ACCOUNT' in $ACCOUNTS_FILE"
+    exit 1
+  fi
+  if ! curl -s -m 20 -X POST "$RPC" -H 'content-type: application/json' \
+       -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"starknet_getClassHashAt\",\"params\":{\"block_id\":\"latest\",\"contract_address\":\"$say_addr\"}}" \
+       | grep -q '"result"'; then
+    echo "account $ACCOUNT ($say_addr) is not deployed on $NETWORK."
+    echo "Fund it, then: sncast --account $ACCOUNT --accounts-file $ACCOUNTS_FILE account deploy --url $RPC --name $ACCOUNT"
+    exit 1
+  fi
 fi
 
 say() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
@@ -141,25 +201,27 @@ for net in d.values():
 GAME_ADDR="$(deploy_contract "$GAME_CLASS" --arguments "$POOL,$ADAPTER_ADDR")"
 echo "  pokergame          $GAME_ADDR"
 
-TOKEN_ADDR="$STRK_DEVNET"
-echo "  buy-in token       $TOKEN_ADDR (devnet predeployed STRK)"
+TOKEN_ADDR="$STRK"
+echo "  buy-in token       $TOKEN_ADDR (STRK)"
 
 say "wiring .env.local"
-python3 - "$GAME_ADDR" "$TOKEN_ADDR" <<'PY'
+python3 - "$GAME_ADDR" "$TOKEN_ADDR" "$ENV_GAME" "$ENV_TOKEN" "$NETWORK" "$ROOT" <<'PY'
 import re, sys, pathlib
-game, token = sys.argv[1], sys.argv[2]
-p = pathlib.Path("/home/x/Documents/zkpoker/.env.local")
+game, token, env_game, env_token, network, root = sys.argv[1:7]
+p = pathlib.Path(root) / ".env.local"
 text = p.read_text() if p.exists() else ""
 def setvar(t, k, v):
     if re.search(rf"^{k}=.*$", t, re.M):
         return re.sub(rf"^{k}=.*$", f"{k}={v}", t, flags=re.M)
     return t.rstrip("\n") + f"\n{k}={v}\n"
-text = setvar(text, "NEXT_PUBLIC_POKERGAME_DEVNET", game)
-text = setvar(text, "NEXT_PUBLIC_DEVNET_TOKEN", token)
-text = setvar(text, "NEXT_PUBLIC_DEVNET_RPC_URL", "http://127.0.0.1:5050")
+text = setvar(text, env_game, game)
+print(f"  {env_game} = {game}")
+if env_token:
+    text = setvar(text, env_token, token)
+    print(f"  {env_token} = {token}")
+if network == "devnet":
+    text = setvar(text, "NEXT_PUBLIC_DEVNET_RPC_URL", "http://127.0.0.1:5050")
 p.write_text(text)
-print("  NEXT_PUBLIC_POKERGAME_DEVNET =", game)
-print("  NEXT_PUBLIC_DEVNET_TOKEN     =", token)
 PY
 
 say "done"
