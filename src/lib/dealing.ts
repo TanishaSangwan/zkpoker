@@ -119,67 +119,141 @@ export async function runAggregate(args: {
   // layer because this is a library entry point -- a caller that is not the
   // panel should not have to know that garaga needs waking up first.
   await dleq.initProver();
-  const session = new AggregateSession(tableId, position, h, keys);
+  const state = new AggregateSession(tableId, position, h, keys);
 
   const mine = myContribution(mySecret, h);
+
+  // ── Which run of the protocol is this? ────────────────────────────────
+  //
+  // The equivocation check -- two different nonce commitments from one seat is
+  // an attack -- cannot tell a second ATTEMPT from a second COMMITMENT unless
+  // runs are named. So they are, and the lowest-numbered seat names them:
+  // it proposes a fresh id, everyone else adopts the id they see from it.
+  // Deterministic, so there is no tie to break and no round trip to agree.
+  //
+  // Anything from another run is ignored rather than rejected -- a stale tab
+  // is not a cheat.
+  const proposer = Math.min(...keys.keys());
+  let session: string | null = null;
+  if (mySeat === proposer) {
+    session = [...crypto.getRandomValues(new Uint8Array(8))]
+      .map((b) => b.toString(16).padStart(2, '0')).join('');
+  }
+
   const send = (kind: Envelope['kind'], body: unknown) =>
-    transport.publish({ tableId, position, from: mySeat, kind, to: null, body });
+    transport.publish({ tableId, position, from: mySeat, kind, to: null, body, session: session ?? undefined });
 
   const done = new Promise<AggregateResult>((resolve, reject) => {
     const stop = transport.subscribe((e) => {
       if (e.tableId !== tableId || e.position !== position || e.from === mySeat) return;
       try {
+        // Adopt the proposer's run; ignore every other.
+        if (session === null) {
+          if (e.from !== proposer || !e.session) return;
+          session = e.session;
+          // Only now can this seat commit: its own envelope has to carry the
+          // run id, and until the proposer speaks there is no run to join.
+          session_started();
+        }
+        if (e.session && e.session !== session) return;
         const body = e.body as any;
-        if (e.kind === 'nonce-commit') session.acceptCommitment(e.from, BigInt(body.commitment));
+        if (e.kind === 'nonce-commit') state.acceptCommitment(e.from, BigInt(body.commitment));
         else if (e.kind === 'nonce-reveal') {
-          session.acceptReveal(e.from, pt(body.r1), pt(body.r2));
-        } else if (e.kind === 'response') session.acceptResponse(e.from, BigInt(body.s));
+          state.acceptReveal(e.from, pt(body.r1), pt(body.r2));
+        } else if (e.kind === 'response') state.acceptResponse(e.from, BigInt(body.s));
         else return;
 
-        say(session.phase, session.outstanding);
+        say(state.phase, state.outstanding);
 
         // Advance as soon as the previous round completes. Each of these is
         // idempotent from the receiver's side -- a duplicate send is dropped
         // by the session's own checks.
-        if (session.phase === 'revealing') {
-          send('nonce-reveal', { r1: wire(mine.r1), r2: wire(mine.r2) });
-        } else if (session.phase === 'responding') {
-          const e2 = session.aggregateChallenge(jointKey, shares);
-          send('response', { s: mine.respond(e2).toString() });
-          session.acceptResponse(mySeat, mine.respond(e2));
-        }
+        advanceMe();
 
-        if (session.phase === 'complete') {
+        if (state.phase === 'complete') {
           stop();
           clearTimeout(timer);
-          const proof = dleq.aggregate(session.contributions(shares), h);
+          clearAnnounce();
+          const proof = dleq.aggregate(state.contributions(shares), h);
           resolve({ share: combineShares([...shares.values()]), proof });
         }
       } catch (err) {
         stop();
         clearTimeout(timer);
+        clearAnnounce();
         reject(err);
       }
     });
 
     const timer = setTimeout(() => {
       stop();
+      clearAnnounce();
       reject(
         new Error(
-          `dealing: timed out waiting on seat(s) ${session.outstanding.join(', ')} during the ` +
-            `${session.phase} round for position ${position}. Accuse them on-chain rather than ` +
+          `dealing: timed out waiting on seat(s) ${state.outstanding.join(', ')} during the ` +
+            `${state.phase} round for position ${position}. Accuse them on-chain rather than ` +
             `waiting — a share nobody can produce ends the hand either way.`,
         ),
       );
     }, args.timeoutMs ?? 120_000);
 
-    // Round 1 for this party, and its own contribution registered locally.
-    session.acceptCommitment(mySeat, mine.commitment);
-    send('nonce-commit', { commitment: mine.commitment.toString() });
-    if (session.phase === 'revealing') {
-      session.acceptReveal(mySeat, mine.r1, mine.r2);
-      send('nonce-reveal', { r1: wire(mine.r1), r2: wire(mine.r2) });
+    // Round 1, once there is a run to attach it to. The proposer starts
+    // immediately; everyone else starts on hearing from it.
+    /**
+     * Do whatever this seat owes for the round it is now in -- and RECORD IT
+     * LOCALLY as well as sending it.
+     *
+     * Recording is the part that is easy to miss and fatal to omit: an earlier
+     * version sent its own nonce reveal but never told its own session about
+     * it, so `outstanding` listed this very seat forever and the round could
+     * not complete no matter what anyone else did. The symptom was a timeout
+     * naming yourself.
+     */
+    function advanceMe() {
+      if (state.phase === 'revealing' && !state.has(mySeat, 'reveal')) {
+        state.acceptReveal(mySeat, mine.r1, mine.r2);
+        send('nonce-reveal', { r1: wire(mine.r1), r2: wire(mine.r2) });
+      }
+      if (state.phase === 'responding' && !state.has(mySeat, 'response')) {
+        const e2 = state.aggregateChallenge(jointKey, shares);
+        const s2 = mine.respond(e2);
+        state.acceptResponse(mySeat, s2);
+        send('response', { s: s2.toString() });
+      }
     }
+
+    function session_started() {
+      state.acceptCommitment(mySeat, mine.commitment);
+      send('nonce-commit', { commitment: mine.commitment.toString() });
+      advanceMe();
+    }
+    if (mySeat === proposer) session_started();
+
+    // Re-announce whatever this seat owes for the CURRENT round, until the
+    // round moves on.
+    //
+    // Clients do not join at the same instant. A person clicks a button
+    // seconds after the other side started, and the aggregate rounds
+    // deliberately run on a live-only stream (a replayed commitment from an
+    // abandoned run is indistinguishable from equivocation), so a message
+    // sent before the other party was listening is simply gone -- and both
+    // sides then wait forever for something that was genuinely sent. That is
+    // the same silent, symmetric deadlock twice over, so it is fixed
+    // generally rather than by asking humans to click in step.
+    //
+    // Safe to repeat: a byte-identical commitment is treated as a duplicate
+    // delivery rather than equivocation, and reveals and responses are
+    // deterministic for a given round.
+    const announce = setInterval(() => {
+      if (state.phase === 'complete') return;
+      if (mySeat !== proposer && session === null) return; // nothing to say yet
+      if (state.phase === 'committing') {
+        send('nonce-commit', { commitment: mine.commitment.toString() });
+      } else {
+        advanceMe();
+      }
+    }, 2000);
+    const clearAnnounce = () => clearInterval(announce);
   });
 
   return done;

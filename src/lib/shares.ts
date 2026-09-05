@@ -36,6 +36,15 @@ export type Envelope = {
   kind: 'nonce-commit' | 'nonce-reveal' | 'response' | 'share';
   /** Seat this is addressed to, or null for a broadcast (community cards). */
   to: number | null;
+  /**
+   * Which run of the multi-round aggregate this belongs to.
+   *
+   * Without it, two attempts at the same position -- a retry after a failure,
+   * or a stale tab -- are indistinguishable from one party equivocating on its
+   * nonce, and the session correctly (but wrongly) rejects the second as an
+   * attack. Absent on `share` envelopes, which are not round-based.
+   */
+  session?: string;
   /** Plaintext for broadcasts; ECIES ciphertext when `to` is set. */
   body: unknown;
 };
@@ -184,13 +193,26 @@ export class AggregateSession {
     return [...this.expected].filter((s) => !have.has(s)).sort((a, b) => a - b);
   }
 
+  /** Whether this seat's contribution for a given round is already recorded. */
+  has(seat: number, what: 'commitment' | 'reveal' | 'response'): boolean {
+    if (what === 'commitment') return this.round.commitments.has(seat);
+    if (what === 'reveal') return this.round.nonces.has(seat);
+    return this.round.responses.has(seat);
+  }
+
   acceptCommitment(seat: number, commitment: bigint) {
     this.require(seat);
-    if (this.phase !== 'committing') throw new Error('shares: commitment after the commit round closed');
     const prior = this.round.commitments.get(seat);
-    if (prior !== undefined && prior !== commitment) {
-      throw new Error(`shares: seat ${seat} sent two different nonce commitments`);
+    // A byte-identical repeat is a duplicate delivery, not a protocol
+    // violation -- transports retry and relays replay. Two DIFFERENT
+    // commitments from one seat is equivocation and stays fatal.
+    if (prior !== undefined) {
+      if (prior !== commitment) {
+        throw new Error(`shares: seat ${seat} sent two different nonce commitments`);
+      }
+      return;
     }
+    if (this.phase !== 'committing') throw new Error('shares: commitment after the commit round closed');
     this.round.commitments.set(seat, commitment);
   }
 

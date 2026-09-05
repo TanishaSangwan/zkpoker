@@ -76,12 +76,23 @@ const server = createServer((req, res) => {
     rooms.get(table).add(res);
     console.log(`+ listener on ${table} (${rooms.get(table).size} total)`);
 
-    // Replay what was already said on this table. Recipients ignore anything
-    // not addressed to them and every check is idempotent, so a duplicate is
-    // harmless where a miss is not.
-    const past = history.get(table) ?? [];
-    for (const frame of past) { try { res.write(frame); } catch {} }
-    if (past.length) console.log(`  replayed ${past.length} frame(s) to the new listener`);
+    // Replay what was already said, unless the subscriber asked not to.
+    //
+    // Replay is right for SHARES: they are addressed, idempotent, and a miss
+    // is unrecoverable while a duplicate is harmless. It is wrong for the
+    // round-based aggregate messages, where a stale commitment from an
+    // ABANDONED attempt at the same position is indistinguishable from a
+    // current one and trips the session's own equivocation check. So the
+    // choice belongs to the client -- the relay still understands nothing, it
+    // just answers the question it was asked.
+    const wantsHistory = url.searchParams.get('replay') !== '0';
+    if (wantsHistory) {
+      const past = history.get(table) ?? [];
+      for (const frame of past) { try { res.write(frame); } catch {} }
+      if (past.length) console.log(`  replayed ${past.length} frame(s) to the new listener`);
+    } else {
+      console.log('  live-only listener, no replay');
+    }
 
     // Proxies and browsers drop an idle event stream; a comment line every 20s
     // keeps it open without meaning anything to the protocol.

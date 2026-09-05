@@ -23,13 +23,23 @@ export class RelayTransport implements Transport {
   private source: EventSource | null = null;
   private abort: AbortController | null = null;
 
+  /**
+   * `replay: false` for a stream that must only carry what happens from now
+   * on. The multi-round aggregate needs that: a replayed commitment from an
+   * abandoned attempt at the same position arrives mid-round and is
+   * indistinguishable from a party equivocating, which is a fatal error by
+   * design. Share collection wants the opposite -- a missed share cannot be
+   * recovered, a duplicate is harmless -- so it keeps replay on.
+   */
   constructor(
     private readonly tableId: string,
     private readonly baseUrl: string,
+    private readonly opts: { replay?: boolean } = {},
   ) {}
 
   private get streamUrl() {
-    return `${this.baseUrl.replace(/\/$/, '')}/events?table=${encodeURIComponent(this.tableId)}`;
+    const replay = this.opts.replay === false ? '&replay=0' : '';
+    return `${this.baseUrl.replace(/\/$/, '')}/events?table=${encodeURIComponent(this.tableId)}${replay}`;
   }
 
   /** A relay frame, dispatched to every subscriber. */

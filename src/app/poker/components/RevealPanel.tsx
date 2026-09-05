@@ -44,6 +44,10 @@ export default function RevealPanel(p: Props) {
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const transport = useRef<Transport | null>(null);
+  // A second stream with replay disabled, for the aggregate rounds only. See
+  // RelayTransport's constructor note: replay is right for shares and wrong
+  // for round-based messages.
+  const liveOnly = useRef<Transport | null>(null);
 
   // A relay when one is configured, BroadcastChannel otherwise. The fallback
   // only spans tabs of this browser, which demonstrates a table and cannot
@@ -56,9 +60,13 @@ export default function RevealPanel(p: Props) {
     const t: Transport & { close: () => void } = url
       ? new RelayTransport(table.tableId, url)
       : new BroadcastTransport(table.tableId);
+    const live: Transport & { close: () => void } = url
+      ? new RelayTransport(table.tableId, url, { replay: false })
+      : new BroadcastTransport(table.tableId);
     transport.current = t;
+    liveOnly.current = live;
     setTransportKind(url ? 'relay' : 'local');
-    return () => t.close();
+    return () => { t.close(); live.close(); };
   }, [table.tableId]);
 
   const keys = useMemo(() => {
@@ -190,11 +198,29 @@ export default function RevealPanel(p: Props) {
     run(`Revealing community card ${index}`, async () => {
       const position = communityPosition(index, table.maxSeats);
       const { c1, c2 } = await openedAt(position);
+
+      // Broadcast MY share before waiting for anyone else's.
+      //
+      // Without this the button only ever collects, so two clients both sit
+      // waiting for a share the other never sent -- a deadlock that looks
+      // exactly like the other player being offline. Community shares are
+      // public by design (the card is about to be on the board), so this is a
+      // plain broadcast, not sealed to anyone.
+      setBusy('broadcasting my share');
+      const myShare = dealing.shareFor(identity!.secret, c1);
+      await transport.current!.publish({
+        tableId: table.tableId, position, from: yourSeat!, kind: 'share', to: null,
+        body: {
+          d: { x: myShare.d.x.toString(), y: myShare.d.y.toString() },
+          s: myShare.s.toString(), e: myShare.e.toString(),
+        },
+      });
+
       setBusy('gathering shares');
       const shares = await gatherShares(position, c1, false);
       setBusy('running the three-round aggregate');
       const agg = await dealing.runAggregate({
-        transport: transport.current!, tableId: table.tableId, position, h: c1,
+        transport: liveOnly.current!, tableId: table.tableId, position, h: c1,
         jointKey: table.jointKey, keys, shares, mySeat: yourSeat!, mySecret: identity!.secret,
         onProgress: (phase, outstanding) => setBusy(`${phase} — waiting on ${outstanding.join(', ') || '—'}`),
       });
@@ -224,7 +250,7 @@ export default function RevealPanel(p: Props) {
       setBusy('running the three-round aggregate');
       const shares = await gatherShares(position, c1, true);
       const agg = await dealing.runAggregate({
-        transport: transport.current!, tableId: table.tableId, position, h: c1,
+        transport: liveOnly.current!, tableId: table.tableId, position, h: c1,
         jointKey: table.jointKey, keys, shares, mySeat: yourSeat!, mySecret: identity!.secret,
         onProgress: (phase, outstanding) => setBusy(`${phase} — waiting on ${outstanding.join(', ') || '—'}`),
       });

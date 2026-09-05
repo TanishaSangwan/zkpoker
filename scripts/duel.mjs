@@ -309,6 +309,100 @@ switch (cmd) {
     }
     break;
   }
+  // ── community cards ────────────────────────────────────────────────
+  //
+  // Unlike a hole card, these shares are PUBLIC by design -- the card is
+  // about to be on the board -- so they are broadcast rather than sealed,
+  // and the aggregate can be built as soon as they are in.
+  //
+  // Both seats must be live for this: the aggregate challenge depends on the
+  // SUM of every party's nonce point, so it needs three rounds of actual
+  // interaction (commit, reveal, respond). A party revealing its nonce last
+  // could otherwise grind it against everyone else's -- the classic naive
+  // multisignature break -- which is why AggregateSession refuses a reveal
+  // before every commitment is in.
+  case 'board': {
+    const index = Number(process.argv[4] ?? 0);
+    if (!state.secret) throw new Error('no seat key in state');
+    await dleqInit();
+    const secret = BigInt(state.secret);
+    const maxSeats = Number(await view.get_table_max_seats(TABLE));
+    const pos = deck.communityPosition(index, maxSeats);
+    if (await view.get_community_revealed(TABLE, index)) { console.log(`board ${index} already revealed`); break; }
+
+    const relay = process.env.NEXT_PUBLIC_RELAY_URL ?? 'http://127.0.0.1:3100';
+    // Two streams on purpose. Share collection wants replay (a missed share is
+    // unrecoverable, a duplicate is harmless); the aggregate rounds must not
+    // have it (a replayed commitment from an abandoned attempt looks like
+    // equivocation and is fatal by design).
+    const transport = new RelayTransport(TABLE, relay);
+    const liveOnly = new RelayTransport(TABLE, relay, { replay: false });
+
+    const raw = await view.get_opened_ciphertext(TABLE, pos);
+    const [c1x, c1y, c2x, c2y] = (Array.isArray(raw) ? raw : [raw[0], raw[1], raw[2], raw[3]]).map(big);
+    const c1 = grumpkin.fromWire(c1x, c1y);
+    const c2 = grumpkin.fromWire(c2x, c2y);
+
+    const jraw = await view.get_joint_pk(TABLE);
+    const [jx, jy] = (Array.isArray(jraw) ? jraw : [jraw[0], jraw[1]]).map(big);
+    const Y = grumpkin.fromWire(jx, jy);
+
+    const keys = new Map();
+    for (let s2 = 0; s2 < maxSeats; s2++) {
+      if (BigInt(await view.get_seat_owner(TABLE, String(s2))) === 0n) continue;
+      if (!(await view.get_seat_key_registered(TABLE, String(s2)))) continue;
+      const r2 = await view.get_seat_pk(TABLE, String(s2));
+      const [x, y] = (Array.isArray(r2) ? r2 : [r2[0], r2[1]]).map(big);
+      keys.set(s2, grumpkin.fromWire(x, y));
+    }
+
+    // Broadcast mine, then collect everyone's. Public, so no sealing.
+    const mine = dealing.shareFor(secret, c1);
+    await transport.publish({
+      tableId: TABLE, position: pos, from: MY_SEAT, kind: 'share', to: null,
+      body: { d: { x: mine.d.x.toString(), y: mine.d.y.toString() }, s: mine.s.toString(), e: mine.e.toString() },
+    });
+    console.log(`  broadcast my share for board ${index} (position ${pos})`);
+
+    const shares = new Map([[MY_SEAT, grumpkin.mul(secret, c1)]]);
+    const waitMs = Number(process.env.DEAL_WAIT_MS ?? 1_800_000);
+    await new Promise((resolve, reject) => {
+      const stop = transport.subscribe((e) => {
+        if (e.position !== pos || e.kind !== 'share' || e.from === MY_SEAT) return;
+        try {
+          const msg = { d: { x: BigInt(e.body.d.x), y: BigInt(e.body.d.y) }, s: BigInt(e.body.s), e: BigInt(e.body.e) };
+          shares.set(e.from, dealing.acceptShare({ from: { seat: e.from, pk: keys.get(e.from) }, h: c1, msg }));
+          console.log(`    got seat ${e.from}'s share, DLEQ verified`);
+          if (shares.size === keys.size) { stop(); clearTimeout(t); resolve(); }
+        } catch (err) { stop(); clearTimeout(t); reject(err); }
+      });
+      const t = setTimeout(() => { stop(); reject(new Error(`no board share arrived for position ${pos}`)); }, waitMs);
+      if (shares.size === keys.size) { stop(); clearTimeout(t); resolve(); }
+    });
+
+    console.log('  running the three-round aggregate…');
+    const agg = await dealing.runAggregate({
+      transport: liveOnly, tableId: TABLE, position: pos, h: c1, jointKey: Y, keys, shares,
+      mySeat: MY_SEAT, mySecret: secret,
+      onProgress: (phase, outstanding) => console.log(`    ${phase}, waiting on ${outstanding.join(', ') || '-'}`),
+    });
+
+    const card = reveal.cardFromShare({ c1, c2 }, agg.share);
+    if (card === null) throw new Error('the combined share opens no card in the encoding');
+    console.log(`  board ${index} is ${grumpkin.cardToName(card)} -- submitting`);
+    try {
+      await send('reveal_community_card', reveal.revealCommunityArgs({
+        tableId: TABLE, index, share: agg.share, card, proof: agg.proof,
+      }));
+    } catch (e) {
+      // Either side may submit; the loser of the race sees CARD_ALREADY_REVEALED,
+      // which is the right outcome and not a failure.
+      console.log(`  (submit skipped: ${String(e.message).slice(0, 80)})`);
+    }
+    transport.close();
+    liveOnly.close();
+    break;
+  }
   case 'check': await send('check', { table_id: TABLE, seat: String(MY_SEAT) }); break;
   case 'street': await send('advance_street', { table_id: TABLE }); break;
   default: console.error(`unknown command: ${cmd}`); process.exit(1);
