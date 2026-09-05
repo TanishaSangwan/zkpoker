@@ -279,54 +279,54 @@ export default function PokerPanel() {
 
 function SeatControls(p: any) {
   const { table, yourSeat, contract, account, provider, refresh, token } = p;
-  const [seat, setSeat] = useState('0');
-
-  /**
-   * A payout note id that is unique to (account, table, seat).
-   *
-   * `note_id_owner` is a GLOBAL map and the first claimer owns an id forever,
-   * across every table. Defaulting to the seat index -- as this did -- meant
-   * seat 1 of one table claimed id 1 permanently, and the next account to sit
-   * in any seat 1 anywhere got NOTE_ID_TAKEN. Deriving it from the address
-   * makes collisions between players impossible while staying deterministic,
-   * so the same player rejoining the same seat reclaims the same id rather
-   * than stranding the old one.
-   */
-  const defaultNote = useMemo(() => {
-    if (!account?.address) return '';
-    return hash.computePoseidonHashOnElements([account.address, table.tableId, seat]);
-  }, [account?.address, table.tableId, seat]);
-
-  const [noteId, setNoteId] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
+  // The ONLY thing a player actually decides when sitting down.
+  //
+  // Everything else that used to be a field here -- which seat, what payout
+  // note id -- has one right answer and no information behind it, so asking
+  // was busywork. How much of your money this contract may move is the
+  // opposite: it is the whole risk of sitting down, so it stays a visible
+  // number rather than a constant buried in the code.
+  const [stake, setStake] = useState('1000000');
+
+  // First free seat. There is nothing to choose: seats are interchangeable
+  // (position in the shuffle chain follows seat order, and every seat shuffles
+  // anyway), and picking one by hand only creates a way to collide with
+  // someone who took it a second earlier.
+  const firstFreeSeat = useMemo(() => {
+    const taken = new Set(table.seats.filter((s: any) => s.occupied).map((s: any) => s.seat));
+    for (let i = 0; i < table.maxSeats; i++) if (!taken.has(i)) return i;
+    return null;
+  }, [table.seats, table.maxSeats]);
+
+  /**
+   * A payout note id unique to (account, table, seat).
+   *
+   * `note_id_owner` is a GLOBAL map and the first claimer owns an id forever,
+   * across every table. Defaulting to the seat index -- as this did -- meant
+   * seat 1 of one table claimed id 1 permanently and the next account to sit
+   * in any seat 1 anywhere got NOTE_ID_TAKEN.
+   */
+  const noteFor = (seat: number) =>
+    hash.computePoseidonHashOnElements([account?.address ?? '0x0', table.tableId, String(seat)]);
+
   if (yourSeat !== null || table.shuffleStarted) return null;
 
-  const [allowance, setAllowance] = useState('1000000');
-
-  const join = async () => {
+  const sitDown = async () => {
+    if (firstFreeSeat === null) { setErr('every seat is taken'); return; }
     setBusy(true); setErr(null);
     try {
-      // join_table escrows the buy-in and bet() moves tokens with
-      // transfer_from, so the token has to be approved first -- without it the
-      // join reverts inside the ERC20 with an error that says nothing about
-      // poker.
-      //
-      // Batched into ONE multicall: an approve that lands while the join fails
-      // leaves a dangling allowance the player has to notice and clean up.
-      //
-      // The allowance deliberately covers more than the buy-in, so betting
-      // works without a second approval per raise. That is a real tradeoff --
-      // a larger allowance is a larger amount this contract could pull -- so
-      // it is a visible field rather than a hidden constant.
+      // approve + join in ONE multicall: an approve that lands while the join
+      // fails leaves a dangling allowance the player has to notice and undo.
       const calls = [];
-      const approving = BigInt(allowance || '0');
+      const approving = BigInt(stake || '0');
       if (approving > 0n) calls.push(erc20ApproveCall(token, contract, approving));
       calls.push(pgCall(contract, 'join_table', {
         table_id: table.tableId,
-        seat,
-        hole_card_note_id: noteId.trim() || seat,
+        seat: String(firstFreeSeat),
+        hole_card_note_id: noteFor(firstFreeSeat),
       }));
       await executeAndWait(account, provider, calls);
       refresh();
@@ -336,38 +336,31 @@ function SeatControls(p: any) {
   return (
     <div className={styles.section}>
       <div className={styles.sectionHead}>
-        <div className={styles.sectionTitle}>Take a seat</div>
-        <div className={styles.sectionHint}>Escrows the buy-in and binds a payout note to the seat.</div>
-      </div>
-      <div className={styles.grid3}>
-        <div className={styles.field}>
-          <label className={styles.label}>seat</label>
-          <input className={styles.input} value={seat} onChange={(e) => setSeat(e.target.value)} />
+        <div className={styles.sectionTitle}>Sit down</div>
+        <div className={styles.sectionHint}>
+          Takes the first free seat, derives a payout note, and approves your stake — one
+          transaction. Your key is registered automatically once you are seated.
         </div>
+      </div>
+      <div className={styles.grid2}>
         <div className={styles.field}>
-          <label className={styles.label}>token allowance</label>
-          <input className={styles.input} value={allowance} onChange={(e) => setAllowance(e.target.value)} />
+          <label className={styles.label}>stake you are approving</label>
+          <input className={styles.input} value={stake} onChange={(e) => setStake(e.target.value)} />
           <div className={styles.fieldHint}>
-            Approved to PokerGame in the same transaction as the join. Must cover the buy-in plus
-            whatever you intend to bet.
+            The most this contract may move from your balance — buy-in plus whatever you intend to
+            bet. Shown rather than hidden, because it is the only real decision in sitting down.
           </div>
         </div>
         <div className={styles.field}>
-          <label className={styles.label}>payout note id</label>
-          <input className={styles.input} value={noteId}
-            placeholder={defaultNote ? `${defaultNote.slice(0, 14)}…` : 'connect an account'}
-            onChange={(e) => setNoteId(e.target.value)} />
-          <div className={styles.fieldHint}>
-            Where winnings go. Defaults to a value derived from your address, this table and this
-            seat — note ids are a <em>global</em> namespace whose first claimer owns them forever,
-            so a shared default like the seat number collides with whoever claimed it first. Can be
-            re-bound later with <code>bind_payout_note</code>.
+          <label className={styles.label}>seat</label>
+          <div className={styles.stateValue}>
+            {firstFreeSeat === null ? 'table full' : `seat ${firstFreeSeat} (first free)`}
           </div>
         </div>
       </div>
       <div className={styles.actionsRow}>
-        <button className={uni.btn} disabled={busy || !account} onClick={join}>
-          {busy ? 'Joining…' : 'Join table'}
+        <button className={uni.btn} disabled={busy || !account || firstFreeSeat === null} onClick={sitDown}>
+          {busy ? 'Sitting down…' : 'Sit down'}
         </button>
       </div>
       {err ? <pre className={uni.receiptNote}>{err}</pre> : null}

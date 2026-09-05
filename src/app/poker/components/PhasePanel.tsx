@@ -208,6 +208,25 @@ export default function PhasePanel(p: Props) {
     });
 
   const [autoAdvance, setAutoAdvance] = useState(true);
+
+  // ── register the key without being asked ──────────────────────────────
+  //
+  // You cannot play without registering, and registering is mandatory for a
+  // reason that has nothing to do with preference: without the Schnorr proof
+  // the last seat to register could choose a share making the joint key theirs
+  // alone and read every hole card at the table. So it is not a decision, it
+  // is a precondition -- and the key itself is generated locally either way.
+  //
+  // Guarded on the shuffle not having started, because after that the
+  // participant list is frozen and the call would only revert.
+  const registering = useRef(false);
+  useEffect(() => {
+    if (yourSeat === null || !identity || registering.current) return;
+    if (table.shuffleStarted || mySeat?.keyRegistered) return;
+    if (!account || !provider) return;
+    registering.current = true;
+    void registerKey().finally(() => { registering.current = false; });
+  }, [yourSeat, identity, table.shuffleStarted, mySeat?.keyRegistered, account, provider]);
   const [autoShuffle, setAutoShuffle] = useState(true);
 
   // ── shuffle on your own turn, without being asked ─────────────────────
@@ -299,8 +318,10 @@ export default function PhasePanel(p: Props) {
             Register key share
           </button>
           <span className={styles.fieldHint}>
-            Generates a Grumpkin key in this browser and proves you know its secret. Mandatory —
-            without the proof, the last seat to register could own the joint key alone.
+            Happening automatically — this button is only a retry. Generates a Grumpkin key in this
+            browser and proves you know its secret. Mandatory, and not a preference: without the
+            proof the last seat to register could choose a share making the joint key theirs alone
+            and read every hole card at the table.
           </span>
         </div>
       ) : null}
