@@ -365,6 +365,41 @@ export default function RevealPanel(p: Props) {
     return () => { cancelled = true; };
   }, [autoServe, table.deckOpened, table.deckOpenChunk, yourSeat, identity, provider, owed, keys, openedAt, say, table.tableId]);
 
+  /**
+   * Run the aggregate for one position: gather shares, do the three rounds,
+   * and submit if it is a community card.
+   *
+   * Shared by BOTH paths -- joining an aggregate someone else started, and
+   * starting one because a card is due. They have to be the same code and
+   * share the same `joined` guard, or a client that does both ends up running
+   * two sessions for one position and answering its own rounds twice.
+   */
+  const runFor = useCallback(async (pos: number) => {
+    const L = latest.current;
+    await initDleqProver();
+    const { c1, c2 } = await L.openedAt(pos);
+    const shares = await L.gatherShares(pos, c1, false);
+    const agg = await dealing.runAggregate({
+      transport: liveOnly.current!, tableId: L.table.tableId, position: pos, h: c1,
+      jointKey: L.table.jointKey!, keys: L.keys, shares,
+      mySeat: yourSeat!, mySecret: L.identity!.secret,
+    });
+    const community = pos >= 2 * L.table.maxSeats;
+    if (!community) return;
+    const index = pos - 2 * L.table.maxSeats;
+    const card = cardFromShare({ c1, c2 }, agg.share);
+    if (card === null || L.table.community[index]?.revealed) return;
+    try {
+      await L.send('reveal_community_card', revealCommunityArgs({
+        tableId: L.table.tableId, index, share: agg.share, card, proof: agg.proof,
+      }));
+      say(`revealed board ${index}`);
+      L.refresh();
+    } catch {
+      // Someone else submitted first. That is the point of both sides trying.
+    }
+  }, [yourSeat, say]);
+
   // Join an aggregate the moment someone starts one, so a reveal is one click
   // for whoever wants the card and nothing at all for everyone else.
   const deckIsOpen = table.deckOpened;
@@ -385,45 +420,47 @@ export default function RevealPanel(p: Props) {
       const communityIndex = pos - 2 * latest.current.table.maxSeats;
       if (communityIndex >= 0 && latest.current.table.street < streetFor(communityIndex)) return;
       joined.current.add(pos);
-      void (async () => {
-        const L = latest.current;
-        try {
-          await initDleqProver();
-          const { c1, c2 } = await L.openedAt(pos);
-          const shares = await L.gatherShares(pos, c1, false);
-          const agg = await dealing.runAggregate({
-            transport: liveOnly.current!, tableId: L.table.tableId, position: pos, h: c1,
-            jointKey: L.table.jointKey!, keys: L.keys, shares,
-            mySeat: yourSeat, mySecret: L.identity!.secret,
-          });
-          say(`joined the aggregate for position ${pos}`);
-          // Only a community card can be submitted from here: a hole reveal
-          // also needs the owner's blinding, which only the owner has.
-          const community = pos >= 2 * L.table.maxSeats;
-          if (community) {
-            const index = pos - 2 * L.table.maxSeats;
-            const card = cardFromShare({ c1, c2 }, agg.share);
-            if (card !== null && !L.table.community[index]?.revealed) {
-              try {
-                await L.send('reveal_community_card', revealCommunityArgs({
-                  tableId: L.table.tableId, index, share: agg.share, card, proof: agg.proof,
-                }));
-                say(`revealed board ${index}`);
-                L.refresh();
-              } catch {
-                // The other side won the race and submitted first, which is
-                // the right outcome.
-              }
-            }
-          }
-        } catch (err) {
-          joined.current.delete(pos); // let a fresh run be joined
-          say(`aggregate for position ${pos} did not finish`);
-        }
-      })();
+      void runFor(pos).catch(() => {
+        joined.current.delete(pos); // let a fresh run be joined
+        say(`aggregate for position ${pos} did not finish`);
+      });
     });
     return stop;
   }, [autoServe, deckIsOpen, yourSeat, mySecretHex, say]);
+
+
+  // Start a reveal for any board card that is DUE and still face down.
+  //
+  // A community reveal needs a decryption share from every player, so the
+  // keeper structurally cannot do it -- it holds no key share. Somebody's
+  // client has to begin, and until now that was a human clicking "Reveal
+  // board N" for a card with no decision attached to it.
+  //
+  // Both clients try. Whoever gets there first proposes the run (the lowest
+  // seat names it, see runAggregate) and the other joins; whoever finishes
+  // first submits and the other's transaction is refused as already revealed,
+  // which is the correct outcome rather than an error.
+  //
+  // The street check is not just tidiness: it mirrors the contract's own gate,
+  // and without it this loop would try to turn the whole board over the moment
+  // the deck opened -- which is exactly the bug that made the last hand
+  // unplayable.
+  useEffect(() => {
+    if (!autoServe || !deckIsOpen || yourSeat === null || !mySecretHex) return;
+    if (!table.jointKey) return;
+    for (let index = 0; index < 5; index++) {
+      if (table.community[index]?.revealed) continue;
+      if (table.street < streetFor(index)) continue;
+      const pos = communityPosition(index, table.maxSeats);
+      if (joined.current.has(pos)) continue;
+      joined.current.add(pos);
+      say(`board ${index} is due -- starting the reveal`);
+      void runFor(pos).catch(() => {
+        joined.current.delete(pos);
+        say(`reveal for board ${index} did not finish`);
+      });
+    }
+  }, [autoServe, deckIsOpen, yourSeat, mySecretHex, table.street, table.community, table.jointKey, table.maxSeats, runFor, say]);
 
   // ── accusations ────────────────────────────────────────────────────────
   const [accSeat, setAccSeat] = useState('0');

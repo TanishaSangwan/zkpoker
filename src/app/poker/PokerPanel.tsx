@@ -134,6 +134,30 @@ export default function PokerPanel() {
     })();
   }, [tableId, deployed, provider, contract]);
 
+  // Until mounted, render markup that CANNOT differ from the server's.
+  //
+  // Guarding individual attributes was not enough -- React still found a
+  // mismatch, and chasing props one at a time is a losing game when the whole
+  // subtree depends on state the server does not have (wallet, devnet account,
+  // selected network, localStorage). One deterministic skeleton makes the
+  // server's HTML and the client's first render identical by construction, so
+  // there is nothing to reconcile; the real UI appears a tick later.
+  //
+  // The cost is a brief placeholder. The alternative is a tree React refuses
+  // to patch, which can leave handlers bound to markup that no longer matches.
+  if (!mounted) {
+    return (
+      <div className={styles.wrap}>
+        <div className={styles.section}>
+          <div className={styles.sectionHead}>
+            <div className={styles.sectionTitle}>Table</div>
+            <div className={styles.sectionHint}>connecting…</div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className={styles.wrap}>
       {/* Which networks actually have a deployment configured. Worth showing
@@ -141,7 +165,7 @@ export default function PokerPanel() {
           local devnet deployment is live and invisible until you switch, and
           the old banner's advice ("set the Sepolia variable") was actively
           wrong in exactly that case. */}
-      {mounted && networksWithDeployment.length > 0 ? (
+      {networksWithDeployment.length > 0 ? (
         <div className={styles.modeToggle}>
           {networksWithDeployment.map((i) => (
             <button
@@ -155,12 +179,12 @@ export default function PokerPanel() {
         </div>
       ) : null}
 
-      {mounted && !deployed ? (
+      {!deployed ? (
         <div className={styles.banner}>
           <strong>
             PokerGame is not deployed on {constants.NetworkLabels[providerIndex] ?? `provider ${providerIndex}`}.
           </strong>{' '}
-          {mounted && networksWithDeployment.length > 0 ? (
+          {networksWithDeployment.length > 0 ? (
             <>
               It <em>is</em> deployed on{' '}
               {networksWithDeployment.map((i) => constants.NetworkLabels[i] ?? `provider ${i}`).join(', ')} —
@@ -185,9 +209,7 @@ export default function PokerPanel() {
         <div className={styles.sectionHead}>
           <div className={styles.sectionTitle}>Table</div>
           <div className={styles.sectionHint}>
-            {!mounted
-              ? 'connecting…'
-              : `${contract === '0x0' ? 'no contract' : shortHex(contract)} · ${constants.NetworkLabels[providerIndex] ?? providerIndex}`}
+            {contract === '0x0' ? 'no contract' : shortHex(contract)} · {constants.NetworkLabels[providerIndex] ?? providerIndex}
             {' · '}
             {!envReady
               ? 'checking proving environment…'
@@ -200,15 +222,15 @@ export default function PokerPanel() {
         <div className={styles.tableIdRow}>
           <input className={styles.input} value={tableIdInput}
             onChange={(e) => setTableIdInput(e.target.value)} placeholder="table id" />
-          <button className={uni.btn} disabled={!mounted || !deployed}
+          <button className={uni.btn} disabled={!deployed}
             onClick={() => { try { setTableId(toFelt(tableIdInput)); setError(null); } catch (e) { setError(decodeError(e)); } }}>
             Open
           </button>
-          <button className={uni.btn} disabled={!mounted || !tableId || loading} onClick={() => refresh()}>
+          <button className={uni.btn} disabled={!tableId || loading} onClick={() => refresh()}>
             {loading ? 'Refreshing…' : 'Refresh'}
           </button>
         </div>
-        {mounted && !persisted ? (
+        {!persisted ? (
           <div className={styles.caution}>
             This browser could not store your seat key (private mode, or storage is blocked).
             It exists only in this tab: <strong>a reload loses it</strong>, and a lost key means you

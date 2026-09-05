@@ -208,6 +208,28 @@ export default function PhasePanel(p: Props) {
     });
 
   const [autoAdvance, setAutoAdvance] = useState(true);
+  const [autoShuffle, setAutoShuffle] = useState(true);
+
+  // ── shuffle on your own turn, without being asked ─────────────────────
+  //
+  // Shuffling is NOT a dealer job and cannot be automated by one. Each player
+  // permutes and re-randomises the deck themselves and proves it, because the
+  // permutation is the secret the protocol protects -- handing the witness to
+  // anyone else, dealer included, hands them the table (§1, §9.1). The dealer
+  // holds no key share and never shuffles.
+  //
+  // But there is no DECISION in it either. Shuffling honestly is always the
+  // right move for you, so waiting for a click buys nothing. This does it on
+  // your turn, on your device, with the witness never leaving the browser.
+  const shuffling = useRef(false);
+  useEffect(() => {
+    if (!autoShuffle || !myShuffleTurn || shuffling.current) return;
+    if (!account || !provider || !identity || !table.jointKey) return;
+    shuffling.current = true;
+    void doShuffle().finally(() => { shuffling.current = false; });
+    // doShuffle reads the chain head itself, so re-running on a stale turn is
+    // rejected on-chain rather than mis-chaining.
+  }, [autoShuffle, myShuffleTurn, table.shuffleTurn, account, provider, identity, table.jointKey]);
 
   // ── the dealer, automated ──────────────────────────────────────────────
   //
@@ -317,12 +339,18 @@ export default function PhasePanel(p: Props) {
           <ChainProgress table={table} yourSeat={yourSeat} />
           {myShuffleTurn ? (
             <div className={styles.actionsRow}>
+              <label className={styles.fieldHint} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <input type="checkbox" checked={autoShuffle} onChange={(e) => setAutoShuffle(e.target.checked)} />
+                Shuffle automatically on my turn
+              </label>
               <button className={uni.btn} disabled={!!busy} onClick={doShuffle}>
                 Shuffle &amp; prove
               </button>
               <span className={styles.fieldHint}>
-                ~{env.multithreaded ? 5 : 10} s of proving in this tab. The permutation never leaves
-                this browser — that is the whole point.
+                ~{env.multithreaded ? 5 : 10} s of proving in this tab. There is no decision here —
+                shuffling honestly is always right for you — but it has to happen on your machine,
+                because the permutation is the secret and handing the witness to anyone else
+                (a dealer included) hands them the table.
               </span>
             </div>
           ) : (

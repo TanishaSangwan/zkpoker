@@ -170,6 +170,23 @@ switch (cmd) {
     await status();
     break;
   }
+  // Create a table WITHOUT taking a seat.
+  //
+  // The dealer is not a player here -- it holds no key share, never shuffles
+  // and receives no cards -- so hosting a table it does not sit at is the
+  // normal case rather than a special one. Its only remaining power is
+  // begin_shuffle, which the keeper performs once every seat is filled and
+  // registered.
+  //
+  //   SEATS=4 BUY_IN=1000 node scripts/duel.mjs host <TABLE>
+  case 'host': {
+    const seats = process.env.SEATS ?? '2';
+    const buyIn = process.env.BUY_IN ?? '1000';
+    await send('create_table', { table_id: TABLE, token: TOKEN, buy_in: buyIn, max_seats: seats });
+    console.log(`\nhosting ${tableName}: ${seats} seats, buy-in ${buyIn}, no seat taken by the host.`);
+    await status();
+    break;
+  }
   case 'status': await status(); break;
   case 'begin': {
     const maxSeats = Number(await view.get_table_max_seats(TABLE));
@@ -505,6 +522,147 @@ switch (cmd) {
     break;
   }
   case 'settle': await send('settle_from_reveals', { table_id: TABLE }); break;
+  // ── serve: the browser's automation, for the terminal seat ──────────
+  //
+  // The browser client auto-serves shares and auto-joins aggregates. This
+  // side did not, which made the automation one-sided in a way that looked
+  // like the OTHER client being broken: the browser would start a community
+  // reveal, wait for this seat's share, and time out, because nothing here
+  // was listening. A reveal needs a share from every party, so half-automated
+  // is not automated.
+  //
+  // Serves what it owes -- other seats' hole positions, and community
+  // positions whose street has arrived -- and joins any aggregate it sees
+  // started, except over its own hole cards, where the share it holds is what
+  // keeps the card private and showing is a decision.
+  case 'serve': {
+    if (!state.secret) throw new Error('no seat key in state');
+    await dleqInit();
+    const secret = BigInt(state.secret);
+    const relay = process.env.NEXT_PUBLIC_RELAY_URL ?? 'http://127.0.0.1:3100';
+    const transport = new RelayTransport(TABLE, relay);
+    const liveOnly = new RelayTransport(TABLE, relay, { replay: false });
+    const maxSeats = Number(await view.get_table_max_seats(TABLE));
+    const myHoles = deck.seatHolePositions(MY_SEAT);
+    const streetFor = (i) => (i <= 2 ? 1 : i === 3 ? 2 : 3);
+
+    const keys = new Map();
+    for (let s2 = 0; s2 < maxSeats; s2++) {
+      if (BigInt(await view.get_seat_owner(TABLE, String(s2))) === 0n) continue;
+      if (!(await view.get_seat_key_registered(TABLE, String(s2)))) continue;
+      const r2 = await view.get_seat_pk(TABLE, String(s2));
+      const [x, y] = (Array.isArray(r2) ? r2 : [r2[0], r2[1]]).map(big);
+      keys.set(s2, grumpkin.fromWire(x, y));
+    }
+    const jraw = await view.get_joint_pk(TABLE);
+    const [jx, jy] = (Array.isArray(jraw) ? jraw : [jraw[0], jraw[1]]).map(big);
+    const Y = grumpkin.fromWire(jx, jy);
+
+    const openedAt = async (pos) => {
+      const raw = await view.get_opened_ciphertext(TABLE, pos);
+      const [a, b2, c2x, c2y] = (Array.isArray(raw) ? raw : [raw[0], raw[1], raw[2], raw[3]]).map(big);
+      return { c1: grumpkin.fromWire(a, b2), c2: grumpkin.fromWire(c2x, c2y) };
+    };
+
+    const served = new Set();
+    const busy = new Set();
+    console.log(`serving on ${tableName} as seat ${MY_SEAT} -- shares and aggregates, automatically`);
+    console.log('(hole shares for my OWN positions are never served: that share is what keeps my cards private)\n');
+
+    const runFor = async (pos) => {
+      const { c1, c2 } = await openedAt(pos);
+      const shares = new Map([[MY_SEAT, grumpkin.mul(secret, c1)]]);
+      await new Promise((resolve, reject) => {
+        const stop = transport.subscribe((e) => {
+          if (e.position !== pos || e.kind !== 'share' || e.from === MY_SEAT) return;
+          try {
+            const msg = { d: { x: BigInt(e.body.d.x), y: BigInt(e.body.d.y) }, s: BigInt(e.body.s), e: BigInt(e.body.e) };
+            shares.set(e.from, dealing.acceptShare({ from: { seat: e.from, pk: keys.get(e.from) }, h: c1, msg }));
+            if (shares.size === keys.size) { stop(); clearTimeout(t); resolve(); }
+          } catch (err) { stop(); clearTimeout(t); reject(err); }
+        });
+        const t = setTimeout(() => { stop(); reject(new Error(`no shares for ${pos}`)); }, 120_000);
+        if (shares.size === keys.size) { stop(); clearTimeout(t); resolve(); }
+      });
+      const agg = await dealing.runAggregate({
+        transport: liveOnly, tableId: TABLE, position: pos, h: c1, jointKey: Y, keys, shares,
+        mySeat: MY_SEAT, mySecret: secret,
+      });
+      if (pos < 2 * maxSeats) return; // a hole card: participation only
+      const index = pos - 2 * maxSeats;
+      if (await view.get_community_revealed(TABLE, index)) return;
+      const card = reveal.cardFromShare({ c1, c2 }, agg.share);
+      if (card === null) throw new Error('no card in the encoding');
+      try {
+        await send('reveal_community_card', reveal.revealCommunityArgs({
+          tableId: TABLE, index, share: agg.share, card, proof: agg.proof,
+        }));
+        console.log(`  board ${index} revealed: ${grumpkin.cardToName(card)}`);
+      } catch { /* the other side submitted first */ }
+    };
+
+    // Join anything someone else starts.
+    liveOnly.subscribe((e) => {
+      if (e.kind !== 'nonce-commit' || e.from === MY_SEAT) return;
+      const pos = e.position;
+      if (myHoles.includes(pos) || busy.has(pos)) return;
+      busy.add(pos);
+      runFor(pos).catch(() => busy.delete(pos));
+    });
+
+    for (;;) {
+      try {
+        if (await view.get_table_settled(TABLE) || await view.get_table_voided(TABLE)) {
+          console.log('table finished -- stopping'); break;
+        }
+        const street = Number(await view.get_table_street(TABLE));
+        if (await view.get_deck_opened(TABLE)) {
+          // Pay what is owed.
+          for (const [seat] of keys) {
+            if (seat === MY_SEAT) continue;
+            for (const pos of deck.seatHolePositions(seat)) {
+              if (served.has(pos)) continue;
+              const { c1 } = await openedAt(pos);
+              await dealing.sendHoleShare({
+                transport, tableId: TABLE, position: pos, from: MY_SEAT, to: seat,
+                recipientPk: keys.get(seat), msg: dealing.shareFor(secret, c1),
+              });
+              served.add(pos);
+              console.log(`  served hole share for seat ${seat} position ${pos}`);
+            }
+          }
+          for (let i = 0; i < 5; i++) {
+            if (street < streetFor(i)) continue;
+            const pos = deck.communityPosition(i, maxSeats);
+            if (!served.has(pos)) {
+              const { c1 } = await openedAt(pos);
+              const m = dealing.shareFor(secret, c1);
+              await transport.publish({
+                tableId: TABLE, position: pos, from: MY_SEAT, kind: 'share', to: null,
+                body: { d: { x: m.d.x.toString(), y: m.d.y.toString() }, s: m.s.toString(), e: m.e.toString() },
+              });
+              served.add(pos);
+              console.log(`  served board share for index ${i} (position ${pos})`);
+            }
+            // ..and start the reveal if it is due and still face down.
+            if (!busy.has(pos) && !(await view.get_community_revealed(TABLE, i))) {
+              busy.add(pos);
+              console.log(`  board ${i} is due -- starting the reveal`);
+              runFor(pos).catch((err) => {
+                busy.delete(pos);
+                console.log(`  board ${i} reveal did not finish: ${String(err.message ?? err).slice(0, 70)}`);
+              });
+            }
+          }
+        }
+      } catch (e) {
+        console.error(`  ! ${String(e.message ?? e).slice(0, 120)}`);
+      }
+      await new Promise((r) => setTimeout(r, 4000));
+    }
+    transport.close(); liveOnly.close();
+    break;
+  }
   case 'check': await send('check', { table_id: TABLE, seat: String(MY_SEAT) }); break;
   case 'bet': {
     const amount = process.argv[4];

@@ -29,9 +29,22 @@
 //   ACCOUNT=devnet1 node scripts/keeper.mjs <TABLE_ID>   # any account
 //   OPEN_DECK=0 node scripts/keeper.mjs <TABLE_ID>       # skip deck opening
 //
-// begin_shuffle is NOT automated here. It decides when to stop waiting for
-// players to sit down, which is a judgement call, and one this script has no
-// basis for making.
+// begin_shuffle IS automated, but only once the table is FULL.
+//
+// The earlier position here was that begin_shuffle is a judgement call and so
+// should not be automated at all, because it freezes the participant list and
+// starting early locks out players who have not sat down yet. That is right
+// while seats are empty -- and it collapses when they are not. With every seat
+// occupied and every seat's key registered there is nobody left to wait for,
+// so there is no judgement left to make and nothing to be gained by making a
+// human click.
+//
+// BEGIN=0 disables it if you want to hold a full table open anyway.
+//
+// Shuffling is NOT automated here and cannot be: each PLAYER shuffles with
+// their own secret permutation, on their own device, because that permutation
+// is the secret the protocol protects. A keeper that shuffled would be a
+// keeper you had to trust. Players' clients do it themselves.
 import { readFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -43,6 +56,7 @@ const RPC = process.env.RPC ?? 'http://127.0.0.1:5050';
 const ACCOUNT = process.env.ACCOUNT ?? 'devnet0';
 const POLL_MS = Number(process.env.POLL_MS ?? 4000);
 const DO_OPEN = process.env.OPEN_DECK !== '0';
+const DO_BEGIN = process.env.BEGIN !== '0';
 
 const tableName = process.argv[2];
 if (!tableName) { console.error('usage: node scripts/keeper.mjs <TABLE_ID>'); process.exit(1); }
@@ -74,22 +88,27 @@ async function send(entrypoint, args) {
 // PROTOCOL.md §7.3. Bundled in because a keeper that advances streets but
 // leaves the deck shut is not much of a keeper.
 let deckLib = null;
-async function openChunk(maxSeats) {
-  if (!deckLib) {
-    const outdir = join(root, 'node_modules/.cache/zkpoker');
-    const e = join(outdir, 'keeper-entry.ts');
-    const { mkdirSync, writeFileSync } = await import('node:fs');
-    mkdirSync(outdir, { recursive: true });
-    writeFileSync(e, `
+async function loadDeckLib() {
+  const outdir = join(root, 'node_modules/.cache/zkpoker');
+  const e = join(outdir, 'keeper-entry.ts');
+  const { mkdirSync, writeFileSync } = await import('node:fs');
+  mkdirSync(outdir, { recursive: true });
+  writeFileSync(e, `
+export * as grumpkin from ${JSON.stringify(join(root, 'src/lib/grumpkin.ts'))};
+export * as schnorr from ${JSON.stringify(join(root, 'src/lib/schnorr.ts'))};
 export * as deck from ${JSON.stringify(join(root, 'src/lib/deck.ts'))};
 export * as deckOpen from ${JSON.stringify(join(root, 'src/lib/deckOpen.ts'))};
 export { readPublishedDeck, findDeckPublishedTx } from ${JSON.stringify(join(root, 'src/lib/publishedDeck.ts'))};
 `);
-    await build({ entryPoints: [e], bundle: true, format: 'esm', platform: 'node',
-      outfile: join(outdir, 'keeper.mjs'),
-      external: ['garaga', 'starknet', '@aztec/bb.js', '@noir-lang/noir_js'], logLevel: 'error' });
-    deckLib = await import(pathToFileURL(join(outdir, 'keeper.mjs')).href + `?v=${Date.now()}`);
-  }
+  await build({ entryPoints: [e], bundle: true, format: 'esm', platform: 'node',
+    outfile: join(outdir, 'keeper.mjs'),
+    external: ['garaga', 'starknet', '@aztec/bb.js', '@noir-lang/noir_js'], logLevel: 'error' });
+  deckLib = await import(pathToFileURL(join(outdir, 'keeper.mjs')).href + `?v=${Date.now()}`);
+  return deckLib;
+}
+
+async function openChunk(maxSeats) {
+  if (!deckLib) await loadDeckLib();
   const { deck, deckOpen, readPublishedDeck, findDeckPublishedTx } = deckLib;
   const expected = BigInt(await view.get_published_deck_hash(TABLE));
   const tx = await findDeckPublishedTx({ provider, contract: GAME, tableId: TABLE });
@@ -127,8 +146,45 @@ for (;;) {
       const opened = await view.get_deck_opened(TABLE);
 
       if (!started) {
-        // Deliberately not automated: see the header.
-        note('shuffle not open yet (begin_shuffle is the dealer\'s judgement call)');
+        // Every seat occupied AND registered -- nobody left to wait for.
+        let seated = 0, registered = 0;
+        for (let seat = 0; seat < maxSeats; seat++) {
+          if (BigInt(await view.get_seat_owner(TABLE, String(seat))) === 0n) continue;
+          seated += 1;
+          if (await view.get_seat_key_registered(TABLE, String(seat))) registered += 1;
+        }
+        if (!DO_BEGIN) {
+          note(`shuffle not open (BEGIN=0); ${seated}/${maxSeats} seated, ${registered} registered`);
+        } else if (seated < maxSeats || registered < seated) {
+          note(`waiting for the table to fill: ${seated}/${maxSeats} seated, ${registered} registered`);
+        } else if (BigInt(await view.get_table_dealer(TABLE)) !== BigInt(me.address)) {
+          // begin_shuffle is still dealer-only on-chain, for the reason in the
+          // header: a full table is unambiguous, an empty seat is not.
+          note('table is full but this keeper is not the dealer');
+        } else {
+          // Sum the registered shares and let the adapter check the answer --
+          // it verifies Y == SUM(pk_i) on Grumpkin, so a wrong sum is rejected
+          // rather than quietly accepted.
+          if (!deckLib) await loadDeckLib();
+          const { grumpkin, schnorr } = deckLib;
+          const shares = [];
+          for (let seat = 0; seat < maxSeats; seat++) {
+            const raw = await view.get_seat_pk(TABLE, String(seat));
+            const [x, y] = (Array.isArray(raw) ? raw : [raw[0], raw[1]]).map(
+              (v) => (typeof v === 'bigint' ? v : (BigInt(v.high) << 128n) | BigInt(v.low)),
+            );
+            if (x === 0n && y === 0n) continue;
+            shares.push({ x, y });
+          }
+          const Y = schnorr.jointKey(shares);
+          if (Y === null) throw new Error('registered shares sum to the identity');
+          const u256 = (v) => ({ low: v & ((1n << 128n) - 1n), high: v >> 128n });
+          console.log(`  table full (${seated}/${maxSeats}) -- opening the shuffle`);
+          console.log(`  begin_shuffle ok  ${await send('begin_shuffle', {
+            table_id: TABLE, joint_pk_x: u256(Y.x), joint_pk_y: u256(Y.y),
+          })}`);
+          lastNote = '';
+        }
       } else if (!complete) {
         note(`shuffle chain at ${Number(await view.get_shuffle_turn(TABLE))}/${Number(await view.get_shuffle_order_len(TABLE))} -- players are proving`);
       } else if (!opened && DO_OPEN) {
