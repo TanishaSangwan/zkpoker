@@ -43,11 +43,21 @@ export default function RevealPanel(p: Props) {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
+  // ONE stream per tab, not two.
+  //
+  // There used to be a second, replay-disabled connection for the aggregate
+  // rounds. It was redundant and actively harmful: round messages are marked
+  // ephemeral, so the relay never stores them and never replays them -- the
+  // ordinary stream is already live-only for exactly the messages that needed
+  // it to be.
+  //
+  // Harmful because browsers cap concurrent connections per origin at about
+  // six over HTTP/1.1, and SSE streams are long-lived. Four tabs times two
+  // streams is eight: past the cap, some streams silently never connected and
+  // the POSTs queued behind them. Clients sent their commitments and received
+  // nothing, so every reveal stalled in the committing round with no error --
+  // and it only appeared at three or more players.
   const transport = useRef<Transport | null>(null);
-  // A second stream with replay disabled, for the aggregate rounds only. See
-  // RelayTransport's constructor note: replay is right for shares and wrong
-  // for round-based messages.
-  const liveOnly = useRef<Transport | null>(null);
 
   // A relay when one is configured, BroadcastChannel otherwise. The fallback
   // only spans tabs of this browser, which demonstrates a table and cannot
@@ -60,13 +70,9 @@ export default function RevealPanel(p: Props) {
     const t: Transport & { close: () => void } = url
       ? new RelayTransport(table.tableId, url)
       : new BroadcastTransport(table.tableId);
-    const live: Transport & { close: () => void } = url
-      ? new RelayTransport(table.tableId, url, { replay: false })
-      : new BroadcastTransport(table.tableId);
     transport.current = t;
-    liveOnly.current = live;
     setTransportKind(url ? 'relay' : 'local');
-    return () => { t.close(); live.close(); };
+    return () => { t.close(); };
   }, [table.tableId]);
 
   const keys = useMemo(() => {
@@ -230,7 +236,7 @@ export default function RevealPanel(p: Props) {
       const shares = await gatherShares(position, c1, false);
       setBusy('running the three-round aggregate');
       const agg = await dealing.runAggregate({
-        transport: liveOnly.current!, tableId: table.tableId, position, h: c1,
+        transport: transport.current!, tableId: table.tableId, position, h: c1,
         jointKey: table.jointKey, keys, shares, mySeat: yourSeat!, mySecret: identity!.secret,
         onProgress: (phase, outstanding) => setBusy(`${phase} — waiting on ${outstanding.join(', ') || '—'}`),
       });
@@ -260,7 +266,7 @@ export default function RevealPanel(p: Props) {
       setBusy('running the three-round aggregate');
       const shares = await gatherShares(position, c1, true);
       const agg = await dealing.runAggregate({
-        transport: liveOnly.current!, tableId: table.tableId, position, h: c1,
+        transport: transport.current!, tableId: table.tableId, position, h: c1,
         jointKey: table.jointKey, keys, shares, mySeat: yourSeat!, mySecret: identity!.secret,
         onProgress: (phase, outstanding) => setBusy(`${phase} — waiting on ${outstanding.join(', ') || '—'}`),
       });
@@ -398,7 +404,7 @@ export default function RevealPanel(p: Props) {
     // outstanding is the whole diagnostic for an n-of-n round.
     setBusy(`position ${pos}: shares in, starting the aggregate`);
     const agg = await dealing.runAggregate({
-      transport: liveOnly.current!, tableId: L.table.tableId, position: pos, h: c1,
+      transport: transport.current!, tableId: L.table.tableId, position: pos, h: c1,
       jointKey: L.table.jointKey!, keys: L.keys, shares,
       mySeat: yourSeat!, mySecret: L.identity!.secret,
       onProgress: (phase, outstanding) => {

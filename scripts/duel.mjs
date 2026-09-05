@@ -373,12 +373,12 @@ switch (cmd) {
     if (await view.get_community_revealed(TABLE, index)) { console.log(`board ${index} already revealed`); break; }
 
     const relay = process.env.NEXT_PUBLIC_RELAY_URL ?? 'http://127.0.0.1:3100';
-    // Two streams on purpose. Share collection wants replay (a missed share is
-    // unrecoverable, a duplicate is harmless); the aggregate rounds must not
-    // have it (a replayed commitment from an abandoned attempt looks like
-    // equivocation and is fatal by design).
+    // ONE stream. Round messages are ephemeral, so the relay never stores or
+    // replays them -- a single connection is already live-only for exactly the
+    // messages that need it, and a second one just burns a browser's
+    // six-per-origin connection budget.
     const transport = new RelayTransport(TABLE, relay);
-    const liveOnly = new RelayTransport(TABLE, relay, { replay: false });
+    const liveOnly = transport;
 
     const raw = await view.get_opened_ciphertext(TABLE, pos);
     const [c1x, c1y, c2x, c2y] = (Array.isArray(raw) ? raw : [raw[0], raw[1], raw[2], raw[3]]).map(big);
@@ -442,7 +442,6 @@ switch (cmd) {
       console.log(`  (submit skipped: ${String(e.message).slice(0, 80)})`);
     }
     transport.close();
-    liveOnly.close();
     break;
   }
   // ── showdown ───────────────────────────────────────────────────────
@@ -462,7 +461,7 @@ switch (cmd) {
     const secret = BigInt(state.secret);
     const relay = process.env.NEXT_PUBLIC_RELAY_URL ?? 'http://127.0.0.1:3100';
     const transport = new RelayTransport(TABLE, relay);
-    const liveOnly = new RelayTransport(TABLE, relay, { replay: false });
+    const liveOnly = transport;
     const maxSeats = Number(await view.get_table_max_seats(TABLE));
 
     const keys = new Map();
@@ -522,7 +521,7 @@ switch (cmd) {
       }));
       console.log(`  slot ${slot} shown: ${grumpkin.cardToName(stored.card)}`);
     }
-    transport.close(); liveOnly.close();
+    transport.close();
     break;
   }
   case 'settle': await send('settle_from_reveals', { table_id: TABLE }); break;
@@ -545,7 +544,7 @@ switch (cmd) {
     const secret = BigInt(state.secret);
     const relay = process.env.NEXT_PUBLIC_RELAY_URL ?? 'http://127.0.0.1:3100';
     const transport = new RelayTransport(TABLE, relay);
-    const liveOnly = new RelayTransport(TABLE, relay, { replay: false });
+    const liveOnly = transport;
     const maxSeats = Number(await view.get_table_max_seats(TABLE));
     const myHoles = deck.seatHolePositions(MY_SEAT);
     const streetFor = (i) => (i <= 2 ? 1 : i === 3 ? 2 : 3);
@@ -664,7 +663,7 @@ switch (cmd) {
       }
       await new Promise((r) => setTimeout(r, 4000));
     }
-    transport.close(); liveOnly.close();
+    transport.close();
     break;
   }
   case 'check': await send('check', { table_id: TABLE, seat: String(MY_SEAT) }); break;
