@@ -1096,6 +1096,29 @@ alone gets wrong), a refused out-of-turn show, mucking passing the turn while
 leaving the pot untouched, a timeout mucking the seat, and the clock refusing
 to be claimed early.
 
+### 9.8.1 An all-muck showdown strands the pot — known gap
+
+Found by play, 2026-09-06. Every seat at a three-handed table revealed its
+first hole card and was mucked by the clock before the second. That left three
+mucked seats and no contender, so `settle_from_reveals` reverts
+`NO_CONTENDERS` and the pot sits until `SETTLE_TIMEOUT_SECS` (24 h), after
+which each seat reclaims its own contribution via `reclaim_stalled_bet`.
+
+Nobody is robbed — the money returns to whoever put it in — but a 24-hour
+freeze is a poor answer to a case the timeouts can produce on their own.
+
+The client cause is fixed (see below), so this should no longer be reachable
+by honest play: both reveals now go in one multicall with their aggregates
+built concurrently, and the table polls at 1.5 s while the clock runs. The
+CONTRACT hole remains, and the right fix is for a showdown that ends with no
+contender to void the hand rather than leave it unsettled — voiding already
+releases every contribution for immediate reclaim, which is the same outcome
+without the wait. Not done here because it needs a redeploy.
+
+Worth stating plainly: the ten-second clock is short enough that its edge
+cases are reachable. It was chosen deliberately, and the cost is that any
+client slower than one round-trip per card loses hands it should have won.
+
 ---
 
 ### 9.9 Blinds and the button — the button is dealt, not appointed
