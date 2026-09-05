@@ -43,8 +43,14 @@ testing = []
 # — confirmed by re-running `scarb build` after adding this.
 
 # The contract crossed Starknet's 81920-felt CASM ceiling once the blind
-# structure landed. `avoid` inlines only trivial bodies, which trades a
-# little runtime gas for a large drop in code size -- the right side of that
-# trade when the alternative is a contract that cannot be declared at all.
-[profile.dev.cairo]
+# structure landed: 88165 felts on dev, 93377 on release. It compiled and
+# could not have been declared. `avoid` inlines only trivial bodies, which
+# trades a little runtime gas for a large drop in code size -- the right side
+# of that trade when the alternative is a contract nobody can deploy.
+#
+# `[cairo]`, NOT `[profile.dev.cairo]`. scripts/deploy_local.sh builds through
+# sncast, which uses the RELEASE profile, so a dev-only setting would have
+# left every actual deployment over the limit while every local `scarb build`
+# looked fine.
+[cairo]
 inlining-strategy = "avoid"

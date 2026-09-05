@@ -1,6 +1,6 @@
 # Deployments
 
-## Local devnet — 2026-09-05
+## Local devnet — 2026-09-05 (redeployed with the blind structure)
 
 Deployed by `scripts/deploy_local.sh` against `starknet-devnet --seed 0`, and
 exercised end to end by `scripts/smoke_local.mjs` with **real proofs
@@ -11,12 +11,12 @@ nonce).
 
 | | class hash | address |
 |---|---|---|
-| `UltraKeccakZKHonkVerifier` (shuffle) | `0x052273e9c0b297c2aabe7f97fa2d10727a6ba113c44c69d9123eda277a3ea8c1` | `0x01835f5674feb2239599bbb968d4531772985987a8f0e656abc020481a4d60e2` |
-| `UltraKeccakZKHonkVerifier` (deck open) | `0x02823287183c4ef5f5b0a7b101b54a211819f55f859d4a6af54d68afde8d0a24` | `0x079fcd5ffde872316f726027155044881af9f921749da4ccc42e0dcf12a58906` |
-| `SchnorrKeyVerifier` | `0x05c89ad6970fcccd1ae338de0509b189f9a37004470898d451ebb4be92f8537e` | `0x020e8c95928ec4cac72f2f50c4b5a3a644f943493ba38a1b18156f8b45a2f424` |
-| `DleqVerifier` | `0x07258c8fea11a1b883e1bf8ec83d7d60898d33d09f6e7fd6e5e2efe06b793329` | `0x02384abcb6a0679baa97ffe979f6e5257e5262e3b1744c758760f86b4cf6292b` |
-| `VerifierAdapter` | `0x02de3b5b72e02327798056f5379517a5d1f580b54e07d439c1fbcb04909a7183` | `0x0744cc07af7afa1844d4297cfce53d070e8314d82dd7b41cfde0ee6574bb7d9b` |
-| `PokerGame` | `0x00e5572be1df8277a96790fbdd876a491cb010b664c5eb465c2924e46102b518` | `0x023c7cc4dd6d24d706de2375ab44e17f7ca5b347f436fff94dcc8525db9d1937` |
+| `UltraKeccakZKHonkVerifier` (shuffle) | `0x052273e9c0b297c2aabe7f97fa2d10727a6ba113c44c69d9123eda277a3ea8c1` | `0x04f58e4b28bb32d92a2537bf74dcd8e081261d5e3fe2670a61a381455b8e0a17` |
+| `UltraKeccakZKHonkVerifier` (deck open) | `0x02823287183c4ef5f5b0a7b101b54a211819f55f859d4a6af54d68afde8d0a24` | `0x04b055b1d3bfa76873d9f226713d90d0800535f0cc7c23e0d4cab8794efb7499` |
+| `SchnorrKeyVerifier` | `0x05c89ad6970fcccd1ae338de0509b189f9a37004470898d451ebb4be92f8537e` | `0x044a29c1bfbacb187f57460608bd9dd650a0e0a4047acc53fc6311cfb40ff718` |
+| `DleqVerifier` | `0x07258c8fea11a1b883e1bf8ec83d7d60898d33d09f6e7fd6e5e2efe06b793329` | `0x060a9a683b23bccbccdd79d8f0d76fba87b5324a38e4e71384e655020d6ffa2a` |
+| `VerifierAdapter` | `0x02de3b5b72e02327798056f5379517a5d1f580b54e07d439c1fbcb04909a7183` | `0x053f082e2e920266430a0146311e7f53b14c5bb159927c881e960402d4472242` |
+| `PokerGame` | `0x06bc2936945e78b985245484faa2d04dd11b71394575cdec2cbfa707bbacb81e` | `0x029a0ccc64e65c5e5d04166a4fdc61af4dc57098c2f724104993a17514b5e9cb` |
 
 Note the two Honk verifiers are the same contract NAME and different class
 hashes: they differ only in their VK constants. The deploy script fails if they
@@ -40,11 +40,26 @@ Not "it deployed" — it ran:
 - key registration with real Schnorr PoKs, accepted by the deployed verifier
 - `begin_shuffle` with the joint key summed and checked on Grumpkin by the real
   `VerifierAdapter`
-- the full shuffle chain, 2 real Honk proofs (18.2 s and 20.3 s to prove,
-  3,053 felts each), each accepted on-chain
-- `open_deck` in 2 chunks with real Honk proofs (~12 s each), the second chunk
-  padded `5,6,7,8,8` exactly as the contract derives it
+- the full shuffle chain, 2 real Honk proofs (~20 s each to prove, 3,053 felts
+  each), each accepted on-chain
+- `open_deck` in **3** chunks with real Honk proofs (~13 s each) — a two-seat
+  table is now 3·2+5 = 11 positions, because the blind structure gives every
+  seat a high-card draw — the last chunk padded `10,10,10,10,10` exactly as the
+  contract derives it
 - the stored ciphertexts compared against the final deck, position by position
+- **the button drawn from that deck**: one card per seat at positions 9 and 10,
+  each read with a real aggregate Chaum–Pedersen DLEQ over both seats' shares,
+  accepted by the deployed `DleqVerifier` in ~3 s. Seat 0 drew `5h`, seat 1
+  drew `Jd`, and the contract gave the button to seat 1 — the highest card,
+  decided by the deck and by nobody at the table
+- `post_blinds` from that button: heads-up the button posted the small blind
+  (10) and the other seat the big (20), pot 30, action to the small blind —
+  which is the hold'em rule, and the one implementations most often get
+  backwards
+
+That last pair is the point of running this at all. A mock verifier will accept
+any DLEQ; only the deployed one proves that the card deciding the blinds really
+is the card the committed deck holds at that position.
 
 Sepolia/mainnet: not deployed. Record here when they are.
 
