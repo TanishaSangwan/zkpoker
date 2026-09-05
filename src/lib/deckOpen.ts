@@ -95,6 +95,14 @@ export async function proveOpenChunk(args: {
   maxSeats: number;
   chunk: number;
   onProgress?: (stage: string) => void;
+  /** The compiled circuit, if the caller has it -- see proveShuffle's note. */
+  circuitJson?: any;
+  /**
+   * Where bb.js should fetch its wasm. Pass `null` off-page: WASM_PATH is a
+   * browser-relative URL, and in Node bb.js treats it as a filesystem path and
+   * fails on it, whereas with no path at all it resolves its own bundled copy.
+   */
+  wasmPath?: string | null;
 }): Promise<OpenChunkResult> {
   const { deck, deckHash, maxSeats, chunk } = args;
   const say = args.onProgress ?? (() => {});
@@ -108,7 +116,7 @@ export async function proveOpenChunk(args: {
     import('@noir-lang/noir_js'),
     import('@aztec/bb.js'),
     import('garaga').then(async (m) => { await m.init(); return m; }),
-    circuit(),
+    args.circuitJson ?? circuit(),
   ]);
 
   say('witness');
@@ -123,8 +131,17 @@ export async function proveOpenChunk(args: {
   const witnessMs = Math.round(performance.now() - t0);
 
   say('proving');
-  const threads = typeof navigator !== 'undefined' && self.crossOriginIsolated ? navigator.hardwareConcurrency : 1;
-  const backend = new UltraHonkBackend(circuitJson.bytecode, { threads, wasmPath: WASM_PATH });
+  // Guard `self`, not just `navigator`: Node 24 defines `navigator` but not
+  // `self`, so a `navigator`-only check passes and then throws on the next
+  // property access. shuffle.ts's provingEnvironment() has the same shape for
+  // the same reason.
+  const isolated = typeof self !== 'undefined' && self.crossOriginIsolated === true;
+  const threads = isolated ? navigator.hardwareConcurrency || 1 : 1;
+  const resolvedWasm = args.wasmPath === undefined ? WASM_PATH : args.wasmPath;
+  const backend = new UltraHonkBackend(
+    circuitJson.bytecode,
+    resolvedWasm === null ? { threads } : { threads, wasmPath: resolvedWasm },
+  );
   const opts = { keccakZK: true };
   const t1 = performance.now();
   const proof = await backend.generateProof(witness, opts);
@@ -133,13 +150,45 @@ export async function proveOpenChunk(args: {
   say('calldata');
   const t2 = performance.now();
   const vk = await backend.getVerificationKey(opts);
-  const calldata = (garaga.getZKHonkCallData(proof.proof, publicInputBytes(proof.publicInputs), vk) as bigint[])
-    .map((v) => BigInt(v as any));
+  const calldata = stripSpanLength(
+    (garaga.getZKHonkCallData(proof.proof, publicInputBytes(proof.publicInputs), vk) as bigint[])
+      .map((v) => BigInt(v as any)),
+  );
   const calldataMs = Math.round(performance.now() - t2);
   await backend.destroy();
 
   say('done');
   return { chunk, positions, ciphertexts: cards, calldata, timings: { witnessMs, proveMs, calldataMs } };
+}
+
+/**
+ * Garaga's calldata, with its leading length stripped.
+ *
+ * `getZKHonkCallData` returns a full Starknet calldata array -- the span's
+ * length FIRST, then its contents. starknet.js's ABI compiler adds that length
+ * itself when it serialises a `Span<felt252>` argument, so passing the raw
+ * array through gives the verifier two prefixes and it fails with
+ * `deserialization failed` from inside the Honk verifier. (The `garaga
+ * calldata --format array` CLI emits the contents WITHOUT the prefix, which is
+ * why the checked-in fixtures are one felt shorter than this returns.)
+ *
+ * Only a real transaction surfaces this: bb and the browser check both verify
+ * the proof happily, because neither goes near the ABI encoder. It was found
+ * against a live devnet deployment.
+ *
+ * The length is asserted rather than assumed, so a future garaga that stops
+ * prefixing fails loudly here instead of silently truncating a proof.
+ */
+function stripSpanLength(calldata: bigint[]): bigint[] {
+  if (calldata.length < 2) throw new Error('garaga returned an unusably short calldata array');
+  const declared = calldata[0];
+  if (declared !== BigInt(calldata.length - 1)) {
+    throw new Error(
+      `garaga calldata does not start with its own length (first felt ${declared}, ` +
+        `${calldata.length - 1} elements follow). The prefix convention changed -- do not strip blindly.`,
+    );
+  }
+  return calldata.slice(1);
 }
 
 function publicInputBytes(publicInputs: string[]): Uint8Array {

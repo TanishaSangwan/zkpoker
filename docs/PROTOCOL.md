@@ -950,6 +950,31 @@ opens, which is why `dispute_deck` is confined to the shuffle phase.
 
 ---
 
+### 9.6 Garaga's JS calldata carries its own length prefix
+
+Found 2026-09-05, and only by sending a real transaction.
+
+`getZKHonkCallData` returns a complete Starknet calldata array: the span's
+length first, then its contents. The `garaga calldata --format array` CLI emits
+the contents **without** that prefix — which is why the checked-in fixtures are
+3,053 felts and the JS call returns 3,054.
+
+starknet.js's ABI encoder adds the length itself when it serialises a
+`Span<felt252>` argument. So passing the raw JS array through gives the verifier
+two prefixes, and it fails deep inside the Honk verifier with
+`deserialization failed` — no mention of calldata, no mention of length.
+
+**Nothing short of a transaction catches this.** bb verifies the proof happily,
+`garaga` is satisfied, and the browser check passes: none of them go near the
+ABI encoder. It took `PokerGame -> VerifierAdapter -> the real verifier` on a
+live devnet, and it would have broken every proof the UI ever submitted.
+
+`src/lib/shuffle.ts` and `src/lib/deckOpen.ts` now strip the prefix, and
+**assert** it was there rather than slicing blindly — a future garaga that
+stops prefixing fails loudly instead of silently truncating a proof.
+
+---
+
 ### 9.4 The SRS is a third-party runtime dependency
 
 Worth stating because it is invisible until it fails: bb.js does not ship the
@@ -1036,6 +1061,22 @@ in the accusation path.
 ---
 
 ## 10. What exists, what doesn't
+
+**Deployed and exercised end to end (local devnet, 2026-09-05):**
+`scripts/deploy_local.sh` puts all six contracts on a local
+`starknet-devnet --seed 0` in dependency order, and
+`scripts/smoke_local.mjs` then runs the stack with **real proofs throughout**:
+Schnorr key registration accepted by the deployed verifier, the joint key
+summed and checked on Grumpkin by the real `VerifierAdapter`, the full shuffle
+chain (2 Honk proofs, 18.2 s and 20.3 s to prove, 3,053 felts each, both
+accepted on-chain), and `open_deck` in 2 chunks (~12 s each, the second padded
+`5,6,7,8,8` exactly as the contract derives it), finishing with the stored
+ciphertexts compared against the final deck position by position.
+
+This is the only thing in the repo that runs `PokerGame -> VerifierAdapter ->
+the real Garaga verifiers` together on a chain — every other test isolates one
+layer, and round 8's finding I is what that costs. It immediately earned its
+keep by turning up §9.6. Addresses in `cairo/address.md`.
 
 **Built and working:**
 - `cairo-verifier/` — Schnorr PoK verifier on Grumpkin, via Garaga. The rogue-key defence.

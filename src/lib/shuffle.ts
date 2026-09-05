@@ -85,6 +85,20 @@ export async function proveShuffle(args: {
   jointKey: Point;
   commitmentIn: bigint;
   onProgress?: ShuffleProgress;
+  /**
+   * The compiled circuit, if the caller already has it.
+   *
+   * Defaults to fetching CIRCUIT_URL, which is a browser-relative path and
+   * therefore meaningless off the page -- scripts/smoke_local.mjs runs this
+   * exact function against a real chain from Node and passes the JSON in.
+   */
+  circuitJson?: any;
+  /**
+   * Where bb.js should fetch its wasm. Pass `null` off-page: WASM_PATH is a
+   * browser-relative URL, and in Node bb.js treats it as a filesystem path and
+   * fails on it, whereas with no path at all it resolves its own bundled copy.
+   */
+  wasmPath?: string | null;
 }): Promise<ShuffleResult> {
   const { deckIn, jointKey, commitmentIn, onProgress } = args;
   const say = onProgress ?? (() => {});
@@ -111,7 +125,7 @@ export async function proveShuffle(args: {
     import('@noir-lang/noir_js'),
     import('@aztec/bb.js'),
     import('garaga').then(async (m) => { await m.init(); return m; }),
-    circuit(),
+    args.circuitJson ?? circuit(),
   ]);
 
   say('witness');
@@ -130,7 +144,11 @@ export async function proveShuffle(args: {
   // wasmPath rather than the bundled default: bb.js resolves its wasm through
   // import.meta.url, which the bundler rewrites. Given a path it appends
   // "-threads" itself when multithreaded, so both files sit under /circuits/wasm/.
-  const backend = new UltraHonkBackend(circuitJson.bytecode, { threads: env.threads, wasmPath: WASM_PATH });
+    const wasmPath = args.wasmPath === undefined ? WASM_PATH : args.wasmPath;
+  const backend = new UltraHonkBackend(
+    circuitJson.bytecode,
+    wasmPath === null ? { threads: env.threads } : { threads: env.threads, wasmPath },
+  );
   // keccakZK matches the deployed verifier's verify_ultra_keccak_zk_honk_proof.
   // Any other flavour verifies in bb here and is rejected on-chain.
   const opts = { keccakZK: true };
@@ -142,8 +160,10 @@ export async function proveShuffle(args: {
   say('calldata');
   const t2 = performance.now();
   const vk = await backend.getVerificationKey(opts);
-  const calldata = (garaga.getZKHonkCallData(proof.proof, flattenPublicInputs(proof.publicInputs), vk) as bigint[])
-    .map((v) => BigInt(v as any));
+  const calldata = stripSpanLength(
+    (garaga.getZKHonkCallData(proof.proof, flattenPublicInputs(proof.publicInputs), vk) as bigint[])
+      .map((v) => BigInt(v as any)),
+  );
   const calldataMs = Math.round(performance.now() - t2);
   await backend.destroy();
 
@@ -202,6 +222,36 @@ function explainWitnessFailure(e: unknown, commitmentIn: bigint): Error {
   return new Error(
     `Witness generation failed against chain head 0x${commitmentIn.toString(16)}: ${msg}`,
   );
+}
+
+/**
+ * Garaga's calldata, with its leading length stripped.
+ *
+ * `getZKHonkCallData` returns a full Starknet calldata array -- the span's
+ * length FIRST, then its contents. starknet.js's ABI compiler adds that length
+ * itself when it serialises a `Span<felt252>` argument, so passing the raw
+ * array through gives the verifier two prefixes and it fails with
+ * `deserialization failed` from inside the Honk verifier. (The `garaga
+ * calldata --format array` CLI emits the contents WITHOUT the prefix, which is
+ * why the checked-in fixtures are one felt shorter than this returns.)
+ *
+ * Only a real transaction surfaces this: bb and the browser check both verify
+ * the proof happily, because neither goes near the ABI encoder. It was found
+ * against a live devnet deployment.
+ *
+ * The length is asserted rather than assumed, so a future garaga that stops
+ * prefixing fails loudly here instead of silently truncating a proof.
+ */
+function stripSpanLength(calldata: bigint[]): bigint[] {
+  if (calldata.length < 2) throw new Error('garaga returned an unusably short calldata array');
+  const declared = calldata[0];
+  if (declared !== BigInt(calldata.length - 1)) {
+    throw new Error(
+      `garaga calldata does not start with its own length (first felt ${declared}, ` +
+        `${calldata.length - 1} elements follow). The prefix convention changed -- do not strip blindly.`,
+    );
+  }
+  return calldata.slice(1);
 }
 
 /** bb.js hands public inputs back as 0x-prefixed field strings; garaga wants bytes. */
