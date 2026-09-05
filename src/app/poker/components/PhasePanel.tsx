@@ -249,6 +249,7 @@ export default function PhasePanel(p: Props) {
   // right move for you, so waiting for a click buys nothing. This does it on
   // your turn, on your device, with the witness never leaving the browser.
   const shuffling = useRef(false);
+  const jointKeyX = table.jointKey ? table.jointKey.x : null;
   // Why the automatic shuffle is not running, when it is your turn and it
   // is not. Silence was the worst part of every bug this table hit today:
   // an effect that returns early is indistinguishable from one that never
@@ -269,7 +270,12 @@ export default function PhasePanel(p: Props) {
     void doShuffle().finally(() => { shuffling.current = false; });
     // doShuffle reads the chain head itself, so re-running on a stale turn is
     // rejected on-chain rather than mis-chaining.
-  }, [autoShuffle, myShuffleTurn, table.shuffleTurn, account, provider, identity, table.jointKey]);
+    // Depends on the joint key's VALUE, not the object useTableState builds
+    // fresh on every poll. With the object in here the effect re-fired every
+    // few seconds, so a shuffle that failed for any reason retried forever --
+    // which is what "it is looping" looks like from the outside, and it buries
+    // the one error that would explain it under an endless stream of repeats.
+  }, [autoShuffle, myShuffleTurn, table.shuffleTurn, account, provider, identity, jointKeyX]);
 
   // ── the dealer, automated ──────────────────────────────────────────────
   //

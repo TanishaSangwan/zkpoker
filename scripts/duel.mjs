@@ -71,9 +71,42 @@ const TOKEN = (env.match(/^NEXT_PUBLIC_DEVNET_TOKEN=(.*)$/m) ?? [])[1]?.trim();
 if (!GAME || GAME === '0x0') { console.error('no devnet deployment -- run npm run deploy:local'); process.exit(1); }
 
 const provider = new RpcProvider({ nodeUrl: RPC });
-const accts = JSON.parse(readFileSync(`${process.env.HOME}/.starknet_accounts/starknet_open_zeppelin_accounts.json`, 'utf8'));
-const net = Object.values(accts).find((n) => n[MY_ACCOUNT]);
-const me = new Account({ provider, address: net[MY_ACCOUNT].address, signer: net[MY_ACCOUNT].private_key });
+// Accounts come from sncast's file when they are in it, and from devnet's own
+// predeployed list when they are not.
+//
+// The fallback is what makes a table of more than two seats testable at all:
+// `starknet-devnet --seed 0` predeploys ten funded accounts, sncast's file
+// usually names two of them, and the browser's devnet connector offers all
+// ten -- so a seat taken in the UI routinely has no name here. Ask devnet
+// directly rather than requiring people to hand-copy keys into a config.
+//
+//   MY_ACCOUNT=devnet1        a name from sncast's accounts file
+//   MY_ACCOUNT=predeployed3   the fourth account devnet printed at startup
+async function resolveAccount(name) {
+  const path = `${process.env.HOME}/.starknet_accounts/starknet_open_zeppelin_accounts.json`;
+  if (existsSync(path)) {
+    const accts = JSON.parse(readFileSync(path, 'utf8'));
+    const net = Object.values(accts).find((n) => n[name]);
+    if (net) return { address: net[name].address, key: net[name].private_key };
+  }
+  const m = /^predeployed(\d+)$/.exec(name);
+  const res = await fetch(RPC, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'devnet_getPredeployedAccounts', params: {} }),
+  }).then((r) => r.json()).catch(() => null);
+  const list = res?.result ?? [];
+  if (m) {
+    const a = list[Number(m[1])];
+    if (!a) throw new Error(`devnet has no predeployed account ${m[1]} (it has ${list.length})`);
+    return { address: a.address, key: a.private_key };
+  }
+  throw new Error(
+    `unknown account ${name}. Name one from sncast's accounts file, or use ` +
+      `predeployed0..${Math.max(0, list.length - 1)} for devnet's own.`,
+  );
+}
+const who = await resolveAccount(MY_ACCOUNT);
+const me = new Account({ provider, address: who.address, signer: who.key });
 
 const abi = JSON.parse(readFileSync(join(root, 'cairo/target/dev/zkpoker_PokerGame.contract_class.json'), 'utf8')).abi;
 const cd = new CallData(abi);
