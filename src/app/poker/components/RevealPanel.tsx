@@ -251,39 +251,66 @@ export default function RevealPanel(p: Props) {
     });
 
   // ── showdown ───────────────────────────────────────────────────────────
-  const showHoleCard = (slot: number) =>
-    run(`Showing slot ${slot}`, async () => {
-      const stored = loadHoleOpening({ chainId: p.chainId, contract, tableId: table.tableId, seat: yourSeat!, slot });
-      if (!stored) {
-        throw new Error(
-          `No stored opening for slot ${slot}. It was written at dealing time and is needed to ` +
-            `show — without it you can only muck, which forfeits the pot rather than blocking it.`,
-        );
-      }
-      const position = seatHolePositions(yourSeat!)[slot];
-      const { c1 } = await openedAt(position);
+  //
+  // Everything a reveal needs for ONE card, ready to send. Built during this
+  // seat's showdown turn and not before: the aggregate challenge is taken over
+  // D = SUM(d_i), c2 is already on-chain, so anyone holding D reads this card
+  // -- which is why the co-signers only join once it is this seat's turn to
+  // show (see the auto-join gate), and why building it earlier would hand the
+  // table a hand nobody had agreed to expose.
+  const prepareReveal = async (slot: number) => {
+    const stored = loadHoleOpening({ chainId: p.chainId, contract, tableId: table.tableId, seat: yourSeat!, slot });
+    if (!stored) {
+      throw new Error(
+        `No stored opening for slot ${slot}. It was written at dealing time and is needed to ` +
+          `show — without it you can only muck, which forfeits the pot rather than blocking it.`,
+      );
+    }
+    const position = seatHolePositions(yourSeat!)[slot];
+    const { c1 } = await openedAt(position);
+    const shares = await gatherShares(position, c1, true);
+    // The co-signers need D, which includes THIS seat's share. Held back all
+    // hand precisely so nobody could read this card; released now because
+    // showing it is exactly what is about to happen.
+    //
+    // Announced for the whole aggregate, not just once before it: the other
+    // seats only start gathering when they SEE this seat's first nonce
+    // commitment, so the share has to still be arriving after that point.
+    const agg = await announceOpenShare(position, () => dealing.runAggregate({
+      transport: transport.current!, tableId: table.tableId, position, h: c1,
+      jointKey: table.jointKey!, keys, shares, mySeat: yourSeat!, mySecret: identity!.secret,
+      onProgress: (phase, outstanding) =>
+        setBusy(`slot ${slot}: ${phase} — waiting on ${outstanding.join(', ') || '—'}`),
+    }));
+    return revealHoleArgs({
+      tableId: table.tableId, seat: yourSeat!, slot,
+      share: agg.share, blinding: stored.blinding, card: stored.card, proof: agg.proof,
+    });
+  };
 
-      // The aggregate is built HERE, not at dealing time. Building it earlier
-      // would mean handing D to the co-signers, and c2 is already public, so
-      // that would hand them this card. See src/lib/dealing.ts.
-      setBusy('running the three-round aggregate');
-      const shares = await gatherShares(position, c1, true);
-      // The co-signers need D = SUM(d_i), which includes THIS seat's share.
-      // Held back all hand precisely so nobody could read this card; released
-      // now because showing it is exactly what is about to happen.
-      //
-      // Announced for the whole aggregate, not just once before it: the other
-      // seats only start gathering when they SEE this seat's first nonce
-      // commitment, so the share has to still be arriving after that point.
-      const agg = await announceOpenShare(position, () => dealing.runAggregate({
-        transport: transport.current!, tableId: table.tableId, position, h: c1,
-        jointKey: table.jointKey!, keys, shares, mySeat: yourSeat!, mySecret: identity!.secret,
-        onProgress: (phase, outstanding) => setBusy(`${phase} — waiting on ${outstanding.join(', ') || '—'}`),
-      }));
-      return send('reveal_hole_card', revealHoleArgs({
-        tableId: table.tableId, seat: yourSeat!, slot,
-        share: agg.share, blinding: stored.blinding, card: stored.card, proof: agg.proof,
-      }));
+  /**
+   * Show every card this seat still owes, in ONE transaction.
+   *
+   * Both halves of that matter, because the showdown clock is ten seconds and
+   * the old shape could not fit inside it. It built one card's aggregate, sent
+   * it, then built the other's and sent that: two relay round-trips and two
+   * transactions in series. Every seat at the table showed its first card and
+   * was mucked before the second -- so a hand where everyone did the right
+   * thing ended with nobody able to win it.
+   *
+   * The two aggregates are independent, so they run concurrently, and the
+   * reveals go as a single multicall: one signature, one confirmation, and no
+   * window between the two where the clock can bite.
+   */
+  const showHoleCards = (slots: number[]) =>
+    run('Showing my hand', async () => {
+      setBusy('running the aggregates for both cards');
+      const args = await Promise.all(slots.map(prepareReveal));
+      const { txHash } = await executeAndWait(
+        account!, provider!,
+        args.map((a) => pgCall(contract, 'reveal_hole_card', a as any)),
+      );
+      return `showed ${args.length} card${args.length === 1 ? '' : 's'} — ${txHash}`;
     });
 
   // ── automatic share service ────────────────────────────────────────────
@@ -746,17 +773,7 @@ export default function RevealPanel(p: Props) {
     const pending = [0, 1].filter((slot) => !me.holeRevealed[slot]);
     if (pending.length === 0) return;
     showing.current = true;
-    void (async () => {
-      for (const slot of pending) {
-        try {
-          await showHoleCard(slot);
-        } catch {
-          // Usually the other seats have not joined the aggregate yet. Left
-          // for the next poll rather than treated as a refusal to show.
-        }
-      }
-      showing.current = false;
-    })();
+    void showHoleCards(pending).finally(() => { showing.current = false; });
   }, [autoShow, yourSeat, mySecretHex, table.showdownStarted, table.showdownTurn, table.settled, table.seats]);
 
   // Muck the seat whose clock has run out.
@@ -918,13 +935,16 @@ export default function RevealPanel(p: Props) {
                 <input type="checkbox" checked={autoShow} onChange={(e) => setAutoShow(e.target.checked)} />
                 Show my hand automatically at showdown
               </label>
-              {[0, 1].map((slot) =>
-                mySeatState?.holeRevealed[slot] ? null : (
-                  <button key={slot} className={uni.btn} disabled={!!busy} onClick={() => showHoleCard(slot)}>
-                    Show slot {slot}
+              {/* One button for the hand, not one per card: the clock is ten
+                  seconds and both reveals go in a single transaction. */}
+              {(() => {
+                const owed = [0, 1].filter((slot) => !mySeatState?.holeRevealed[slot]);
+                return owed.length ? (
+                  <button className={uni.btn} disabled={!!busy} onClick={() => showHoleCards(owed)}>
+                    Show my hand{owed.length === 1 ? ` (slot ${owed[0]})` : ''}
                   </button>
-                ),
-              )}
+                ) : null;
+              })()}
               {table.showdownTurn === yourSeat && !table.seats[yourSeat]?.mucked ? (
                 <button className={styles.chipBtn} disabled={!!busy}
                   onClick={() => run('Mucking', () => send('muck', {

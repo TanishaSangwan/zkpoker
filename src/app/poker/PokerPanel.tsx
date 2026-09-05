@@ -94,9 +94,22 @@ export default function PokerPanel() {
   );
   const [error, setError] = useState<string | null>(null);
 
+  // Polls faster once the showdown clock is running.
+  //
+  // Six seconds is fine for a hand that is waiting on people, and far too slow
+  // for a ten-second deadline: a seat could learn it was on turn with four
+  // seconds left, and its co-signers -- who only join a reveal once it IS that
+  // seat's turn -- would learn even later. Every seat at the table then showed
+  // one card and was mucked before the second.
+  const [pollMs, setPollMs] = useState(6000);
   const { state: table, refresh, loading, error: readError } = useTableState({
-    address: contract, provider, tableId,
+    address: contract, provider, tableId, intervalMs: pollMs,
   });
+
+  useEffect(() => {
+    const live = !!table?.showdownStarted && !table?.settled;
+    setPollMs(live ? 1500 : 6000);
+  }, [table?.showdownStarted, table?.settled]);
 
   const yourSeat = useMemo(() => {
     if (!table || !address) return null;
