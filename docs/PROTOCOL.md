@@ -975,6 +975,49 @@ stops prefixing fails loudly instead of silently truncating a proof.
 
 ---
 
+### 9.7 Community reveals were not gated on the street — FIXED
+
+Found 2026-09-05, by playing a hand and noticing the board was face-up during
+pre-flop betting.
+
+`reveal_community_card` checked that the table existed, was not voided or
+settled, that the deck was open, that the index was in range, that the card was
+not already revealed, and that the position had been proved. It checked
+**nothing about when**. So the entire board was revealable the instant the deck
+opened, and every bet was then placed with the river visible.
+
+That is not a griefing edge case. It is the game not being poker.
+
+The gate is now explicit, and mirrored in the client:
+
+| street | revealable |
+|---|---|
+| 0 pre-flop | nothing |
+| 1 flop | indices 0, 1, 2 |
+| 2 turn | index 3 |
+| 3 river | index 4 |
+
+**Why the contract has to enforce it.** A reveal needs a decryption share from
+every party, so an honest client could refuse to contribute for a card that is
+not due — and the client now does exactly that, both in its automatic share
+service and by disabling the manual buttons. But a rule that holds only while
+every client is well-behaved is not a rule the contract is entitled to assume:
+one modified client, or one player who wants to see the river before betting
+and can talk the others into sending shares, and the hand is decided on
+information nobody should have had.
+
+Four tests pin it: the flop refused pre-flop, the **turn refused on the flop**
+(the case a naive "any card once betting starts" gate would let through), the
+river refused on the turn, and the whole board opening exactly when due. 208
+contract tests pass.
+
+**This is the second defect in this section found by playing rather than
+testing**, after §9.6, and neither was reachable from a single client or a unit
+test. The first hand played end to end was worth more than the round of review
+that preceded it.
+
+---
+
 ### 9.4 The SRS is a third-party runtime dependency
 
 Worth stating because it is invisible until it fails: bb.js does not ship the

@@ -140,8 +140,14 @@ export async function runAggregate(args: {
       .map((b) => b.toString(16).padStart(2, '0')).join('');
   }
 
+  // Round traffic is ephemeral: it is re-announced until the round advances,
+  // so replaying it to later subscribers is both useless and harmful (see
+  // Envelope.ephemeral).
   const send = (kind: Envelope['kind'], body: unknown) =>
-    transport.publish({ tableId, position, from: mySeat, kind, to: null, body, session: session ?? undefined });
+    transport.publish({
+      tableId, position, from: mySeat, kind, to: null, body,
+      session: session ?? undefined, ephemeral: true,
+    });
 
   const done = new Promise<AggregateResult>((resolve, reject) => {
     const stop = transport.subscribe((e) => {

@@ -260,6 +260,171 @@ export default function RevealPanel(p: Props) {
       }));
     });
 
+  // ── automatic share service ────────────────────────────────────────────
+  //
+  // None of this needs a human. Sending a share and taking part in the
+  // aggregate rounds are mechanical: there is no decision to make, no
+  // information to weigh, and getting them wrong only stalls the table. The
+  // buttons below exist because making each step visible was useful while
+  // proving the protocol worked; leaving them as the only way to play would
+  // mean two people clicking in lockstep for every card, which is not a game.
+  //
+  // What stays manual is what actually involves a choice: bet / check / fold,
+  // and whether to show or muck at showdown.
+  //
+  // ── The one rule that makes this safe ─────────────────────────────────
+  //
+  // A client serves shares for positions it OWES someone -- other seats' hole
+  // positions, and the community positions. It must NEVER serve its own share
+  // for its OWN hole positions, and never join an aggregate over them.
+  //
+  // That is not tidiness. Reading seat S's card needs a share from every party
+  // for position 2S; the opponents' shares are supposed to be handed over,
+  // and S's own is the piece that keeps the card private. A client that served
+  // it on request would hand out the last missing piece and expose its own
+  // hand. So "answer anything asked" is exactly the wrong default, and the
+  // scoping below is the security property, not a convenience.
+  const served = useRef<Set<number>>(new Set());
+  const joined = useRef<Set<number>>(new Set());
+  // The auto-join effect must subscribe ONCE. Anything it needs that changes
+  // on every poll -- the seat keys, the community array, the callbacks that
+  // close over them -- goes in a ref instead of the dependency array, or the
+  // effect tears down and re-subscribes every few seconds and drops messages
+  // in the gap.
+  const latest = useRef({ keys, table, identity, openedAt, gatherShares, refresh, send });
+  latest.current = { keys, table, identity, openedAt, gatherShares, refresh, send };
+  const [autoServe, setAutoServe] = useState(true);
+  const [autoLog, setAutoLog] = useState<string[]>([]);
+  const say = useCallback((m: string) => setAutoLog((l) => [...l.slice(-6), m]), []);
+
+  /**
+   * The street a community card belongs to. Mirrors the contract's own gate.
+   *
+   *   street 1 flop -> indices 0,1,2 · street 2 turn -> 3 · street 3 river -> 4
+   */
+  const streetFor = (index: number) => (index <= 2 ? 1 : index === 3 ? 2 : 3);
+
+  /**
+   * Positions this seat owes a share for, and who to send each to.
+   *
+   * Community shares are withheld until the street that deals the card.
+   * Handing them over early lets the whole board be revealed before a single
+   * bet -- the contract now refuses such a reveal, but a client that gives the
+   * shares away anyway is still handing over material it did not need to, and
+   * "the chain will stop them" is a poor reason to leak. Hole shares are owed
+   * from the moment the deck opens: that is what dealing IS.
+   */
+  const owed = useMemo(() => {
+    if (yourSeat === null) return [];
+    const out: { pos: number; to: number | null }[] = [];
+    for (const s of table.seats) {
+      if (!s.occupied || s.seat === yourSeat) continue;
+      for (const pos of seatHolePositions(s.seat)) out.push({ pos, to: s.seat });
+    }
+    for (let k = 0; k < 5; k++) {
+      if (table.street < streetFor(k)) continue;
+      out.push({ pos: communityPosition(k, table.maxSeats), to: null });
+    }
+    return out;
+  }, [table.seats, table.maxSeats, yourSeat, table.street]);
+
+  // Serve every share owed, once each, as soon as the deck is open.
+  useEffect(() => {
+    if (!autoServe || !table.deckOpened || yourSeat === null || !identity || !provider) return;
+    let cancelled = false;
+    (async () => {
+      await initDleqProver();
+      for (const { pos, to } of owed) {
+        if (cancelled || served.current.has(pos)) continue;
+        try {
+          const { c1 } = await openedAt(pos);
+          const msg = dealing.shareFor(identity.secret, c1);
+          if (to === null) {
+            // Community: public by design, so broadcast rather than sealed.
+            await transport.current!.publish({
+              tableId: table.tableId, position: pos, from: yourSeat, kind: 'share', to: null,
+              body: {
+                d: { x: msg.d.x.toString(), y: msg.d.y.toString() },
+                s: msg.s.toString(), e: msg.e.toString(),
+              },
+            });
+          } else {
+            await dealing.sendHoleShare({
+              transport: transport.current!, tableId: table.tableId, position: pos,
+              from: yourSeat, to, recipientPk: keys.get(to)!, msg,
+            });
+          }
+          served.current.add(pos);
+          say(`served share for position ${pos}${to === null ? ' (board)' : ` (seat ${to})`}`);
+        } catch {
+          // Usually "not opened yet". Retried on the next poll rather than
+          // treated as a failure -- positions open in chunks.
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [autoServe, table.deckOpened, table.deckOpenChunk, yourSeat, identity, provider, owed, keys, openedAt, say, table.tableId]);
+
+  // Join an aggregate the moment someone starts one, so a reveal is one click
+  // for whoever wants the card and nothing at all for everyone else.
+  const deckIsOpen = table.deckOpened;
+  const mySecretHex = identity ? identity.secret.toString(16) : null;
+  useEffect(() => {
+    if (!autoServe || !deckIsOpen || yourSeat === null || !mySecretHex) return;
+    const myHoles = seatHolePositions(yourSeat);
+    const stop = transport.current!.subscribe((e) => {
+      if (e.kind !== 'nonce-commit' || e.from === yourSeat) return;
+      const pos = e.position;
+      if (joined.current.has(pos)) return;
+      // Never over my own hole positions -- see the rule above. Showing is a
+      // decision, and the share that keeps the card private is mine.
+      if (myHoles.includes(pos)) return;
+      // And never help open a board card before its street. Same reasoning as
+      // `owed`: the contract refuses the reveal, but there is no reason to
+      // contribute to it in the first place.
+      const communityIndex = pos - 2 * latest.current.table.maxSeats;
+      if (communityIndex >= 0 && latest.current.table.street < streetFor(communityIndex)) return;
+      joined.current.add(pos);
+      void (async () => {
+        const L = latest.current;
+        try {
+          await initDleqProver();
+          const { c1, c2 } = await L.openedAt(pos);
+          const shares = await L.gatherShares(pos, c1, false);
+          const agg = await dealing.runAggregate({
+            transport: liveOnly.current!, tableId: L.table.tableId, position: pos, h: c1,
+            jointKey: L.table.jointKey!, keys: L.keys, shares,
+            mySeat: yourSeat, mySecret: L.identity!.secret,
+          });
+          say(`joined the aggregate for position ${pos}`);
+          // Only a community card can be submitted from here: a hole reveal
+          // also needs the owner's blinding, which only the owner has.
+          const community = pos >= 2 * L.table.maxSeats;
+          if (community) {
+            const index = pos - 2 * L.table.maxSeats;
+            const card = cardFromShare({ c1, c2 }, agg.share);
+            if (card !== null && !L.table.community[index]?.revealed) {
+              try {
+                await L.send('reveal_community_card', revealCommunityArgs({
+                  tableId: L.table.tableId, index, share: agg.share, card, proof: agg.proof,
+                }));
+                say(`revealed board ${index}`);
+                L.refresh();
+              } catch {
+                // The other side won the race and submitted first, which is
+                // the right outcome.
+              }
+            }
+          }
+        } catch (err) {
+          joined.current.delete(pos); // let a fresh run be joined
+          say(`aggregate for position ${pos} did not finish`);
+        }
+      })();
+    });
+    return stop;
+  }, [autoServe, deckIsOpen, yourSeat, mySecretHex, say]);
+
   // ── accusations ────────────────────────────────────────────────────────
   const [accSeat, setAccSeat] = useState('0');
   const [accPos, setAccPos] = useState('0');
@@ -311,27 +476,54 @@ export default function RevealPanel(p: Props) {
             </span>
           </div>
 
+          {/* Serving shares is automatic. It is left switchable because the
+              manual buttons are the only way to see a single step in
+              isolation, which is what every coordination bug in this layer
+              was found with. */}
           <div className={styles.actionsRow}>
-            {table.seats.filter((s) => s.occupied && s.seat !== yourSeat).flatMap((s) =>
-              seatHolePositions(s.seat).map((pos) => (
-                <button key={pos} className={styles.chipBtn} disabled={!!busy}
-                  onClick={() => contribute(pos, s.seat)}>
-                  share → seat {s.seat} pos {pos}
-                </button>
-              )),
-            )}
-            {table.community.map((_, i) => (
-              <button key={`c${i}`} className={styles.chipBtn} disabled={!!busy}
-                onClick={() => contribute(communityPosition(i, table.maxSeats), null)}>
-                share → board {i}
-              </button>
-            ))}
+            <label className={styles.fieldHint} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <input type="checkbox" checked={autoServe} onChange={(e) => setAutoServe(e.target.checked)} />
+              Serve shares and join reveals automatically
+            </label>
+            <span className={styles.chip}>
+              {served.current.size}/{owed.length} shares served
+            </span>
           </div>
+
+          {autoLog.length ? (
+            <pre className={uni.receiptNote}>{autoLog.join('\n')}</pre>
+          ) : null}
+
+          {!autoServe ? (
+            <div className={styles.actionsRow}>
+              {table.seats.filter((s) => s.occupied && s.seat !== yourSeat).flatMap((s) =>
+                seatHolePositions(s.seat).map((pos) => (
+                  <button key={pos} className={styles.chipBtn} disabled={!!busy}
+                    onClick={() => contribute(pos, s.seat)}>
+                    share → seat {s.seat} pos {pos}
+                  </button>
+                )),
+              )}
+              {table.community.map((_, i) => (
+                <button key={`c${i}`} className={styles.chipBtn}
+                  disabled={!!busy || table.street < streetFor(i)}
+                  title={table.street < streetFor(i) ? `not due until street ${streetFor(i)}` : undefined}
+                  onClick={() => contribute(communityPosition(i, table.maxSeats), null)}>
+                  share → board {i}
+                </button>
+              ))}
+            </div>
+          ) : null}
 
           <div className={styles.actionsRow}>
             {table.community.map((c, i) =>
               c.revealed ? null : (
-                <button key={i} className={styles.chipBtn} disabled={!!busy} onClick={() => revealCommunity(i)}>
+                <button key={i} className={styles.chipBtn}
+                  disabled={!!busy || table.street < streetFor(i)}
+                  title={table.street < streetFor(i)
+                    ? `board ${i} is not dealt until street ${streetFor(i)}`
+                    : undefined}
+                  onClick={() => revealCommunity(i)}>
                   Reveal board {i}
                 </button>
               ),

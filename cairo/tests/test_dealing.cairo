@@ -263,11 +263,44 @@ fn test_open_deck_rejected_proof() {
     }
 }
 
+
+// Walks the table to `street` so community reveals are legal there.
+//
+// reveal_community_card refuses a card before the street that deals it (found
+// by playing a hand and noticing the whole board was face-up during pre-flop
+// betting), so every test that reveals one has to get there honestly: both
+// seats check, the dealer advances, repeat.
+fn to_street(game: zkpoker::IPokerGameDispatcher, street: u8) {
+    // Reads where the table actually IS rather than assuming pre-flop, so
+    // successive calls are cumulative-safe. Assuming 0 made to_street(2) after
+    // to_street(1) advance two MORE streets and run off the end of the hand
+    // into BETTING_CLOSED.
+    while game.get_table_street(TABLE_1) < street {
+        start_cheat_caller_address(game.contract_address, ALICE());
+        game.check(TABLE_1, SEAT_0);
+        stop_cheat_caller_address(game.contract_address);
+        start_cheat_caller_address(game.contract_address, BOB());
+        game.check(TABLE_1, SEAT_1);
+        stop_cheat_caller_address(game.contract_address);
+        start_cheat_caller_address(game.contract_address, DEALER());
+        game.advance_street(TABLE_1);
+        stop_cheat_caller_address(game.contract_address);
+    }
+}
+
+fn setup_opened_at_flop() -> (
+    zkpoker::IPokerGameDispatcher, zkpoker::mocks::IMockVerifierAdminTraitDispatcher,
+) {
+    let (game, verifier) = setup_opened();
+    to_street(game, 1);
+    (game, verifier)
+}
+
 // ─── community cards ────────────────────────────────────────────────────
 
 #[test]
 fn test_reveal_community_card_success_and_event() {
-    let (game, _v) = setup_opened();
+    let (game, _v) = setup_opened_at_flop();
     let mut spy = spy_events();
     game.reveal_community_card(TABLE_1, 0, SHARE_X, SHARE_Y, 7, proof());
     assert(game.get_community_revealed(TABLE_1, 0), 'not revealed');
@@ -314,7 +347,7 @@ fn test_reveal_community_bad_index_rejected() {
 #[test]
 #[feature("safe_dispatcher")]
 fn test_reveal_community_twice_rejected() {
-    let (game, _v) = setup_opened();
+    let (game, _v) = setup_opened_at_flop();
     game.reveal_community_card(TABLE_1, 2, SHARE_X, SHARE_Y, 30, proof());
     let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
     let outcome = safe.reveal_community_card(TABLE_1, 2, SHARE_X, SHARE_Y, 31, proof());
@@ -329,7 +362,7 @@ fn test_reveal_community_twice_rejected() {
 #[test]
 #[feature("safe_dispatcher")]
 fn test_reveal_community_rejected_proof() {
-    let (game, verifier) = setup_opened();
+    let (game, verifier) = setup_opened_at_flop();
     verifier.set_reject_reveal(true);
     let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
     let outcome = safe.reveal_community_card(TABLE_1, 0, SHARE_X, SHARE_Y, 7, proof());
@@ -847,6 +880,10 @@ fn test_open_deck_partial_open_is_unexpressible() {
     assert(!game.get_deck_opened(TABLE_1), 'half-open is not open');
     game.open_deck(TABLE_1, 1, chunk_cts(5, 9), proof());
 
+    // The point of this test is that a half-opened deck leaves the hand
+    // recoverable, not that a card can be shown early -- so reach the flop
+    // the way a real table does before checking the board still opens.
+    to_street(game, 1);
     game.reveal_community_card(TABLE_1, 0, SHARE_X, SHARE_Y, 7, proof());
     assert(game.get_community_revealed(TABLE_1, 0), 'board still revealable');
 }
@@ -1087,7 +1124,7 @@ fn test_cannot_accuse_over_someone_elses_hole_card() {
 #[test]
 #[feature("safe_dispatcher")]
 fn test_cannot_accuse_over_an_already_revealed_card() {
-    let (game, _v) = setup_opened();
+    let (game, _v) = setup_opened_at_flop();
     game.reveal_community_card(TABLE_1, 0, SHARE_X, SHARE_Y, 7, proof());
 
     let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
@@ -1229,3 +1266,79 @@ fn test_sole_contributor_default_strands_nothing() {
     assert(game.get_seat_contributed(TABLE_1, SEAT_1) == 0, 'nothing to forfeit');
     assert(game.get_table_voided(TABLE_1), 'still voided');
 }
+
+// ── the street gate ────────────────────────────────────────────────────
+//
+// Found by playing a real hand: reveal_community_card checked that the deck
+// was open and the position was proved, and nothing about WHEN. So the whole
+// board was revealable the instant the deck opened, and every bet was then
+// made with the river face-up. That is not a griefing edge case, it is the
+// game not being poker.
+//
+// Revealing needs a share from every party, so an honest client could refuse
+// to contribute early -- but a rule that holds only while every client is
+// well behaved is not one the contract may assume.
+
+#[test]
+#[feature("safe_dispatcher")]
+fn test_flop_cannot_be_revealed_pre_flop() {
+    let (game, _v) = setup_opened();
+    let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
+    assert(game.get_table_street(TABLE_1) == 0, 'expected pre-flop');
+    let outcome = safe.reveal_community_card(TABLE_1, 0, SHARE_X, SHARE_Y, 7, proof());
+    match outcome {
+        Result::Ok(_) => panic!("revealed the flop during pre-flop betting"),
+        Result::Err(p) => assert(*p.at(0) == 'CARD_NOT_DUE_THIS_STREET', 'wrong error'),
+    }
+}
+
+#[test]
+#[feature("safe_dispatcher")]
+fn test_turn_cannot_be_revealed_on_the_flop() {
+    // Index 3 is the turn and needs street 2, so the flop is not enough --
+    // this is the case a naive "any community card once betting starts" gate
+    // would have let through.
+    let (game, _v) = setup_opened_at_flop();
+    let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
+    assert(game.get_table_street(TABLE_1) == 1, 'expected flop');
+    let outcome = safe.reveal_community_card(TABLE_1, 3, SHARE_X, SHARE_Y, 7, proof());
+    match outcome {
+        Result::Ok(_) => panic!("revealed the turn on the flop"),
+        Result::Err(p) => assert(*p.at(0) == 'CARD_NOT_DUE_THIS_STREET', 'wrong error'),
+    }
+}
+
+#[test]
+#[feature("safe_dispatcher")]
+fn test_river_cannot_be_revealed_on_the_turn() {
+    let (game, _v) = setup_opened();
+    to_street(game, 2);
+    let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
+    let outcome = safe.reveal_community_card(TABLE_1, 4, SHARE_X, SHARE_Y, 7, proof());
+    match outcome {
+        Result::Ok(_) => panic!("revealed the river on the turn"),
+        Result::Err(p) => assert(*p.at(0) == 'CARD_NOT_DUE_THIS_STREET', 'wrong error'),
+    }
+}
+
+#[test]
+fn test_each_community_card_opens_on_its_own_street() {
+    // The whole board, revealed exactly when it is due. Also pins the mapping
+    // itself: flop is 0,1,2 together, then one card per street.
+    let (game, _v) = setup_opened();
+    to_street(game, 1);
+    game.reveal_community_card(TABLE_1, 0, SHARE_X, SHARE_Y, 7, proof());
+    game.reveal_community_card(TABLE_1, 1, SHARE_X, SHARE_Y, 8, proof());
+    game.reveal_community_card(TABLE_1, 2, SHARE_X, SHARE_Y, 9, proof());
+    to_street(game, 2);
+    game.reveal_community_card(TABLE_1, 3, SHARE_X, SHARE_Y, 10, proof());
+    to_street(game, 3);
+    game.reveal_community_card(TABLE_1, 4, SHARE_X, SHARE_Y, 11, proof());
+
+    let mut i: u32 = 0;
+    while i != 5 {
+        assert(game.get_community_revealed(TABLE_1, i), 'card not revealed');
+        i += 1;
+    }
+}
+

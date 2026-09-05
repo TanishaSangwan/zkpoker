@@ -1046,6 +1046,7 @@ pub mod PokerGame {
         pub const BAD_CHUNK: felt252 = 'BAD_OPENING_CHUNK';
         pub const POSITION_NOT_OPENED: felt252 = 'POSITION_NOT_OPENED';
         pub const BAD_COMMUNITY_INDEX: felt252 = 'BAD_COMMUNITY_INDEX';
+        pub const STREET_TOO_EARLY: felt252 = 'CARD_NOT_DUE_THIS_STREET';
         pub const CARD_REVEALED: felt252 = 'CARD_ALREADY_REVEALED';
         pub const BAD_REVEAL: felt252 = 'CARD_REVEAL_REJECTED';
         pub const BAD_SLOT: felt252 = 'BAD_HOLE_SLOT';
@@ -3279,6 +3280,35 @@ pub mod PokerGame {
             assert(index < 5, errors::BAD_COMMUNITY_INDEX);
             assert(
                 !self.community_revealed.entry((table_id, index)).read(), errors::CARD_REVEALED,
+            );
+
+            // A card cannot be shown before the street that deals it.
+            //
+            // Without this the whole board is revealable the moment the deck
+            // opens, and every bet is then made with the river already
+            // visible -- which is not a griefing edge case, it is the game
+            // not being poker. Found by playing a hand and noticing the board
+            // was face-up during pre-flop betting.
+            //
+            //   street 0 pre-flop : nothing
+            //   street 1 flop     : indices 0, 1, 2
+            //   street 2 turn     : index 3
+            //   street 3 river    : index 4
+            //
+            // Revealing needs a share from every party, so in principle an
+            // honest client could refuse early -- but a rule that only holds
+            // while every client is well-behaved is not a rule the contract
+            // is entitled to assume. It is checked here.
+            let required_street: u8 = if index <= 2 {
+                1
+            } else if index == 3 {
+                2
+            } else {
+                3
+            };
+            assert(
+                self.table_street.entry(table_id).read() >= required_street,
+                errors::STREET_TOO_EARLY,
             );
 
             let max_seats = self.table_max_seats.entry(table_id).read();

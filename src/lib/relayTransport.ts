@@ -24,6 +24,27 @@ export class RelayTransport implements Transport {
   private abort: AbortController | null = null;
 
   /**
+   * Envelopes already received, re-delivered to handlers that subscribe later.
+   *
+   * The relay replays its history ONCE, when a stream connects. Whatever
+   * handler happens to be attached at that moment sees it -- and a handler
+   * that only cares about one message kind drops the rest on the floor. A
+   * later subscriber then waits forever for something that did arrive,
+   * seconds before it started listening.
+   *
+   * That is exactly how this failed: an effect subscribed early to watch for
+   * aggregate rounds, the relay replayed the shares to it, that handler
+   * ignored them as the wrong kind, and the share-gathering subscription that
+   * came later never saw them. From the outside it looked like the other
+   * player had sent nothing.
+   *
+   * Bounded, and only kept when replay is enabled -- a live-only stream must
+   * not resurrect round messages for the same reason the relay does not.
+   */
+  private received: Envelope[] = [];
+  private static readonly RECEIVED_CAP = 400;
+
+  /**
    * `replay: false` for a stream that must only carry what happens from now
    * on. The multi-round aggregate needs that: a replayed commitment from an
    * abandoned attempt at the same position arrives mid-round and is
@@ -54,6 +75,10 @@ export class RelayTransport implements Transport {
       return;
     }
     if (envelope.tableId !== this.tableId) return;
+    if (this.opts.replay !== false && !envelope.ephemeral) {
+      this.received.push(envelope);
+      while (this.received.length > RelayTransport.RECEIVED_CAP) this.received.shift();
+    }
     for (const h of this.handlers) {
       try { h(envelope); } catch { /* a failing handler is that handler's problem */ }
     }
@@ -118,11 +143,23 @@ export class RelayTransport implements Transport {
   subscribe(handler: (e: Envelope) => void): () => void {
     this.ensureStream();
     this.handlers.add(handler);
+    // Catch the new handler up on what already arrived. Handlers filter by
+    // kind and position anyway, so replaying everything is safe and a miss is
+    // not recoverable.
+    for (const e of [...this.received]) {
+      try { handler(e); } catch { /* the handler's problem, not the stream's */ }
+    }
     return () => {
       this.handlers.delete(handler);
-      // Keep the stream open while anyone is still listening: reopening an
-      // SSE connection per subscriber would lose messages in the gap.
-      if (this.handlers.size === 0) { this.stop(); }
+      // The stream deliberately stays open, even with no handlers left.
+      //
+      // Closing it on the last unsubscribe seems tidy and is wrong: callers
+      // subscribe and unsubscribe around each step, and a React effect
+      // re-subscribes whenever its dependencies change, so the connection
+      // tore down and reopened constantly -- losing every message sent in the
+      // gap. It presented as the other player never sending anything, with
+      // the relay log showing a listener connecting and leaving over and
+      // over. Only close() closes it.
     };
   }
 

@@ -403,6 +403,87 @@ switch (cmd) {
     liveOnly.close();
     break;
   }
+  // ── showdown ───────────────────────────────────────────────────────
+  //
+  // The aggregate for a HOLE card is built here, not at dealing time. That is
+  // docs/PROTOCOL.md §9.5: an aggregate needs a challenge over D = sum(d_i),
+  // every co-signer needs that challenge, and open_deck already published this
+  // position's c2 -- so handing D to the co-signers at dealing time would have
+  // handed them the card. At showdown it is being revealed anyway.
+  //
+  // What was committed at dealing time still binds: the share and blinding
+  // below have to reopen the commitment already on-chain, so the card was
+  // fixed before the board existed. Only the proof is assembled late.
+  case 'show': {
+    if (!state.hole) throw new Error('nothing dealt -- run `deal` first');
+    await dleqInit();
+    const secret = BigInt(state.secret);
+    const relay = process.env.NEXT_PUBLIC_RELAY_URL ?? 'http://127.0.0.1:3100';
+    const transport = new RelayTransport(TABLE, relay);
+    const liveOnly = new RelayTransport(TABLE, relay, { replay: false });
+    const maxSeats = Number(await view.get_table_max_seats(TABLE));
+
+    const keys = new Map();
+    for (let s2 = 0; s2 < maxSeats; s2++) {
+      if (BigInt(await view.get_seat_owner(TABLE, String(s2))) === 0n) continue;
+      if (!(await view.get_seat_key_registered(TABLE, String(s2)))) continue;
+      const r2 = await view.get_seat_pk(TABLE, String(s2));
+      const [x, y] = (Array.isArray(r2) ? r2 : [r2[0], r2[1]]).map(big);
+      keys.set(s2, grumpkin.fromWire(x, y));
+    }
+    const jraw = await view.get_joint_pk(TABLE);
+    const [jx, jy] = (Array.isArray(jraw) ? jraw : [jraw[0], jraw[1]]).map(big);
+    const Y = grumpkin.fromWire(jx, jy);
+
+    for (const [slotStr, stored] of Object.entries(state.hole)) {
+      const slot = Number(slotStr);
+      if (await view.get_hole_revealed(TABLE, String(MY_SEAT), slot)) { console.log(`  slot ${slot} already shown`); continue; }
+      const pos = deck.seatHolePositions(MY_SEAT)[slot];
+      const raw = await view.get_opened_ciphertext(TABLE, pos);
+      const [c1x, c1y] = (Array.isArray(raw) ? raw : [raw[0], raw[1]]).map(big);
+      const c1 = grumpkin.fromWire(c1x, c1y);
+
+      // Showing means the share is no longer secret, so it is broadcast here
+      // where at dealing time it was sealed.
+      const mineShare = dealing.shareFor(secret, c1);
+      await transport.publish({
+        tableId: TABLE, position: pos, from: MY_SEAT, kind: 'share', to: null,
+        body: { d: { x: mineShare.d.x.toString(), y: mineShare.d.y.toString() }, s: mineShare.s.toString(), e: mineShare.e.toString() },
+      });
+      console.log(`  slot ${slot}: broadcast my share, gathering the rest…`);
+
+      const shares = new Map([[MY_SEAT, grumpkin.mul(secret, c1)]]);
+      const waitMs = Number(process.env.DEAL_WAIT_MS ?? 1_800_000);
+      await new Promise((resolve, reject) => {
+        const stop = transport.subscribe((e) => {
+          if (e.position !== pos || e.kind !== 'share' || e.from === MY_SEAT) return;
+          try {
+            const msg = { d: { x: BigInt(e.body.d.x), y: BigInt(e.body.d.y) }, s: BigInt(e.body.s), e: BigInt(e.body.e) };
+            shares.set(e.from, dealing.acceptShare({ from: { seat: e.from, pk: keys.get(e.from) }, h: c1, msg }));
+            console.log(`    got seat ${e.from}'s share, DLEQ verified`);
+            if (shares.size === keys.size) { stop(); clearTimeout(t); resolve(); }
+          } catch (err) { stop(); clearTimeout(t); reject(err); }
+        });
+        const t = setTimeout(() => { stop(); reject(new Error(`no share for position ${pos}`)); }, waitMs);
+        if (shares.size === keys.size) { stop(); clearTimeout(t); resolve(); }
+      });
+
+      const agg = await dealing.runAggregate({
+        transport: liveOnly, tableId: TABLE, position: pos, h: c1, jointKey: Y, shares, keys,
+        mySeat: MY_SEAT, mySecret: secret,
+        onProgress: (phase, out) => console.log(`    ${phase}, waiting on ${out.join(', ') || '-'}`),
+      });
+
+      await send('reveal_hole_card', reveal.revealHoleArgs({
+        tableId: TABLE, seat: MY_SEAT, slot,
+        share: agg.share, blinding: BigInt(stored.blinding), card: stored.card, proof: agg.proof,
+      }));
+      console.log(`  slot ${slot} shown: ${grumpkin.cardToName(stored.card)}`);
+    }
+    transport.close(); liveOnly.close();
+    break;
+  }
+  case 'settle': await send('settle_from_reveals', { table_id: TABLE }); break;
   case 'check': await send('check', { table_id: TABLE, seat: String(MY_SEAT) }); break;
   case 'street': await send('advance_street', { table_id: TABLE }); break;
   default: console.error(`unknown command: ${cmd}`); process.exit(1);

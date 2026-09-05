@@ -113,20 +113,36 @@ const server = createServer((req, res) => {
       if (body.length > 4_000_000) { req.destroy(); }
     });
     req.on('end', () => {
-      let table;
-      try { table = JSON.parse(body).tableId; } catch { res.writeHead(400); res.end('bad json'); return; }
+      let table, ephemeral, label = '';
+      try {
+        const parsed = JSON.parse(body);
+        table = parsed.tableId;
+        ephemeral = parsed.ephemeral === true;
+        // Logged, not acted on. The relay still routes purely on tableId and
+        // the ephemeral flag -- but "a listener connected and left" told me
+        // more than any amount of guessing did, and "seat 1 published nothing"
+        // vs "seat 1 published a commit nobody heard" are different bugs.
+        label = ` [${parsed.kind ?? '?'} from seat ${parsed.from ?? '?'} pos ${parsed.position ?? '?'}]`;
+      } catch { res.writeHead(400); res.end('bad json'); return; }
       if (!table) { res.writeHead(400); res.end('tableId required'); return; }
       const listeners = rooms.get(table) ?? new Set();
       // Echoed verbatim. The relay does not parse, validate or reorder --
       // every check that matters happens at the recipient.
       const frame = `data: ${body.replace(/\n/g, '')}\n\n`;
-      if (!history.has(table)) history.set(table, []);
-      const past = history.get(table);
-      past.push(frame);
-      while (past.length > HISTORY_PER_TABLE) past.shift();
+      // `ephemeral` messages are relayed and forgotten. The publisher decides;
+      // the relay does not inspect what it carries. This matters because the
+      // aggregate rounds re-announce themselves until they advance, and left
+      // replayable that flood evicts the SHARES out of a bounded history --
+      // which is the one thing a waiting recipient cannot re-derive.
+      if (!ephemeral) {
+        if (!history.has(table)) history.set(table, []);
+        const past = history.get(table);
+        past.push(frame);
+        while (past.length > HISTORY_PER_TABLE) past.shift();
+      }
       let sent = 0;
       for (const l of listeners) { try { l.write(frame); sent++; } catch {} }
-      console.log(`  relayed ${body.length}B on ${table} -> ${sent} listener(s)`);
+      console.log(`  relayed ${body.length}B on ${table} -> ${sent} listener(s)${label}`);
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ ok: true, listeners: sent }));
     });

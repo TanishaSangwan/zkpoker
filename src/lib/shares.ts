@@ -45,6 +45,17 @@ export type Envelope = {
    * attack. Absent on `share` envelopes, which are not round-based.
    */
   session?: string;
+  /**
+   * True for messages that must NOT be replayed to later subscribers.
+   *
+   * The round-based aggregate messages are re-announced until their round
+   * advances, which is how clients that join at different times find each
+   * other. Left replayable, that flood evicts the SHARES out of a bounded
+   * history -- and a share is the one thing that cannot be re-derived by a
+   * recipient waiting for it. Set by the publisher, so the relay honours a
+   * flag rather than having to understand what it carries.
+   */
+  ephemeral?: boolean;
   /** Plaintext for broadcasts; ECIES ciphertext when `to` is set. */
   body: unknown;
 };
