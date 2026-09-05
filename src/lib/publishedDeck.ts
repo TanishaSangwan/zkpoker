@@ -21,7 +21,7 @@
 import type { ProviderInterface } from 'starknet';
 import { hash } from 'starknet';
 import { Ciphertext, fieldsToDeck } from './deck';
-import { fromU256Parts } from './felt';
+import { fromU256Parts, toFeltHex } from './felt';
 
 const DECK_FIELDS = 208;
 const DECK_U256_FELTS = DECK_FIELDS * 2; // each u256 crosses as low, high
@@ -99,12 +99,15 @@ export async function findDeckPublishedTx(args: {
 }): Promise<string | null> {
   const { provider, contract, tableId } = args;
   const key = hash.getSelectorFromName('DeckPublished');
+  // Normalised, because this goes to the node RAW rather than through
+  // calldata compilation: starknet_getEvents rejects a decimal key filter.
+  const tableKey = toFeltHex(tableId);
   let token: string | undefined;
   let latest: string | null = null;
   do {
     const page: any = await provider.getEvents({
       address: contract,
-      keys: [[key], [tableId]],
+      keys: [[key], [tableKey]],
       from_block: args.fromBlock ? { block_number: args.fromBlock } : { block_number: 0 },
       to_block: 'latest',
       chunk_size: 100,

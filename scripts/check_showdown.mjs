@@ -227,6 +227,30 @@ function ciphertextAt(pos) {
   return { c1: grumpkin.fromWire(f[0], f[1]), c2: grumpkin.fromWire(f[2], f[3]) };
 }
 
+step('the published deck is findable however the table id was typed');
+// The UI accepts a table id as a name, a decimal or hex. Contract calls do not
+// care -- starknet.js compiles calldata -- but an event key filter goes to the
+// node RAW, and starknet_getEvents rejects a decimal. That made the published
+// deck unfindable for every seat after the first on any table whose id was
+// typed as a number, which presented as "the shuffle is broken".
+{
+  const e3 = join(outdir, 'pubdeck-entry.ts');
+  writeFileSync(e3, `export { findDeckPublishedTx, readPublishedDeck } from ${JSON.stringify(join(root, 'src/lib/publishedDeck.ts'))};`);
+  await build({ entryPoints: [e3], bundle: true, format: 'esm', platform: 'node',
+    outfile: join(outdir, 'pubdeck.mjs'), external: ['garaga', 'starknet', '@aztec/bb.js', '@noir-lang/noir_js'],
+    logLevel: 'warning' });
+  const { findDeckPublishedTx, readPublishedDeck } = await import(
+    pathToFileURL(join(outdir, 'pubdeck.mjs')).href + `?v=${Date.now()}`);
+  const expected = BigInt(await view.get_published_deck_hash(TABLE));
+  for (const [label, id] of [['hex', TABLE], ['decimal', BigInt(TABLE).toString()]]) {
+    const tx = await findDeckPublishedTx({ provider, contract: GAME, tableId: id });
+    if (!tx) fail(`no DeckPublished transaction found with a ${label} table id`);
+    const d = await readPublishedDeck({ provider, txHash: tx, expectedHash: expected });
+    if (!d || d.length !== 52) fail(`the published deck did not read back with a ${label} table id`);
+  }
+  ok('found and read back with the id written as hex and as a decimal');
+}
+
 step('the button draw');
 for (let seat = 0; seat < SEATS; seat++) {
   const { c1, c2 } = ciphertextAt(deck.drawPosition(seat, SEATS));

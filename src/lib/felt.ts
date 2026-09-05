@@ -82,5 +82,20 @@ export function randomFelt(): bigint {
   }
 }
 
+/**
+ * A felt as the RPC wants it: 0x-prefixed hex.
+ *
+ * The UI accepts a table id as a name, a decimal or hex, and `toFelt` keeps
+ * decimals as decimals -- fine for contract calls, since starknet.js compiles
+ * calldata itself, and fatal for anything handed to the node RAW. Event key
+ * filters are the raw case: `starknet_getEvents` rejects "2" outright, so a
+ * table whose id was typed as a number could not have its published deck
+ * located at all. Seat 0 never noticed, because turn 0 shuffles the canonical
+ * a_0 and reads nothing; every later seat failed, which looked like the
+ * shuffle being broken rather than the lookup.
+ */
+export const toFeltHex = (v: string | bigint): string =>
+  '0x' + BigInt(v).toString(16);
+
 export const feltStr = (v: bigint): string => '0x' + v.toString(16);
 export const feltStrs = (vs: bigint[]): string[] => vs.map(feltStr);
