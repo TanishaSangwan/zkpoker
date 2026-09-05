@@ -143,12 +143,24 @@ export class RelayTransport implements Transport {
   subscribe(handler: (e: Envelope) => void): () => void {
     this.ensureStream();
     this.handlers.add(handler);
-    // Catch the new handler up on what already arrived. Handlers filter by
-    // kind and position anyway, so replaying everything is safe and a miss is
-    // not recoverable.
-    for (const e of [...this.received]) {
-      try { handler(e); } catch { /* the handler's problem, not the stream's */ }
-    }
+    // Catch the new handler up on what already arrived -- but NOT synchronously.
+    //
+    // Callers routinely write `const stop = transport.subscribe(e => { ...
+    // uses stop ... })`. Delivering during `subscribe` runs that handler
+    // before `stop` is assigned, and every replayed envelope dies in the
+    // temporal dead zone: "can't access lexical declaration 'stop' before
+    // initialization". The catch-up then silently does nothing, which is
+    // exactly the failure it was added to prevent.
+    //
+    // Deferring by a microtask lets `subscribe` return first, so the handler's
+    // own closure is fully initialised before it is called.
+    const backlog = [...this.received];
+    queueMicrotask(() => {
+      if (!this.handlers.has(handler)) return; // unsubscribed in the meantime
+      for (const e of backlog) {
+        try { handler(e); } catch { /* the handler's problem, not the stream's */ }
+      }
+    });
     return () => {
       this.handlers.delete(handler);
       // The stream deliberately stays open, even with no handlers left.
