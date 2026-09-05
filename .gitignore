@@ -73,3 +73,6 @@ circuits/*/*/target/
 .agents/skills/starknet-skills/datasets/
 .agents/skills/starknet-skills/evals/
 .agents/skills/starknet-skills/website/
+
+# esbuild scratch for scripts/check_client_crypto.mjs
+node_modules/.cache/
