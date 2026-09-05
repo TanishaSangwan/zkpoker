@@ -344,6 +344,40 @@ the last chunk" rule stopped testing anything. A four-seat fixture (17 slots,
 two chunks) keeps that coverage — `max_seats` drives the slot count, not how
 many seats are occupied, so it needs no extra players.
 
+**And K=16 is now bounded twice over, which §6.1 did not anticipate.** Measured
+on Sepolia after the redeploy:
+
+```
+(open_deck: bound 1224841560 exceeds the 1209000000 cap -- clamping)
+ok  chunk 0 (positions 0,1,...,10,10,10,10,10,10): accepted in 19578 ms
+```
+
+At K=5 deck-opening estimated comfortably under Starknet's per-transaction gas
+ceiling. At K=16 it does not: the estimator's bound lands **above** the
+1,210,000,000 cap, so `open_deck` has joined the shuffle proof in needing that
+bound clamped before the transaction is even accepted for execution. The work
+itself still fits — the proof verified once the ceiling was trimmed — but the
+margin is gone.
+
+So the honest statement of the limit is that **two separate ceilings bind, and
+the gas one binds first**:
+
+| | limit | K it permits |
+|---|---|---|
+| garaga public inputs | 99, of which 16 are the accumulator | K ≤ 16 |
+| Starknet L2 gas per transaction | 1,210,000,000 | ~16, and already clamping |
+
+Raising the public-input cap would therefore buy nothing on its own. Both of
+the protocol's SNARK verifications now sit against the same wall, and the next
+real gain has to come from somewhere other than packing more into one proof —
+recursive aggregation of the shuffle chain, or a native BN254 pairing on
+Starknet that collapses the ~587M fixed cost.
+
+Any client submitting either proof on a public chain must clamp the bound.
+`scripts/check_showdown.mjs` does; a client that does not will have its
+transaction refused before it runs, with a message about the bound rather than
+about the work.
+
 It bites before the limit does. The first attempt on Sepolia was refused
 without running:
 

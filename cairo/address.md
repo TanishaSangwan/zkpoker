@@ -15,6 +15,12 @@ not come back if something is wiped — a redeploy produces new ones.
 | `VerifierAdapter` | `0x02de3b5b72e02327798056f5379517a5d1f580b54e07d439c1fbcb04909a7183` | `0x077ef55a6b9ad68ad6d3c9233100d736c49bbd6e7062337d3c788378b2aebb72` |
 | `PokerGame` | `0x049dbee252721c706180cb61ab2999865cd153d780359b41990b52a49e97ee5a` | `0x038387676d4ab0c1738089f026a48e668a1c9a410ee3917ac4b32a9d50a6458d` |
 
+Verified after deploying by playing a whole hand against it: two shuffle
+proofs, the deck opened in a SINGLE chunk (19.6 s, where K=5 took three at ~27 s
+each), the button drawn, blinds posted, four streets, both hands shown at
+showdown, the pot settled and the button rotated. Redeploy plus that hand cost
+**372.87 STRK**.
+
 Redeployed 2026-09-06 for **K=16** deck opening (§6.2). Only two classes are
 new — the deck-open verifier and `PokerGame`; the shuffle, Schnorr, DLEQ and
 adapter classes were already declared and were re-used, which is why their
