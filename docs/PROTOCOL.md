@@ -979,6 +979,62 @@ harness-only and changes nothing the app ships.
 
 ---
 
+---
+
+### 9.5 The hole-card aggregate cannot be built at dealing time
+
+Found 2026-09-05, building the dealing client. §4 phase 4 and the implemented
+contract describe two different things, and the difference decides when a
+proof can be made.
+
+**§4 phase 4** says the player republishes *all* `n+1` shares and proofs, and
+the contract verifies every DLEQ. **`reveal_hole_card`** takes **one** share
+and **one** proof, checked against the table's **joint key** — the aggregate
+from §6.2, which is what makes a reveal `O(1)` in players. The aggregate was
+introduced for cost after phase 4 was written, and this seam was never
+re-examined.
+
+It matters because an aggregate DLEQ needs a challenge over `D = Σ d_i`, and
+every co-signer needs that challenge to produce its `s_i`. But `open_deck`
+publishes **every** in-play ciphertext before dealing, hole positions included.
+So `c2` is on-chain, and anyone who learns `D` for seat `S`'s hole position
+computes `c2 − D` and reads `S`'s card.
+
+Three ways out:
+
+| | |
+|---|---|
+| Reveal `D` at dealing so everyone can compute the challenge | **Rejected — it is the break itself.** Every co-signer reads the card. |
+| `S` sends only the challenge `e`, keeping `D` secret | **Rejected.** That is blind Schnorr signing: co-signers sign a value they cannot check. Not obviously broken for one signature, but a party blind-signing under a long-term key across many concurrent sessions is exactly the ROS setting (Benhamouda et al.), and a forgery here means claiming a different card at showdown. Not a risk to take silently to save a round. |
+| Build the aggregate at **showdown**, when the card is being revealed anyway | **Taken.** |
+
+**What the chosen option costs, stated plainly.** It diverges from phase 4's
+"no new proof is generated here": there *is* a new proof at showdown, and it
+needs the other parties to still be reachable. A player who cannot assemble it
+cannot show, and mucking forfeits rather than blocks — so a departed player can
+cost a showing player a pot they would have won. That is a liveness failure,
+not a soundness one, and it is the same shape as every other `n`-of-`n`
+dependency in §8.
+
+The commitment still does its job. `S` computes `D` at dealing time from the
+individual shares (each verified locally against its sender's registered key,
+§4 phase 2) and commits `Poseidon(D ‖ ρ)` before betting. So the card is bound
+before the board exists; only the *proof* is assembled later, and it must open
+the commitment already standing.
+
+**Community cards are unaffected** — their shares are public by design, so
+their aggregate is built as soon as the shares are in.
+
+**The honest fix**, not done here, is to make the contract's hole path accept
+`n` individual proofs as phase 4 describes, at `n ×` the verification cost, or
+to add verifiable encryption of shares to `S`'s key — a circuit this project
+does not have and which §8.1 already notes would remove a different trade-off
+in the accusation path.
+
+---
+
+---
+
 ## 10. What exists, what doesn't
 
 **Built and working:**
@@ -1102,7 +1158,29 @@ harness-only and changes nothing the app ships.
   round 8's finding I was precisely this going wrong while a mock hid it), and
   a corrupted proof is rejected. `scripts/prove_deck_open.mjs` regenerates it.
 
-  Not wired up: the reveal/showdown and accusation flows.
+  **Dealing, reveals, showdown and accusations are wired up (2026-09-05).**
+  `src/lib/dealing.ts` runs the share exchange — individual shares verified
+  client-side as they arrive, hole shares ECIES-encrypted to the recipient's
+  registered key — and the three-round commit/reveal/respond the aggregate
+  requires. `src/lib/reveal.ts` builds what `verify_reveal_at` checks, and the
+  table panel covers dealing, community reveals, showdown and the
+  accuse/answer/claim path.
+
+  Building it turned up §9.5: the hole-card aggregate cannot be assembled at
+  dealing time without either handing every co-signer the card or blind-signing
+  under a long-term key, so it is assembled at showdown instead. That is a real
+  divergence from §4 phase 4 and it is written up rather than hidden.
+
+  Verified: the hole commitment this client computes is reproduced by Cairo's
+  own `poseidon_hash_span`, and the reveal statement is built in exactly the
+  order `verify_reveal_at` rebuilds it — both pinned in
+  `cairo-verifier/tests/test_client_vectors.cairo` (21 tests).
+
+  Not verified end to end: a real multi-party deal. The transport is
+  `BroadcastChannel`, which spans tabs of one browser — enough to demonstrate a
+  table, not a deployment. A relay or WebRTC drops in behind the same
+  interface, and every hole share is encrypted to its recipient regardless, so
+  a relay that could read messages still could not read cards.
 - ~~Bet-matching and turn-order enforcement~~ — **done.** `bet`/`fold`/`check`
   are turn-ordered; a street cannot end until every seat still in the hand has
   acted since the last raise and matched the high; a raise reopens the action.

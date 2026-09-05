@@ -916,6 +916,14 @@ pub trait IPokerGame<TState> {
     fn get_published_deck_hash(self: @TState, table_id: felt252) -> felt252;
     fn get_published_deck_seat(self: @TState, table_id: felt252) -> felt252;
     fn get_position_opened(self: @TState, table_id: felt252, position: u32) -> bool;
+    // The ciphertext open_deck proved sits at `position`, as
+    // (c1_x, c1_y, c2_x, c2_y). A reveal needs both halves: c1 is the DLEQ
+    // base H every party raises to its secret, and c2 is what the combined
+    // share is subtracted from to recover the card. All zeroes until the
+    // position has been opened.
+    fn get_opened_ciphertext(
+        self: @TState, table_id: felt252, position: u32,
+    ) -> (u256, u256, u256, u256);
     // 0 when this seat has not committed its shares for that slot yet.
     fn get_hole_commitment(self: @TState, table_id: felt252, seat: felt252, slot: u32) -> felt252;
     fn get_deck_open_chunk(self: @TState, table_id: felt252) -> u32;
@@ -3435,6 +3443,17 @@ pub mod PokerGame {
 
         fn get_position_opened(self: @ContractState, table_id: felt252, position: u32) -> bool {
             self.position_opened.entry((table_id, position)).read()
+        }
+
+        fn get_opened_ciphertext(
+            self: @ContractState, table_id: felt252, position: u32,
+        ) -> (u256, u256, u256, u256) {
+            (
+                self.opened_c1_x.entry((table_id, position)).read(),
+                self.opened_c1_y.entry((table_id, position)).read(),
+                self.opened_c2_x.entry((table_id, position)).read(),
+                self.opened_c2_y.entry((table_id, position)).read(),
+            )
         }
 
         fn get_hole_commitment(

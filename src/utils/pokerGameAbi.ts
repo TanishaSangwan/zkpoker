@@ -1161,6 +1161,26 @@ export const pokerGameAbi = [
       },
       {
         "type": "function",
+        "name": "get_opened_ciphertext",
+        "inputs": [
+          {
+            "name": "table_id",
+            "type": "core::felt252"
+          },
+          {
+            "name": "position",
+            "type": "core::integer::u32"
+          }
+        ],
+        "outputs": [
+          {
+            "type": "(core::integer::u256, core::integer::u256, core::integer::u256, core::integer::u256)"
+          }
+        ],
+        "state_mutability": "view"
+      },
+      {
+        "type": "function",
         "name": "get_hole_commitment",
         "inputs": [
           {

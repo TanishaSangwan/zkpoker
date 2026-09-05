@@ -21,6 +21,7 @@ import { useTableState } from './useTableState';
 import { asU256, decodeError, erc20ApproveCall, executeAndWait, pgCall, shortHex, toFelt } from './contract';
 import Felt from './components/Felt';
 import PhasePanel from './components/PhasePanel';
+import RevealPanel from './components/RevealPanel';
 import { loadOrCreateSeatKey, seatKeyIsPersisted, type SeatIdentity } from '@/lib/identity';
 import type { Ciphertext } from '@/lib/deck';
 import { useProvingEnvironment } from './useProvingEnvironment';
@@ -127,6 +128,11 @@ export default function PokerPanel() {
             table={table} yourSeat={yourSeat} identity={identity}
             account={account} provider={provider} contract={contract}
             deck={deck} setDeck={setDeck} refresh={refresh}
+          />
+          <RevealPanel
+            table={table} yourSeat={yourSeat} identity={identity}
+            account={account} provider={provider} contract={contract}
+            chainId={String(providerIndex)} refresh={refresh}
           />
           <YourHand table={table} yourSeat={yourSeat} />
         </>

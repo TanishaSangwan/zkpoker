@@ -193,6 +193,30 @@ export function aggregate(contributions: PartyContribution[], h: Point): DleqPro
 }
 
 /**
+ * Check one party's individual DLEQ, locally.
+ *
+ * docs/PROTOCOL.md §4 phase 2 requires this: the recipient verifies each share
+ * as it arrives, client-side, so a lying party is caught immediately rather
+ * than after a chain round-trip -- and, for hole cards, rather than at showdown
+ * when the pot is already lost. It is pure arithmetic, no proof system, no
+ * network.
+ *
+ * Verifies exactly what DleqVerifier verifies: R1 = s*G - e*PK,
+ * R2 = s*H - e*D, and that the challenge over (PK, H, D, R1, R2) reproduces e.
+ * Recomputing the challenge is the whole check -- without it, anyone can pick
+ * s and e and set R = sG - ePK.
+ */
+export function verify(args: { pk: Point; h: Point; d: Point; s: bigint; e: bigint }): boolean {
+  const { pk, h, d, s: sig, e } = args;
+  if (pk === null || h === null || d === null) return false;
+  const eNeg = (N - (e % N)) % N;
+  const r1 = add(mulG(sig), mul(eNeg, pk));
+  const r2 = add(mul(sig, h), mul(eNeg, d));
+  if (r1 === null || r2 === null) return false;
+  return challenge(pk, h, d, r1, r2) === e;
+}
+
+/**
  * Recover the plaintext point from a ciphertext and the combined share.
  *
  * m = c2 - D, where D = SUM(d_i) = X*c1. The contract does this itself inside

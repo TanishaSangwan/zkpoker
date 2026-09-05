@@ -335,6 +335,52 @@ fn dleq_aggregate() -> (Array<felt252>, Array<felt252>) {
     (proof, public_inputs)
 }
 
+// The hole-card commitment, recomputed the way reveal_hole_card recomputes it.
+//
+// A player commits to the COMBINED share at dealing time, before betting, and
+// reopens it at showdown. The contract rebuilds this hash from the share and
+// blinding it is handed and rejects anything that does not match, so if
+// starknet.js and Cairo disagreed about poseidon_hash_span the player would
+// commit fine and then be unable to show -- forfeiting the pot to a hash.
+#[test]
+fn test_browser_hole_commitment_matches_cairo() {
+    let share_x = u256 { low: 0xbca1d9d0ffbff7b4ca802c2afd9f6aa3, high: 0x13de0990b2edca6ce048af75844740cf };
+    let share_y = u256 { low: 0x2f83536f8e40147ecd7c8c0a23c0fcc4, high: 0x290e0264e08aba42a857bb8335e3062 };
+    let blinding: felt252 = 0x5eed1;
+
+    let recomputed = core::poseidon::poseidon_hash_span(
+        array![
+            share_x.low.into(), share_x.high.into(), share_y.low.into(), share_y.high.into(),
+            blinding,
+        ]
+            .span(),
+    );
+    assert(recomputed == 0x5d449eba9f81ebe76360bb1375b174ba9ba8f5ca429b9f3add432c73f1ba073, 'hole commitment mismatch');
+}
+
+// The reveal path's public inputs, in the order verify_reveal_at builds them:
+// the table's JOINT key, then the opened ciphertext's c1, then the combined
+// share. None of the first four felts come from the caller on-chain -- they are
+// read from storage the shuffle chain and the opening proof already fixed --
+// so this pins that the client builds the same statement the contract will.
+#[test]
+fn test_browser_reveal_inputs_are_joint_key_then_c1_then_share() {
+    let (_, public_inputs) = dleq_aggregate();
+    assert(public_inputs.len() == 12, 'expected 12 felts');
+
+    // joint key
+    assert(*public_inputs.at(0) == 0xa9ae922ced6e815d1a0a0f1e3d1d01c4, 'joint x low');
+    assert(*public_inputs.at(1) == 0x15745bc3fb5b00ce9a39c83aae352767, 'joint x high');
+    assert(*public_inputs.at(2) == 0x42e8252548ba63b27c9f7ff77c513edd, 'joint y low');
+    assert(*public_inputs.at(3) == 0x1b0d785fcb55df74c2b0ee6f9330af0f, 'joint y high');
+    // c1 -- the DLEQ base H
+    assert(*public_inputs.at(4) == 0x6886e7c981ee5f0e8afac37cbedd4af3, 'c1 x low');
+    assert(*public_inputs.at(6) == 0xbeba1330490c588fb640ebff60690bd6, 'c1 y low');
+    // the combined share D
+    assert(*public_inputs.at(8) == 0xbca1d9d0ffbff7b4ca802c2afd9f6aa3, 'share x low');
+    assert(*public_inputs.at(10) == 0x2f83536f8e40147ecd7c8c0a23c0fcc4, 'share y low');
+}
+
 #[test]
 fn test_browser_dleq_individual_share_is_accepted() {
     let v = dleq();
