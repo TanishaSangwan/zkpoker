@@ -17,7 +17,7 @@ import type { SeatIdentity } from '@/lib/identity';
 import { jointKey as sumKeys, prove as schnorrProve, initProver as initSchnorr } from '@/lib/schnorr';
 import { deckToU256, proveShuffle } from '@/lib/shuffle';
 import { useProvingEnvironment } from '../useProvingEnvironment';
-import { INITIAL_DECK_COMMITMENT, initialDeck, type Ciphertext } from '@/lib/deck';
+import { INITIAL_DECK_COMMITMENT, commitment, initialDeck, type Ciphertext } from '@/lib/deck';
 import { findDeckPublishedTx, readPublishedDeck } from '@/lib/publishedDeck';
 import { chunkCount, openDeckArgs, proveOpenChunk } from '@/lib/deckOpen';
 import { cardToName } from '@/lib/grumpkin';
@@ -122,7 +122,15 @@ export default function PhasePanel(p: Props) {
       if (table.shuffleTurn === 0) {
         deckIn = initialDeck();
       } else {
+        // The cache is a fast path, and a fast path that is trusted is just a
+        // second source of truth. Check it against the commitment this chain
+        // is actually on and fall through to the chain if it does not open
+        // it -- one Poseidon2 hash, against a witness failure that reports
+        // nothing useful and costs a proving run to discover.
         deckIn = p.deck;
+        if (deckIn && (await commitment(deckIn)) !== table.commitment) {
+          deckIn = null;
+        }
         if (!deckIn) {
           setBusy({ label: 'Shuffling', detail: 'reading the published deck from chain' });
           const txHash = await findDeckPublishedTx({ provider: provider!, contract, tableId: table.tableId });

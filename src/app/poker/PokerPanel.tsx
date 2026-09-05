@@ -9,7 +9,7 @@
 // it. The fairness story is no longer "check the dealer's seed" -- it is
 // "every seat shuffled and proved it".
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { hash } from 'starknet';
 import Link from 'next/link';
 import styles from './poker.module.css';
@@ -70,7 +70,28 @@ export default function PokerPanel() {
   const [tableIdInput, setTableIdInput] = useState('TABLE_1');
   const [tableId, setTableId] = useState<string | null>(null);
   const [identity, setIdentity] = useState<SeatIdentity | null>(null);
-  const [deck, setDeck] = useState<Ciphertext[] | null>(null);
+  // The locally cached deck, KEYED BY TABLE.
+  //
+  // It used to be a bare `Ciphertext[] | null` that nothing reset when the
+  // table id changed. A tab that shuffled at one table and then opened
+  // another carried the first table's deck into the second: shuffle turn 0
+  // was immune (it starts from the canonical a_0, which is the same
+  // everywhere), but any later seat proved a shuffle of the WRONG deck
+  // against the new table's commitment. The circuit binds its input deck to
+  // that commitment, so the witness failed before a transaction existed --
+  // no revert, no error on chain, just a seat that could not shuffle.
+  //
+  // Scoped rather than cleared in an effect: an effect runs after render, so
+  // there is a window where the stale deck is still readable. Deriving it
+  // means there is no such window.
+  const [deckCache, setDeckCache] = useState<{ tableId: string; cards: Ciphertext[] } | null>(null);
+  const deck = deckCache && tableId && deckCache.tableId === tableId ? deckCache.cards : null;
+  const setDeck = useCallback(
+    (cards: Ciphertext[] | null) => {
+      setDeckCache(cards && tableId ? { tableId, cards } : null);
+    },
+    [tableId],
+  );
   const [error, setError] = useState<string | null>(null);
 
   const { state: table, refresh, loading, error: readError } = useTableState({
