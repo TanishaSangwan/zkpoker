@@ -113,6 +113,24 @@ async function status() {
     console.log(`                waiting on seat ${seatOnTurn}${seatOnTurn === MY_SEAT ? ' (me)' : ' (you)'}`);
   }
   console.log(`  deck          opened=${opened} chunks=${Number(chunk)}/${deckOpen.chunkCount(maxSeats)}`);
+  const sb = BigInt(await view.get_small_blind(TABLE));
+  const bb = BigInt(await view.get_big_blind(TABLE));
+  if (bb !== 0n) {
+    const buttonSet = await view.get_button_set(TABLE);
+    const posted = await view.get_blinds_posted(TABLE);
+    let draws = '';
+    if (!buttonSet) {
+      const bits = [];
+      for (let s2 = 0; s2 < maxSeats; s2++) {
+        if (BigInt(await view.get_seat_owner(TABLE, String(s2))) === 0n) continue;
+        bits.push(`${s2}:${await view.get_draw_revealed(TABLE, String(s2))
+          ? Number(await view.get_draw_card(TABLE, String(s2))) : '--'}`);
+      }
+      draws = `  draws ${bits.join(' ')}`;
+    }
+    console.log(`  blinds        ${sb}/${bb} button=${buttonSet ? Number(await view.get_button(TABLE)) : 'undrawn'}` +
+                ` posted=${posted} hand=${Number(await view.get_hand_number(TABLE)) + 1}${draws}`);
+  }
   console.log(`  betting       street=${Number(street)} turn=seat ${Number(actionTurn)} roundComplete=${roundDone}`);
   if (voided) console.log('  VOIDED');
   if (settled) console.log('  SETTLED');
@@ -131,6 +149,12 @@ async function finalDeck() {
   return d;
 }
 
+// The blind structure. Set once, before the shuffle -- the stakes are fixed
+// before a single card exists, so they cannot be tuned to a deal. 0/0 plays a
+// table without blinds, the way every table before this feature did.
+const SMALL_BLIND = process.env.SMALL_BLIND ?? '10';
+const BIG_BLIND = process.env.BIG_BLIND ?? '20';
+
 switch (cmd) {
   case 'create': {
     // BUY_IN of 0 makes betting meaningless, so it is a parameter. The
@@ -141,6 +165,7 @@ switch (cmd) {
     const BUY_IN = process.env.BUY_IN ?? '1000';
     const ALLOWANCE = process.env.ALLOWANCE ?? '1000000';
     await send('create_table', { table_id: TABLE, token: TOKEN, buy_in: BUY_IN, max_seats: 2 });
+    await send('set_blinds', { table_id: TABLE, small_blind: SMALL_BLIND, big_blind: BIG_BLIND });
     {
       const erc20 = new CallData([
         { type: 'function', name: 'approve', state_mutability: 'external',
@@ -187,6 +212,7 @@ switch (cmd) {
     const seats = process.env.SEATS ?? '2';
     const buyIn = process.env.BUY_IN ?? '1000';
     await send('create_table', { table_id: TABLE, token: TOKEN, buy_in: buyIn, max_seats: seats });
+    await send('set_blinds', { table_id: TABLE, small_blind: SMALL_BLIND, big_blind: BIG_BLIND });
     console.log(`\nhosting ${tableName}: ${seats} seats, buy-in ${buyIn}, no seat taken by the host.`);
     await status();
     break;
@@ -591,11 +617,25 @@ switch (cmd) {
         transport: liveOnly, tableId: TABLE, position: pos, h: c1, jointKey: Y, keys, shares,
         mySeat: MY_SEAT, mySecret: secret,
       });
+      const drawBase = 2 * maxSeats + 5;
+      const card = reveal.cardFromShare({ c1, c2 }, agg.share);
+      if (card === null) throw new Error('no card in the encoding');
+
+      if (pos >= drawBase) {
+        const seat = pos - drawBase;
+        if (await view.get_button_set(TABLE)) return;
+        try {
+          await send('reveal_draw_card', reveal.revealDrawArgs({
+            tableId: TABLE, seat, share: agg.share, card, proof: agg.proof,
+          }));
+          console.log(`  seat ${seat} drew ${grumpkin.cardToName(card)}`);
+        } catch { /* the other side submitted first */ }
+        return;
+      }
+
       if (pos < 2 * maxSeats) return; // a hole card: participation only
       const index = pos - 2 * maxSeats;
       if (await view.get_community_revealed(TABLE, index)) return;
-      const card = reveal.cardFromShare({ c1, c2 }, agg.share);
-      if (card === null) throw new Error('no card in the encoding');
       try {
         await send('reveal_community_card', reveal.revealCommunityArgs({
           tableId: TABLE, index, share: agg.share, card, proof: agg.proof,
@@ -632,6 +672,35 @@ switch (cmd) {
               });
               served.add(pos);
               console.log(`  served hole share for seat ${seat} position ${pos}`);
+            }
+          }
+          // The button draw, before anything else happens. Every seat's draw
+          // is public -- the table has to agree on who drew highest -- so this
+          // serves its OWN draw share too, which is the one position where
+          // that is right. Hole shares stay private for exactly the opposite
+          // reason.
+          if (!(await view.get_button_set(TABLE))) {
+            for (let seat = 0; seat < maxSeats; seat++) {
+              if (BigInt(await view.get_seat_owner(TABLE, String(seat))) === 0n) continue;
+              if (await view.get_draw_revealed(TABLE, String(seat))) continue;
+              const pos = 2 * maxSeats + 5 + seat;
+              if (!served.has(pos)) {
+                const { c1 } = await openedAt(pos);
+                const m = dealing.shareFor(secret, c1);
+                await transport.publish({
+                  tableId: TABLE, position: pos, from: MY_SEAT, kind: 'share', to: null,
+                  body: { d: { x: m.d.x.toString(), y: m.d.y.toString() }, s: m.s.toString(), e: m.e.toString() },
+                });
+                served.add(pos);
+                console.log(`  served draw share for seat ${seat} (position ${pos})`);
+              }
+              if (!busy.has(pos)) {
+                busy.add(pos);
+                runFor(pos).catch((err) => {
+                  busy.delete(pos);
+                  console.log(`  draw for seat ${seat} did not finish: ${String(err.message ?? err).slice(0, 70)}`);
+                });
+              }
             }
           }
           for (let i = 0; i < 5; i++) {

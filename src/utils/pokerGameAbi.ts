@@ -802,6 +802,218 @@ export const pokerGameAbi = [
       },
       {
         "type": "function",
+        "name": "set_blinds",
+        "inputs": [
+          {
+            "name": "table_id",
+            "type": "core::felt252"
+          },
+          {
+            "name": "small_blind",
+            "type": "core::integer::u128"
+          },
+          {
+            "name": "big_blind",
+            "type": "core::integer::u128"
+          }
+        ],
+        "outputs": [],
+        "state_mutability": "external"
+      },
+      {
+        "type": "function",
+        "name": "reveal_draw_card",
+        "inputs": [
+          {
+            "name": "table_id",
+            "type": "core::felt252"
+          },
+          {
+            "name": "seat",
+            "type": "core::felt252"
+          },
+          {
+            "name": "share_x",
+            "type": "core::integer::u256"
+          },
+          {
+            "name": "share_y",
+            "type": "core::integer::u256"
+          },
+          {
+            "name": "claimed_card",
+            "type": "core::integer::u8"
+          },
+          {
+            "name": "proof",
+            "type": "core::array::Span::<core::felt252>"
+          }
+        ],
+        "outputs": [],
+        "state_mutability": "external"
+      },
+      {
+        "type": "function",
+        "name": "post_blinds",
+        "inputs": [
+          {
+            "name": "table_id",
+            "type": "core::felt252"
+          }
+        ],
+        "outputs": [],
+        "state_mutability": "external"
+      },
+      {
+        "type": "function",
+        "name": "start_next_hand",
+        "inputs": [
+          {
+            "name": "table_id",
+            "type": "core::felt252"
+          }
+        ],
+        "outputs": [],
+        "state_mutability": "external"
+      },
+      {
+        "type": "function",
+        "name": "get_small_blind",
+        "inputs": [
+          {
+            "name": "table_id",
+            "type": "core::felt252"
+          }
+        ],
+        "outputs": [
+          {
+            "type": "core::integer::u128"
+          }
+        ],
+        "state_mutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "get_big_blind",
+        "inputs": [
+          {
+            "name": "table_id",
+            "type": "core::felt252"
+          }
+        ],
+        "outputs": [
+          {
+            "type": "core::integer::u128"
+          }
+        ],
+        "state_mutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "get_button",
+        "inputs": [
+          {
+            "name": "table_id",
+            "type": "core::felt252"
+          }
+        ],
+        "outputs": [
+          {
+            "type": "core::felt252"
+          }
+        ],
+        "state_mutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "get_button_set",
+        "inputs": [
+          {
+            "name": "table_id",
+            "type": "core::felt252"
+          }
+        ],
+        "outputs": [
+          {
+            "type": "core::bool"
+          }
+        ],
+        "state_mutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "get_draw_card",
+        "inputs": [
+          {
+            "name": "table_id",
+            "type": "core::felt252"
+          },
+          {
+            "name": "seat",
+            "type": "core::felt252"
+          }
+        ],
+        "outputs": [
+          {
+            "type": "core::integer::u8"
+          }
+        ],
+        "state_mutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "get_draw_revealed",
+        "inputs": [
+          {
+            "name": "table_id",
+            "type": "core::felt252"
+          },
+          {
+            "name": "seat",
+            "type": "core::felt252"
+          }
+        ],
+        "outputs": [
+          {
+            "type": "core::bool"
+          }
+        ],
+        "state_mutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "get_blinds_posted",
+        "inputs": [
+          {
+            "name": "table_id",
+            "type": "core::felt252"
+          }
+        ],
+        "outputs": [
+          {
+            "type": "core::bool"
+          }
+        ],
+        "state_mutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "get_hand_number",
+        "inputs": [
+          {
+            "name": "table_id",
+            "type": "core::felt252"
+          }
+        ],
+        "outputs": [
+          {
+            "type": "core::integer::u32"
+          }
+        ],
+        "state_mutability": "view"
+      },
+      {
+        "type": "function",
         "name": "claim_showdown_timeout",
         "inputs": [
           {
@@ -2348,6 +2560,153 @@ export const pokerGameAbi = [
   },
   {
     "type": "event",
+    "name": "zkpoker::PokerGame::BlindsSet",
+    "kind": "struct",
+    "members": [
+      {
+        "name": "table_id",
+        "type": "core::felt252",
+        "kind": "key"
+      },
+      {
+        "name": "small_blind",
+        "type": "core::integer::u128",
+        "kind": "data"
+      },
+      {
+        "name": "big_blind",
+        "type": "core::integer::u128",
+        "kind": "data"
+      }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "zkpoker::PokerGame::DrawCardRevealed",
+    "kind": "struct",
+    "members": [
+      {
+        "name": "table_id",
+        "type": "core::felt252",
+        "kind": "key"
+      },
+      {
+        "name": "seat",
+        "type": "core::felt252",
+        "kind": "data"
+      },
+      {
+        "name": "card",
+        "type": "core::integer::u8",
+        "kind": "data"
+      }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "zkpoker::PokerGame::ButtonSet",
+    "kind": "struct",
+    "members": [
+      {
+        "name": "table_id",
+        "type": "core::felt252",
+        "kind": "key"
+      },
+      {
+        "name": "seat",
+        "type": "core::felt252",
+        "kind": "data"
+      },
+      {
+        "name": "by_draw",
+        "type": "core::bool",
+        "kind": "data"
+      }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "zkpoker::PokerGame::BlindsPosted",
+    "kind": "struct",
+    "members": [
+      {
+        "name": "table_id",
+        "type": "core::felt252",
+        "kind": "key"
+      },
+      {
+        "name": "small_seat",
+        "type": "core::felt252",
+        "kind": "data"
+      },
+      {
+        "name": "big_seat",
+        "type": "core::felt252",
+        "kind": "data"
+      },
+      {
+        "name": "small",
+        "type": "core::integer::u128",
+        "kind": "data"
+      },
+      {
+        "name": "big",
+        "type": "core::integer::u128",
+        "kind": "data"
+      }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "zkpoker::PokerGame::BlindPosted",
+    "kind": "struct",
+    "members": [
+      {
+        "name": "table_id",
+        "type": "core::felt252",
+        "kind": "key"
+      },
+      {
+        "name": "seat",
+        "type": "core::felt252",
+        "kind": "data"
+      },
+      {
+        "name": "amount",
+        "type": "core::integer::u128",
+        "kind": "data"
+      },
+      {
+        "name": "is_big",
+        "type": "core::bool",
+        "kind": "data"
+      }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "zkpoker::PokerGame::HandStarted",
+    "kind": "struct",
+    "members": [
+      {
+        "name": "table_id",
+        "type": "core::felt252",
+        "kind": "key"
+      },
+      {
+        "name": "hand_number",
+        "type": "core::integer::u32",
+        "kind": "data"
+      },
+      {
+        "name": "button",
+        "type": "core::felt252",
+        "kind": "data"
+      }
+    ]
+  },
+  {
+    "type": "event",
     "name": "zkpoker::PokerGame::Event",
     "kind": "enum",
     "variants": [
@@ -2509,6 +2868,36 @@ export const pokerGameAbi = [
       {
         "name": "ActionTimedOut",
         "type": "zkpoker::PokerGame::ActionTimedOut",
+        "kind": "nested"
+      },
+      {
+        "name": "BlindsSet",
+        "type": "zkpoker::PokerGame::BlindsSet",
+        "kind": "nested"
+      },
+      {
+        "name": "DrawCardRevealed",
+        "type": "zkpoker::PokerGame::DrawCardRevealed",
+        "kind": "nested"
+      },
+      {
+        "name": "ButtonSet",
+        "type": "zkpoker::PokerGame::ButtonSet",
+        "kind": "nested"
+      },
+      {
+        "name": "BlindsPosted",
+        "type": "zkpoker::PokerGame::BlindsPosted",
+        "kind": "nested"
+      },
+      {
+        "name": "BlindPosted",
+        "type": "zkpoker::PokerGame::BlindPosted",
+        "kind": "nested"
+      },
+      {
+        "name": "HandStarted",
+        "type": "zkpoker::PokerGame::HandStarted",
         "kind": "nested"
       }
     ]

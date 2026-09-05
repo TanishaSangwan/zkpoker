@@ -21,11 +21,11 @@ import * as dealing from '@/lib/dealing';
 import { initProver as initDleqProver } from '@/lib/dleq';
 import {
   cardFromShare, commitHoleSharesArgs, loadHoleOpening, revealCommunityArgs,
-  revealHoleArgs, saveHoleOpening,
+  revealDrawArgs, revealHoleArgs, saveHoleOpening,
 } from '@/lib/reveal';
 import { BroadcastTransport, type Transport } from '@/lib/shares';
 import { RelayTransport, relayUrl } from '@/lib/relayTransport';
-import { communityPosition, seatHolePositions } from '@/lib/deck';
+import { communityPosition, drawPosition, seatHolePositions } from '@/lib/deck';
 
 type Props = {
   table: TableState;
@@ -342,8 +342,21 @@ export default function RevealPanel(p: Props) {
       if (table.street < streetFor(k)) continue;
       out.push({ pos: communityPosition(k, table.maxSeats), to: null });
     }
+    // The button draws. Note this includes THIS seat's own draw, which is the
+    // one place the "never serve your own position" rule does not apply --
+    // and deliberately so. A draw card is public by design: everyone must see
+    // every draw to agree on who has the highest. Withholding your own share
+    // here would not protect information, it would just stop the table
+    // deciding a button. Hole cards are the opposite, which is why they are
+    // the only positions the rule guards.
+    if (!table.buttonSet) {
+      for (const s of table.seats) {
+        if (!s.occupied || s.drawRevealed) continue;
+        out.push({ pos: drawPosition(s.seat, table.maxSeats), to: null });
+      }
+    }
     return out;
-  }, [table.seats, table.maxSeats, yourSeat, table.street]);
+  }, [table.seats, table.maxSeats, yourSeat, table.street, table.buttonSet]);
 
   // Serve every share owed, once each, as soon as the deck is open.
   useEffect(() => {
@@ -415,11 +428,29 @@ export default function RevealPanel(p: Props) {
       },
     });
     setBusy(null);
-    const community = pos >= 2 * L.table.maxSeats;
-    if (!community) return;
-    const index = pos - 2 * L.table.maxSeats;
+    const communityBase = 2 * L.table.maxSeats;
+    const drawBase = communityBase + 5;
     const card = cardFromShare({ c1, c2 }, agg.share);
-    if (card === null || L.table.community[index]?.revealed) return;
+    if (card === null) return;
+
+    if (pos >= drawBase) {
+      const seat = pos - drawBase;
+      if (L.table.seats[seat]?.drawRevealed || L.table.buttonSet) return;
+      try {
+        await L.send('reveal_draw_card', revealDrawArgs({
+          tableId: L.table.tableId, seat, share: agg.share, card, proof: agg.proof,
+        }));
+        say(`seat ${seat} drew ${cardToName(card)}`);
+        L.refresh();
+      } catch {
+        // Already revealed by whoever got there first -- the correct outcome.
+      }
+      return;
+    }
+
+    if (pos < communityBase) return; // a hole card: participation only
+    const index = pos - communityBase;
+    if (L.table.community[index]?.revealed) return;
     try {
       await L.send('reveal_community_card', revealCommunityArgs({
         tableId: L.table.tableId, index, share: agg.share, card, proof: agg.proof,
@@ -449,7 +480,10 @@ export default function RevealPanel(p: Props) {
       // `owed`: the contract refuses the reveal, but there is no reason to
       // contribute to it in the first place.
       const communityIndex = pos - 2 * latest.current.table.maxSeats;
-      if (communityIndex >= 0 && latest.current.table.street < streetFor(communityIndex)) return;
+      // Only indices 0..4 are board cards. Anything past them is a button
+      // draw, which has no street gate -- it is drawn before the hand starts.
+      if (communityIndex >= 0 && communityIndex < 5
+          && latest.current.table.street < streetFor(communityIndex)) return;
       joined.current.add(pos);
       void runFor(pos).catch((err) => {
         joined.current.delete(pos); // let a fresh run be joined
@@ -492,6 +526,60 @@ export default function RevealPanel(p: Props) {
       });
     }
   }, [autoServe, deckIsOpen, yourSeat, mySecretHex, table.street, table.community, table.jointKey, table.maxSeats, runFor, say]);
+
+  // ── draw for the button, then post the blinds ─────────────────────────
+  //
+  // Neither of these is a decision, so neither should be a button.
+  //
+  // The draw runs once per table, before the first hand: every seated player
+  // takes one card from the same committed deck and the highest takes the
+  // button. Every client starts a run for every seat's draw, including its
+  // own -- see `owed` for why that is safe here and nowhere else -- and
+  // whoever's transaction lands first wins the race, which is the correct
+  // outcome rather than an error.
+  const drawsDone = table.buttonSet;
+  useEffect(() => {
+    if (!autoServe || !deckIsOpen || yourSeat === null || !mySecretHex) return;
+    if (!table.jointKey || drawsDone) return;
+    for (const seat of table.seated) {
+      if (table.seats[seat]?.drawRevealed) continue;
+      const pos = drawPosition(seat, table.maxSeats);
+      if (joined.current.has(pos)) continue;
+      joined.current.add(pos);
+      say(`drawing for the button: seat ${seat}`);
+      void runFor(pos).catch((err) => {
+        joined.current.delete(pos);
+        say(`draw for seat ${seat} failed: ${String(err?.message ?? err).slice(0, 110)}`);
+      });
+    }
+  }, [autoServe, deckIsOpen, yourSeat, mySecretHex, drawsDone, table.seated, table.seats,
+      table.jointKey, table.maxSeats, runFor, say]);
+
+  // Posting is permissionless and takes no arguments, so any client can do it
+  // and it does not matter which. Latched per hand rather than forever: the
+  // button rotates and the blinds are posted again next hand.
+  const postedFor = useRef<number | null>(null);
+  useEffect(() => {
+    if (!autoServe || yourSeat === null || !account || !provider) return;
+    if (!table.buttonSet || table.blindsPosted || table.settled || table.voided) return;
+    if (table.bigBlind === 0n) return; // a table with no structure
+    if (postedFor.current === table.handNumber) return;
+    postedFor.current = table.handNumber;
+    say('button decided -- posting the blinds');
+    void (async () => {
+      try {
+        await send('post_blinds', { table_id: table.tableId });
+        refresh();
+      } catch (e) {
+        // Almost always "someone else already posted", which is fine. Anything
+        // else -- a player with no allowance, most likely -- has to be visible
+        // or the table just sits there.
+        postedFor.current = null;
+        say(`post_blinds: ${decodeError(e).slice(0, 110)}`);
+      }
+    })();
+  }, [autoServe, yourSeat, account, provider, table.buttonSet, table.blindsPosted,
+      table.settled, table.voided, table.bigBlind, table.handNumber, table.tableId, say]);
 
   // ── deal your own cards without being asked ───────────────────────────
   //

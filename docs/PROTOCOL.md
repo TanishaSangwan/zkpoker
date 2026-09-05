@@ -1098,6 +1098,109 @@ to be claimed early.
 
 ---
 
+### 9.9 Blinds and the button — the button is dealt, not appointed
+
+Texas hold'em needs a button. The button decides who posts the small blind and
+the big blind, who acts first pre-flop and who acts last afterwards, and
+position is worth real money — so *who holds it* is not a bookkeeping detail
+that can be handed out by whoever happens to be running the software.
+
+Every obvious cheap answer hands it to somebody:
+
+| rule | who it trusts |
+|---|---|
+| lowest seat index | whoever chose seat numbers, i.e. join order |
+| the table creator | the host — the exact role §1 exists to delete |
+| a keeper/script picks | the keeper operator |
+| hash of the block | the sequencer, at the margin |
+
+So the button is **drawn from the deck**. The deck carries one extra position
+per seat:
+
+```
+hole cards        0 .. 2·max_seats-1        seat s at 2s, 2s+1
+community    2·max_seats .. 2·max_seats+4
+button draws 2·max_seats+5 .. 3·max_seats+4  seat s at 2·max_seats+5+s
+```
+
+Those positions are ordinary deck positions in every sense that matters:
+
+* they are inside the deck each player re-randomises and proves with the
+  shuffle SNARK, so nobody can plant a card there;
+* `open_deck` covers them, so each one's ciphertext is bound to the Poseidon2
+  commitment by the opening proof;
+* reading one needs a Chaum–Pedersen decryption share from **every** player,
+  aggregated, verified by the same `verify_reveal_at` that community and hole
+  cards go through. A wrong claim gets `CARD_REVEAL_REJECTED`;
+* a withheld share on a draw position is accusable via `accuse_share` and
+  punishable by `claim_share_timeout`, like any other position.
+
+`reveal_draw_card` is permissionless and one-shot per seat. When the last
+seated player's draw lands, the contract picks the highest and writes `button`.
+
+**Rank first, suit as the tie-break.** Rank alone is not a total order — a deck
+holds four of every rank, so two players drawing a king is the common case at a
+full table, not an edge case. A tie there has no good answer: the contract
+would have to pick arbitrarily (which is the thing being avoided) or demand a
+re-draw (which costs a full extra n-of-n reveal round per seat). Card rooms
+break exactly this tie by suit for exactly this reason. Cards are distinct, so
+`(rank, suit)` is total and one pass always decides. `card = suit*13 + rank`,
+so comparing the raw index after rank is comparing suit.
+
+**Then it cycles.** The draw picks the *first* button only. `start_next_hand`
+— permissionless, callable once the previous hand has settled — moves the
+button one occupied seat left, bumps `hand_number` and resets the hand.
+Re-drawing every hand would cost an extra reveal round per seat per hand and
+is not how poker works anyway.
+
+**Posting.** `post_blinds` is permissionless and takes no argument but the
+table, so it confers nothing: the seats are computed from the button, and the
+money comes out of the allowance each player granted at `join_table`. Small
+blind is the seat left of the button, big blind the next — except heads-up,
+where the button posts the small blind and acts first pre-flop. Neither poster
+is marked as having **acted**: posting is forced, not a decision, which is what
+leaves the big blind its option to raise when the action comes round.
+
+`set_blinds` is dealer-only and refused once the shuffle has started, so the
+stakes are fixed before a single card exists and cannot be tuned to a deal.
+`big_blind > small_blind` or both zero; zero means a table with no structure,
+which is every table that predates this and still plays.
+
+**Two knock-on effects worth recording.**
+
+*The seat ceiling dropped.* `MAX_TABLE_SEATS` was 23, chosen so
+`2·max+5 ≤ 52`. With a draw per seat the bound is `3·max+5 ≤ 52`, so it is now
+**15**. A 16-seat table could not deal itself a button.
+
+*The contract crossed Starknet's CASM ceiling.* Adding the blind machinery took
+`PokerGame` to 88,165 felts against a limit of 81,920 — it compiled and could
+not have been declared. Fixed by setting `inlining-strategy = "avoid"` in
+`cairo/Scarb.toml`, which trades a little runtime gas for a large drop in code
+size; 65,669 felts now, roughly 20% headroom. Worth knowing that this ceiling
+is close.
+
+Two defects were found while building it, both fixed:
+
+* `position_revealed` mapped any position past the hole block onto
+  `community_revealed`, so a draw position folded onto community indices 5+
+  which are never set — a share withheld on a draw could be accused forever,
+  even after the card was shown.
+* accusation state (`accusation_deadline`, `share_posted`, `share_x/y`) is
+  keyed by seat *and* deck position, so a multi-hand table would have carried
+  hand N−1's pending accusations into hand N, where `claim_share_timeout`
+  could forfeit a stake for a share nobody now owed. Re-keyed by
+  `hand_number`. Clearing it by loop was not an option: 15 seats × 50
+  positions is more storage writes than the hand itself.
+
+Covered by `cairo/tests/test_blinds.cairo` (25 tests): the draw and its
+tie-break in both reveal orders, rank beating suit, an empty seat refused, a
+bad proof refused, heads-up versus three-handed blind seats, the big blind's
+option surviving a call round, betting refused before the blinds are up, an
+unstructured table still playing, the button rotating, and the next hand
+actually dealing from a clean slate.
+
+---
+
 ### 9.4 The SRS is a third-party runtime dependency
 
 Worth stating because it is invisible until it fails: bb.js does not ship the

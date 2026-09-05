@@ -391,17 +391,31 @@ function CreateTable(p: any) {
   );
   const [buyIn, setBuyIn] = useState('1000');
   const [maxSeats, setMaxSeats] = useState('3');
+  // A conventional 1/2 of the buy-in's hundredth, i.e. a 50-big-blind stack.
+  // Editable, because the right stakes for a table are the table's business.
+  const [smallBlind, setSmallBlind] = useState('10');
+  const [bigBlind, setBigBlind] = useState('20');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   const create = async () => {
     setBusy(true); setErr(null);
     try {
-      await executeAndWait(account, provider, [
+      // One transaction, two calls. set_blinds has to land before the shuffle
+      // starts -- the stakes are fixed before a single card exists, so they
+      // cannot be tuned to a deal -- and bundling it with create_table means
+      // there is no window in which a table exists without its structure.
+      const calls = [
         pgCall(contract, 'create_table', {
           table_id: tableId, token, buy_in: buyIn, max_seats: maxSeats,
         }),
-      ]);
+      ];
+      if (BigInt(bigBlind || '0') > 0n) {
+        calls.push(pgCall(contract, 'set_blinds', {
+          table_id: tableId, small_blind: smallBlind, big_blind: bigBlind,
+        }));
+      }
+      await executeAndWait(account, provider, calls);
       refresh();
     } catch (e) { setErr(decodeError(e)); } finally { setBusy(false); }
   };
@@ -410,12 +424,14 @@ function CreateTable(p: any) {
     <div className={styles.section}>
       <div className={styles.sectionHead}>
         <div className={styles.sectionTitle}>No table {shortHex(tableId)} yet</div>
-        <div className={styles.sectionHint}>Create it. You become the dealer — which opens the shuffle and advances streets, and nothing else.</div>
+        <div className={styles.sectionHint}>Create it. You become the host — which opens the shuffle and sets the stakes, and nothing else. The button is drawn from the deck, not handed out.</div>
       </div>
       <div className={styles.grid3}>
         <Field label="buy-in token" value={token} onChange={setToken} />
         <Field label="buy-in" value={buyIn} onChange={setBuyIn} />
         <Field label="max seats" value={maxSeats} onChange={setMaxSeats} />
+        <Field label="small blind" value={smallBlind} onChange={setSmallBlind} />
+        <Field label="big blind" value={bigBlind} onChange={setBigBlind} />
       </div>
       <div className={styles.actionsRow}>
         <button className={uni.btn} disabled={busy || !account} onClick={create}>
@@ -423,7 +439,9 @@ function CreateTable(p: any) {
         </button>
         <span className={styles.fieldHint}>
           Every seat shuffles, so a bigger table means a longer chain: k = n proofs before the
-          first card, roughly {5} s each in this browser.
+          first card, roughly {5} s each in this browser. The button is not appointed: once the
+          deck opens every seat draws one card from it and the highest takes it, then it moves
+          one seat each hand. Set both blinds to 0 for a table without a structure.
         </span>
       </div>
       {err ? <pre className={uni.receiptNote}>{err}</pre> : null}

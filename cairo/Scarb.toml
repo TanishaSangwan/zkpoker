@@ -41,3 +41,10 @@ testing = []
 # version tried, so it fell back to `cargo fetch` with no Rust toolchain
 # installed. Not an issue on this machine (Linux, prebuilt plugin available)
 # — confirmed by re-running `scarb build` after adding this.
+
+# The contract crossed Starknet's 81920-felt CASM ceiling once the blind
+# structure landed. `avoid` inlines only trivial bodies, which trades a
+# little runtime gas for a large drop in code size -- the right side of that
+# trade when the alternative is a contract that cannot be declared at all.
+[profile.dev.cairo]
+inlining-strategy = "avoid"

@@ -28,6 +28,9 @@ export type SeatState = {
   holeCommitted: [boolean, boolean];
   holeRevealed: [boolean, boolean];
   holeCards: [number, number];
+  /** The high-card draw that decides the first button. */
+  drawRevealed: boolean;
+  drawCard: number;
 };
 
 export type TableState = {
@@ -62,6 +65,14 @@ export type TableState = {
   showdownStarted: boolean;
   showdownTurn: number;
   showdownDeadline: number;
+
+  smallBlind: bigint;
+  bigBlind: bigint;
+  /** The dealer button. Meaningless until `buttonSet`. */
+  button: number;
+  buttonSet: boolean;
+  blindsPosted: boolean;
+  handNumber: number;
 
   seats: SeatState[];
   community: { card: number; revealed: boolean }[];
@@ -128,6 +139,11 @@ export function useTableState(args: {
         c.get_showdown_deadline(tableId),
       ]);
 
+      const [smallBlind, bigBlind, button, buttonSet, blindsPosted, handNumber] = await Promise.all([
+        c.get_small_blind(tableId), c.get_big_blind(tableId), c.get_button(tableId),
+        c.get_button_set(tableId), c.get_blinds_posted(tableId), c.get_hand_number(tableId),
+      ]);
+
       const n = num(maxSeats);
       const seats: SeatState[] = await Promise.all(
         Array.from({ length: n }, async (_, seat) => {
@@ -141,6 +157,9 @@ export function useTableState(args: {
           const [streetContributed, toCall] = occupied
             ? await Promise.all([c.get_street_contributed(tableId, s), c.get_amount_to_call(tableId, s)])
             : [0n, 0n];
+          const [drawRevealed, drawCard] = occupied
+            ? await Promise.all([c.get_draw_revealed(tableId, s), c.get_draw_card(tableId, s)])
+            : [false, 0];
           const [hc0, hc1, hr0, hr1, com0, com1] = occupied
             ? await Promise.all([
                 c.get_hole_card(tableId, s, 0), c.get_hole_card(tableId, s, 1),
@@ -158,6 +177,7 @@ export function useTableState(args: {
             holeCommitted: [BigInt(com0 ?? 0) !== 0n, BigInt(com1 ?? 0) !== 0n],
             holeRevealed: [!!hr0, !!hr1],
             holeCards: [num(hc0), num(hc1)],
+            drawRevealed: !!drawRevealed, drawCard: num(drawCard),
           } satisfies SeatState;
         }),
       );
@@ -192,6 +212,9 @@ export function useTableState(args: {
         showdownStarted: !!showdownStarted,
         showdownTurn: Number(showdownTurn ?? 0),
         showdownDeadline: num(showdownDeadline),
+        smallBlind: BigInt(smallBlind ?? 0), bigBlind: BigInt(bigBlind ?? 0),
+        button: Number(button ?? 0), buttonSet: !!buttonSet,
+        blindsPosted: !!blindsPosted, handNumber: num(handNumber),
         seats, community, seated,
         phase: 'seating',
       };
@@ -244,6 +267,8 @@ function emptyTable(tableId: string): TableState {
     deckOpened: false, deckOpenChunk: 0, publishedDeckHash: 0n, publishedDeckSeat: 0,
     actionTurn: 0, actionDeadline: 0,
     roundComplete: false, showdownStarted: false, showdownTurn: 0, showdownDeadline: 0,
+    smallBlind: 0n, bigBlind: 0n, button: 0, buttonSet: false, blindsPosted: false,
+    handNumber: 0,
     seats: [], community: [], seated: [], phase: 'no-table',
   };
 }

@@ -31,9 +31,15 @@ function seatStyle(index: number, total: number): React.CSSProperties {
 }
 
 function Seat({
-  seat, total, you, onTurn, dealer, known,
+  seat, total, you, onTurn, dealer, button, blind, drawing, known,
 }: {
   seat: SeatState; total: number; you: boolean; onTurn: boolean; dealer: boolean;
+  /** Holds the dealer button -- who posts which blind is measured from here. */
+  button: boolean;
+  /** This seat's forced bet this hand, if any. */
+  blind: 'SB' | 'BB' | null;
+  /** The table is still drawing for the button, so show the draw cards. */
+  drawing: boolean;
   /** Cards this client knows locally for THIS seat -- only ever its own. */
   known?: (number | null)[];
 }) {
@@ -52,11 +58,27 @@ function Seat({
           <div className={styles.seatAddr}>{you ? 'you' : `${seat.owner.slice(0, 6)}…${seat.owner.slice(-4)}`}</div>
           <div className={styles.seatChips}>{seat.contributed.toString()}</div>
           <div className={styles.seatBadges}>
-            {dealer ? <span className={styles.seatBadge} style={{ background: '#7a5cff' }}>D</span> : null}
+            {/* Two different things that both used to be "D". The creator
+                runs begin_shuffle; the button decides the blinds and moves
+                every hand. Conflating them made the blinds look arbitrary. */}
+            {dealer ? <span className={styles.seatBadge} style={{ background: '#7a5cff' }} title="created the table">host</span> : null}
+            {button ? <span className={styles.seatBadge} style={{ background: '#fff', color: '#222' }} title="dealer button">BTN</span> : null}
+            {blind ? <span className={styles.seatBadge} style={{ background: '#2d8a4e' }} title={blind === 'SB' ? 'small blind' : 'big blind'}>{blind}</span> : null}
             {seat.folded ? <span className={styles.seatBadge} style={{ background: '#8a8a8a' }}>folded</span> : null}
             {!seat.keyRegistered ? <span className={styles.seatBadge} style={{ background: '#c0392b' }}>no key</span> : null}
             {onTurn && !seat.folded ? <span className={styles.seatBadge} style={{ background: '#f5c542', color: '#222' }}>turn</span> : null}
           </div>
+          {/* The button draw. One card from the same committed deck as
+              everything else, face up because the whole table has to agree
+              on who drew highest. Shown only while it decides something. */}
+          {drawing ? (
+            <div className={styles.feltCards} style={{ marginTop: 4 }}>
+              {seat.drawRevealed
+                ? <Card card={seat.drawCard} />
+                : <div className={styles.cardBack} style={{ opacity: 0.35 }} title="drawing for the button" />}
+            </div>
+          ) : null}
+
           {/* Hole cards.
               Face-up in two cases and no others: the card has been REVEALED
               on-chain, so everyone can see it, or it is THIS client's own seat
@@ -100,13 +122,41 @@ export default function Felt({
 }) {
   const dealerSeat = table.seats.find((s) => s.owner.toLowerCase() === table.dealer.toLowerCase())?.seat ?? -1;
 
+  // Who posts what, computed the same way the contract does: the seat left of
+  // the button posts the small blind and the next one the big -- except
+  // heads-up, where the button IS the small blind. Rendered rather than read
+  // back because the contract stores contributions, not roles.
+  const nextOccupied = (from: number) => {
+    for (let step = 1; step <= table.maxSeats; step++) {
+      const cand = (from + step) % table.maxSeats;
+      if (table.seats[cand]?.occupied) return cand;
+    }
+    return from;
+  };
+  let smallSeat = -1, bigSeat = -1;
+  if (table.buttonSet && table.bigBlind > 0n) {
+    const next = nextOccupied(table.button);
+    if (table.seated.length <= 2) { smallSeat = table.button; bigSeat = next; }
+    else { smallSeat = next; bigSeat = nextOccupied(next); }
+  }
+  const drawing = table.deckOpened && !table.buttonSet;
+
   return (
     <div className={styles.felt}>
       <div className={styles.feltCenter}>
         <div className={styles.feltPot}>pot {table.pot.toString()}</div>
         <div className={styles.feltStreet}>
-          {table.voided ? 'voided' : table.settled ? 'settled' : STREET_NAMES[table.street] ?? `street ${table.street}`}
+          {table.voided ? 'voided'
+            : table.settled ? 'settled'
+            : drawing ? 'drawing for the button'
+            : STREET_NAMES[table.street] ?? `street ${table.street}`}
         </div>
+        {table.bigBlind > 0n ? (
+          <div className={styles.feltStreet} style={{ opacity: 0.7 }}>
+            blinds {table.smallBlind.toString()}/{table.bigBlind.toString()}
+            {table.handNumber > 0 ? ` · hand ${table.handNumber + 1}` : ''}
+          </div>
+        ) : null}
         <div className={styles.feltCards}>
           {table.community.map((c, i) =>
             c.revealed ? <Card key={i} card={c.card} /> : <div key={i} className={styles.cardBack} />,
@@ -122,6 +172,9 @@ export default function Felt({
           you={yourSeat === s.seat}
           onTurn={!table.roundComplete && table.actionTurn === s.seat && table.phase === 'betting'}
           dealer={s.seat === dealerSeat}
+          button={table.buttonSet && s.seat === table.button}
+          blind={s.seat === smallSeat ? 'SB' : s.seat === bigSeat ? 'BB' : null}
+          drawing={drawing}
           known={yourSeat === s.seat ? yourCards : undefined}
         />
       ))}

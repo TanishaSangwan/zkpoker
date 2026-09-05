@@ -7,6 +7,14 @@
 //   begin_shuffle   freezes the participant list and pins the joint key
 //                   (which the adapter VERIFIES, so it cannot be faked)
 //   advance_street  moves a completed betting round on
+//   post_blinds     puts up the forced bets once the button is drawn
+//   start_next_hand rotates the button and opens the next hand
+//
+// The last two are permissionless and take no argument but the table, so they
+// confer nothing either. Note what is NOT here: the keeper does not decide who
+// gets the button. That comes out of the deck -- every seat draws a card and
+// the highest wins -- because a button a keeper handed out would be a keeper
+// you had to trust about position, which is worth real money in poker.
 //
 // Everything else a dealer traditionally does -- shuffling, dealing, deciding
 // who won, paying out -- is either done by the players themselves with proofs,
@@ -28,6 +36,7 @@
 //   node scripts/keeper.mjs <TABLE_ID>
 //   ACCOUNT=devnet1 node scripts/keeper.mjs <TABLE_ID>   # any account
 //   OPEN_DECK=0 node scripts/keeper.mjs <TABLE_ID>       # skip deck opening
+//   HANDS=1 node scripts/keeper.mjs <TABLE_ID>           # stop after one hand
 //
 // begin_shuffle IS automated, but only once the table is FULL.
 //
@@ -57,6 +66,9 @@ const ACCOUNT = process.env.ACCOUNT ?? 'devnet0';
 const POLL_MS = Number(process.env.POLL_MS ?? 4000);
 const DO_OPEN = process.env.OPEN_DECK !== '0';
 const DO_BEGIN = process.env.BEGIN !== '0';
+// How many hands to keep before stopping. 0 means "keep going": the button
+// rotates and the table plays on, which is what a cash game is.
+const HANDS = Number(process.env.HANDS ?? 0);
 
 const tableName = process.argv[2];
 if (!tableName) { console.error('usage: node scripts/keeper.mjs <TABLE_ID>'); process.exit(1); }
@@ -138,7 +150,28 @@ for (;;) {
   try {
     if (BigInt(await view.get_table_dealer(TABLE)) === 0n) { note('waiting for the table to exist'); }
     else if (await view.get_table_voided(TABLE)) { console.log('  table voided -- nothing to keep'); break; }
-    else if (await view.get_table_settled(TABLE)) { console.log('  table settled -- done'); break; }
+    else if (await view.get_table_settled(TABLE)) {
+      // A settled hand is not a finished table. start_next_hand rotates the
+      // button one seat, wipes the hand and leaves the seats, the keys and the
+      // stakes alone -- so the next hand is a fresh deal among the same
+      // players, with the blinds one seat further round.
+      //
+      // No second draw: the draw picks the FIRST button only. Re-drawing every
+      // hand would cost an extra n-of-n reveal round per seat per hand and
+      // would not be poker anyway.
+      const played = Number(await view.get_hand_number(TABLE)) + 1;
+      if (!(await view.get_button_set(TABLE))) {
+        console.log('  table settled and no button was ever drawn -- done');
+        break;
+      }
+      if (HANDS && played >= HANDS) {
+        console.log(`  ${played} hand(s) played -- done`);
+        break;
+      }
+      console.log(`  hand ${played} settled -- rotating the button`);
+      console.log(`  start_next_hand ok  ${await send('start_next_hand', { table_id: TABLE })}`);
+      lastNote = '';
+    }
     else {
       const maxSeats = Number(await view.get_table_max_seats(TABLE));
       const started = await view.get_shuffle_started(TABLE);
@@ -194,6 +227,23 @@ for (;;) {
         lastNote = '';
       } else if (!opened) {
         note('deck not opened (OPEN_DECK=0)');
+      } else if (!(await view.get_button_set(TABLE))) {
+        // The draw itself needs a decryption share from every player, so the
+        // keeper structurally cannot do it -- it holds no key share. Players'
+        // clients run it between themselves; this only waits.
+        let drawn = 0, seated = 0;
+        for (let seat = 0; seat < maxSeats; seat++) {
+          if (BigInt(await view.get_seat_owner(TABLE, String(seat))) === 0n) continue;
+          seated += 1;
+          if (await view.get_draw_revealed(TABLE, String(seat))) drawn += 1;
+        }
+        note(`drawing for the button: ${drawn}/${seated} cards turned`);
+      } else if (BigInt(await view.get_big_blind(TABLE)) !== 0n
+                 && !(await view.get_blinds_posted(TABLE))) {
+        const button = Number(await view.get_button(TABLE));
+        console.log(`  button is seat ${button} -- posting the blinds`);
+        console.log(`  post_blinds ok  ${await send('post_blinds', { table_id: TABLE })}`);
+        lastNote = '';
       } else if (Number(await view.get_table_street(TABLE)) === 4) {
         // Settle once every seat still in the hand has either shown or been
         // given the chance to. settle_from_reveals takes no input beyond the

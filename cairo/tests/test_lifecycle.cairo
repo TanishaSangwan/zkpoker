@@ -94,12 +94,32 @@ fn test_create_table_zero_max_seats_rejected() {
 #[test]
 #[should_panic(expected: 'BAD_MAX_SEATS')]
 fn test_create_table_max_seats_too_large_rejected() {
-    // Regression: round 8 — max_seats must leave room for 5 community
-    // cards after every seat's 2 hole cards in a 52-card deck
-    // (2*max_seats+5 <= 52, i.e. max_seats <= 23); 24 doesn't fit.
+    // Regression: round 8 — max_seats must leave room for the 5 community
+    // cards after every seat's 2 hole cards in a 52-card deck. The blind
+    // structure added a third position per seat, the high-card draw that
+    // picks the first button, so the bound tightened from 2*max+5 <= 52
+    // (max 23) to 3*max+5 <= 52 (max 15). 24 has never fitted.
     let game = deploy_pokergame(DEALER());
     start_cheat_caller_address(game.contract_address, DEALER());
     game.create_table(TABLE_1, DEALER(), 0, 24);
+}
+
+#[test]
+#[should_panic(expected: 'BAD_MAX_SEATS')]
+fn test_create_table_sixteen_seats_no_longer_fits() {
+    // 16 seats would need 3*16 + 5 = 53 cards. One short.
+    let game = deploy_pokergame(DEALER());
+    start_cheat_caller_address(game.contract_address, DEALER());
+    game.create_table(TABLE_1, DEALER(), 0, 16);
+}
+
+#[test]
+fn test_create_table_fifteen_seats_still_fits() {
+    // 3*15 + 5 = 50 <= 52.
+    let game = deploy_pokergame(DEALER());
+    start_cheat_caller_address(game.contract_address, DEALER());
+    game.create_table(TABLE_1, DEALER(), 0, 15);
+    assert(game.get_table_max_seats(TABLE_1) == 15, 'a full table must fit');
 }
 
 // ─── join_table ──────────────────────────────────────────────────────────

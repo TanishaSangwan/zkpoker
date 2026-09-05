@@ -57,6 +57,34 @@ export function revealCommunityArgs(args: {
   };
 }
 
+/**
+ * Calldata for `reveal_draw_card`.
+ *
+ * Identical in shape to a community reveal, and that is the point: the card
+ * that decides who posts which blind comes out of the same committed deck,
+ * behind the same n-of-n decryption, checked by the same DLEQ. The only
+ * difference is which storage slot the contract writes.
+ */
+export function revealDrawArgs(args: {
+  tableId: string;
+  seat: number;
+  share: Point;
+  card: number;
+  proof: DleqProof;
+}) {
+  if (args.share === null) throw new Error('reveal: the combined share is the identity');
+  const [sxLow, sxHigh] = u256Parts(args.share.x);
+  const [syLow, syHigh] = u256Parts(args.share.y);
+  return {
+    table_id: args.tableId,
+    seat: args.seat,
+    share_x: { low: sxLow, high: sxHigh },
+    share_y: { low: syLow, high: syHigh },
+    claimed_card: args.card,
+    proof: args.proof.proof.map((v) => '0x' + v.toString(16)),
+  };
+}
+
 // ─── hole cards: commit at dealing, open at showdown ────────────────────
 
 /**

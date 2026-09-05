@@ -189,7 +189,8 @@ export function shuffleCircuitInputs(args: {
 //
 // PokerGame's canonical order, the one open_deck and the reveal path both
 // assume: seat s's hole cards at 2s and 2s+1, community card k at
-// 2*max_seats + k. The contract knows this convention, so it is never sent.
+// 2*max_seats + k, and seat s's high-card draw at 2*max_seats + 5 + s. The
+// contract knows this convention, so it is never sent.
 
 export function seatHolePositions(seat: number): [number, number] {
   return [2 * seat, 2 * seat + 1];
@@ -199,10 +200,23 @@ export function communityPosition(k: number, maxSeats: number): number {
   return 2 * maxSeats + k;
 }
 
+/**
+ * Where seat `s` draws for the button.
+ *
+ * It is an ordinary deck position on purpose. The draw that decides who
+ * posts which blind comes out of the same committed, shuffle-proven deck as
+ * every other card and needs the same n-of-n decryption -- so the button is
+ * decided by a card nobody could choose, see early, or fake.
+ */
+export function drawPosition(seat: number, maxSeats: number): number {
+  return 2 * maxSeats + 5 + seat;
+}
+
 export function inPlayPositions(maxSeats: number): number[] {
   const holes = Array.from({ length: 2 * maxSeats }, (_, i) => i);
   const community = Array.from({ length: 5 }, (_, k) => 2 * maxSeats + k);
-  return [...holes, ...community];
+  const draws = Array.from({ length: maxSeats }, (_, s) => 2 * maxSeats + 5 + s);
+  return [...holes, ...community, ...draws];
 }
 
 export { DECK_SIZE, G, N };

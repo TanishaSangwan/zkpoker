@@ -17,7 +17,8 @@
 //
 // ── Chunking ────────────────────────────────────────────────────────────
 // The circuit's K is fixed at 5, so the verifier's public-input count is
-// fixed too. A table has 2*max_seats + 5 in-play positions, which is not a
+// fixed too. A table has 3*max_seats + 5 in-play positions -- two hole cards
+// and one button draw per seat, plus the board -- which is not a
 // multiple of 5, so the contract takes it in chunks of 5 and PADS the final
 // chunk by repeating the last real position. This module reproduces that
 // padding exactly; anything else produces a proof whose public inputs do not
@@ -36,11 +37,12 @@ const WASM_PATH = '/circuits/wasm/barretenberg.wasm.gz';
 export function inPlayPositions(maxSeats: number): number[] {
   const holes = Array.from({ length: 2 * maxSeats }, (_, i) => i);
   const community = Array.from({ length: 5 }, (_, k) => 2 * maxSeats + k);
-  return [...holes, ...community];
+  const draws = Array.from({ length: maxSeats }, (_, s) => 2 * maxSeats + 5 + s);
+  return [...holes, ...community, ...draws];
 }
 
 export function chunkCount(maxSeats: number): number {
-  const total = 2 * maxSeats + 5;
+  const total = 3 * maxSeats + 5;
   return Math.ceil(total / DECK_OPEN_K);
 }
 
@@ -52,7 +54,7 @@ export function chunkCount(maxSeats: number): number {
  * like any other slot and the contract rewrites an identical value.
  */
 export function chunkPositions(maxSeats: number, chunk: number): number[] {
-  const total = 2 * maxSeats + 5;
+  const total = 3 * maxSeats + 5;
   return Array.from({ length: DECK_OPEN_K }, (_, i) => {
     const raw = DECK_OPEN_K * chunk + i;
     return raw < total ? raw : total - 1;
