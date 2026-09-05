@@ -133,7 +133,28 @@ async function finalDeck() {
 
 switch (cmd) {
   case 'create': {
-    await send('create_table', { table_id: TABLE, token: TOKEN, buy_in: 0, max_seats: 2 });
+    // BUY_IN of 0 makes betting meaningless, so it is a parameter. The
+    // allowance covers the buy-in plus room to bet, because join_table
+    // escrows and bet() moves tokens with transfer_from -- without an approval
+    // both revert inside the ERC20 with an error that says nothing about
+    // poker.
+    const BUY_IN = process.env.BUY_IN ?? '1000';
+    const ALLOWANCE = process.env.ALLOWANCE ?? '1000000';
+    await send('create_table', { table_id: TABLE, token: TOKEN, buy_in: BUY_IN, max_seats: 2 });
+    {
+      const erc20 = new CallData([
+        { type: 'function', name: 'approve', state_mutability: 'external',
+          inputs: [{ name: 'spender', type: 'core::starknet::contract_address::ContractAddress' },
+                   { name: 'amount', type: 'core::integer::u256' }],
+          outputs: [{ type: 'core::bool' }] },
+      ]);
+      const { transaction_hash } = await me.execute([{
+        contractAddress: TOKEN, entrypoint: 'approve',
+        calldata: erc20.compile('approve', { spender: GAME, amount: { low: ALLOWANCE, high: 0 } }),
+      }]);
+      await provider.waitForTransaction(transaction_hash, { retries: 200, retryInterval: 500 });
+      console.log(`  approve ok  ${transaction_hash}  (${ALLOWANCE} to PokerGame)`);
+    }
     await send('join_table', { table_id: TABLE, seat: String(MY_SEAT), hole_card_note_id: String(200 + MY_SEAT) });
     const key = schnorr.generateKey();
     await schnorr.initProver();
@@ -485,6 +506,13 @@ switch (cmd) {
   }
   case 'settle': await send('settle_from_reveals', { table_id: TABLE }); break;
   case 'check': await send('check', { table_id: TABLE, seat: String(MY_SEAT) }); break;
+  case 'bet': {
+    const amount = process.argv[4];
+    if (!amount) throw new Error('usage: duel.mjs bet <TABLE> <amount>');
+    await send('bet', { table_id: TABLE, seat: String(MY_SEAT), amount });
+    break;
+  }
+  case 'fold': await send('fold', { table_id: TABLE, seat: String(MY_SEAT) }); break;
   case 'street': await send('advance_street', { table_id: TABLE }); break;
   default: console.error(`unknown command: ${cmd}`); process.exit(1);
 }

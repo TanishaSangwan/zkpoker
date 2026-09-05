@@ -45,7 +45,7 @@
 use snforge_std::{
     EventSpyAssertionsTrait, spy_events, start_cheat_caller_address, stop_cheat_caller_address,
 };
-use zkpoker::{IPokerGameDispatcherTrait, PokerGame};
+use zkpoker::{IPokerGameDispatcherTrait, IPokerGameSafeDispatcherTrait, PokerGame};
 use super::helpers::{
     ALICE, BOB, CAROL, DEALER, MALLORY, NOTE_A, NOTE_B, NOTE_C, POOL, SEAT_0, SEAT_1, SEAT_2, TABLE_1,
     THREE_SEATS, deploy_mock_token, deploy_pokergame, fund_and_approve, seed_hash_of, setup_table_with_bets,
@@ -192,12 +192,67 @@ fn test_advance_street_success() {
         );
 }
 
+// advance_street is PERMISSIONLESS. This test used to assert the opposite.
+//
+// The change is deliberate and the reasoning is in lib.cairo: the call takes
+// only a table_id, its precondition is computed on-chain, and its effect is
+// fixed, so a caller chooses nothing. Restricting it bought no safety and cost
+// real liveness -- a dealer who walked away after a completed round stalled the
+// hand with no timeout covering it, because at that point no player owes
+// anything (PROTOCOL.md §8.0).
+//
+// What must still hold is that being allowed to call it does not let anyone
+// advance a round that is NOT complete. That is the next test.
 #[test]
-#[should_panic(expected: 'NOT_DEALER')]
-fn test_advance_street_unauthorized_rejected() {
+fn test_anyone_may_advance_a_completed_round() {
     let (game, _token, _admin, _token_addr) = setup_table_with_bets(FUND, BET);
+    // MALLORY is neither the dealer nor a seat at this table.
     start_cheat_caller_address(game.contract_address, MALLORY());
     game.advance_street(TABLE_1);
+    stop_cheat_caller_address(game.contract_address);
+    assert(game.get_table_street(TABLE_1) == 1, 'a bystander advanced it');
+}
+
+#[test]
+#[feature("safe_dispatcher")]
+fn test_nobody_may_advance_an_incomplete_round() {
+    // The guard that actually matters now. setup_table_with_bets leaves the
+    // round matched; one more bet reopens the action, and from there NOBODY --
+    // dealer, seat or bystander -- may advance.
+    let (game, _token, _admin, _token_addr) = setup_table_with_bets(FUND, BET);
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.bet(TABLE_1, SEAT_0, BET);
+    stop_cheat_caller_address(game.contract_address);
+
+    let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
+
+    // A bystander, the dealer, and a seated player -- all refused, for the
+    // same reason and with the same error.
+    start_cheat_caller_address(game.contract_address, MALLORY());
+    let by_stranger = safe.advance_street(TABLE_1);
+    stop_cheat_caller_address(game.contract_address);
+    match by_stranger {
+        Result::Ok(_) => panic!("a stranger advanced an incomplete round"),
+        Result::Err(p) => assert(*p.at(0) == 'BETTING_ROUND_INCOMPLETE', 'stranger: wrong error'),
+    }
+
+    start_cheat_caller_address(game.contract_address, DEALER());
+    let by_dealer = safe.advance_street(TABLE_1);
+    stop_cheat_caller_address(game.contract_address);
+    match by_dealer {
+        Result::Ok(_) => panic!("the dealer advanced an incomplete round"),
+        Result::Err(p) => assert(*p.at(0) == 'BETTING_ROUND_INCOMPLETE', 'dealer: wrong error'),
+    }
+
+    start_cheat_caller_address(game.contract_address, BOB());
+    let by_seat = safe.advance_street(TABLE_1);
+    stop_cheat_caller_address(game.contract_address);
+    match by_seat {
+        Result::Ok(_) => panic!("a seat advanced an incomplete round"),
+        Result::Err(p) => assert(*p.at(0) == 'BETTING_ROUND_INCOMPLETE', 'seat: wrong error'),
+    }
+
+    assert(game.get_table_street(TABLE_1) == 0, 'street must not move');
 }
 
 #[test]

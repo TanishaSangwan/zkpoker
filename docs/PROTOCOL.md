@@ -611,14 +611,50 @@ check and a clock that bit then would let seats be folded out during setup;
 and it is refused once `round_complete` is true, because then the seat on turn
 owes nothing and what the table is waiting on is `advance_street`.
 
-**Known gap, not closed:** `advance_street` is dealer-only. If the *dealer*
-walks away once a round is complete, streets stop advancing and no timeout
-covers it — the action clock does not fire, correctly, because no player owes
-anything. Making `advance_street` permissionless would close it: its
-precondition (`round_complete`) is fully checked on-chain and it takes no
-caller input, so it is the same argument that makes `settle_from_reveals` safe
-for anyone to call. Not done, because it reverses an explicit access-control
-decision that has a test asserting it.
+~~**Known gap, not closed:** `advance_street` is dealer-only.~~ — **CLOSED
+2026-09-05.** `advance_street` is now **permissionless**, so a dealer who walks
+away once a round is complete no longer stalls the hand.
+
+The reasoning was already written here and it held up: the call takes only a
+`table_id`, its precondition `round_complete` is computed on-chain, and its
+effect is fixed (street + 1, turn reset). A caller chooses nothing, so
+restricting who may send it bought no safety and cost real liveness. Same
+argument as `settle_from_reveals`, `open_deck`, `claim_shuffle_timeout` and
+`claim_action_timeout`.
+
+Two tests replace the one that asserted the old behaviour: a bystander who is
+neither dealer nor seat can advance a **complete** round, and nobody — dealer,
+seat or stranger — can advance an **incomplete** one.
+
+**`begin_shuffle` stays dealer-only, deliberately.** It freezes the participant
+list, so a permissionless version would let anyone start the chain the moment
+two of six intended players had registered, locking the rest out. Deciding when
+to stop waiting for players is a judgement call; advancing a completed round is
+not. That distinction is the whole reason one changed and the other did not.
+
+### 8.0.1 On automating the dealer
+
+Asked directly — should the dealer be a bot, or a contract? Neither, and the
+answer is worth recording because it is easy to get backwards.
+
+A contract cannot be the dealer: contracts do not initiate transactions on
+Starknet, so "the dealer is a contract" only moves the question to who calls
+it, and there is no keeper primitive. A bot has the same problem in a worse
+form — it becomes a **liveness dependency**, which is precisely the gap above.
+
+But the deeper point is that there is almost nothing left to automate. What
+this protocol calls a dealer holds no key share, does not shuffle, receives no
+cards, cannot influence the deck, and after the change above has exactly one
+discretionary power left: choosing when to close registration. Everything else
+is either done by players with proofs, or by an entrypoint anyone may call.
+
+So the automated dealer is a **keeper**, not an authority:
+`scripts/keeper.mjs` watches a table and does the parts that need no
+judgement — opening the deck (which needs a proof but no secret, §7.3) and
+advancing completed rounds. Run it, don't run it, or run three; the only thing
+it can do is advance a hand the contract already agrees is ready. That is only
+true because the calls are permissionless, which is why that change had to come
+first.
 
 ### 8.1 The accusation path — built
 

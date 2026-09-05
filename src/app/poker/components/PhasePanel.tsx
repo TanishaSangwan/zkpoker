@@ -7,7 +7,7 @@
 // knows about. Where an action IS possible but expensive or slow (a shuffle
 // proof is ~5 s of local work), it says so before starting.
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { AccountInterface, ProviderInterface } from 'starknet';
 import styles from '../poker.module.css';
 import uni from '../../uni.module.css';
@@ -207,6 +207,39 @@ export default function PhasePanel(p: Props) {
       return `${txt}\npositions ${result.positions.join(', ')} · proof ${result.timings.proveMs} ms`;
     });
 
+  const [autoAdvance, setAutoAdvance] = useState(true);
+
+  // ── the dealer, automated ──────────────────────────────────────────────
+  //
+  // advance_street is permissionless, which is what makes this safe to do
+  // from a player's client rather than a privileged bot. The call takes only
+  // a table_id, its precondition is computed on-chain, and its effect is
+  // fixed -- so whoever sends it chooses nothing, and a client that sends it
+  // automatically has taken no authority.
+  //
+  // That ordering matters. Automating a DEALER-ONLY advance_street would have
+  // rebuilt the trusted party in software and left the table stalled whenever
+  // that one client was offline (PROTOCOL.md §8.0). Making the call
+  // permissionless first turns the automation into a convenience that anyone
+  // can provide and nobody has to.
+  const advancing = useRef(false);
+  useEffect(() => {
+    if (!autoAdvance || table.phase !== 'betting' || !table.roundComplete) return;
+    if (!account || !provider || advancing.current) return;
+    advancing.current = true;
+    void (async () => {
+      try {
+        await send('advance_street', { table_id: table.tableId });
+        refresh();
+      } catch {
+        // Someone else advanced it first, which is the whole point of the
+        // call being permissionless.
+      } finally {
+        advancing.current = false;
+      }
+    })();
+  }, [autoAdvance, table.phase, table.roundComplete, table.street, table.tableId, account, provider]);
+
   // ── betting ────────────────────────────────────────────────────────────
   const [betAmount, setBetAmount] = useState('');
   const myTurn = table.phase === 'betting' && !table.roundComplete && table.actionTurn === yourSeat && !mySeat?.folded;
@@ -344,15 +377,34 @@ export default function PhasePanel(p: Props) {
           </div>
           {myTurn ? (
             <div className={styles.actionBar}>
-              <button className={styles.chipBtn} disabled={!!busy}
-                onClick={() => run('Checking', () => send('check', { table_id: table.tableId, seat: String(yourSeat) }))}>
-                Check / call
-              </button>
-              <input className={styles.input} placeholder="amount" value={betAmount}
-                onChange={(e) => setBetAmount(e.target.value)} style={{ maxWidth: 140 }} />
+              {/* Check and call are DIFFERENT on-chain actions, and one button
+                  labelled "Check / call" that only ever sent `check` was
+                  simply wrong: facing a bet, `check` reverts with
+                  CANNOT_CHECK_FACING_BET, because checking would mean staying
+                  in the hand without matching. So the button follows the
+                  amount owed -- `check` when nothing is owed, `bet` for
+                  exactly the shortfall when something is. */}
+              {(mySeat?.toCall ?? 0n) > 0n ? (
+                <button className={styles.chipBtn} disabled={!!busy}
+                  onClick={() => run(`Calling ${mySeat!.toCall}`, () => send('bet', {
+                    table_id: table.tableId, seat: String(yourSeat),
+                    amount: mySeat!.toCall.toString(),
+                  }))}>
+                  Call {mySeat!.toCall.toString()}
+                </button>
+              ) : (
+                <button className={styles.chipBtn} disabled={!!busy}
+                  onClick={() => run('Checking', () => send('check', { table_id: table.tableId, seat: String(yourSeat) }))}>
+                  Check
+                </button>
+              )}
+              <input className={styles.input}
+                placeholder={(mySeat?.toCall ?? 0n) > 0n ? `more than ${mySeat!.toCall}` : 'amount'}
+                value={betAmount}
+                onChange={(e) => setBetAmount(e.target.value)} style={{ maxWidth: 160 }} />
               <button className={styles.chipBtn} disabled={!!busy || !betAmount}
                 onClick={() => run('Betting', () => send('bet', { table_id: table.tableId, seat: String(yourSeat), amount: betAmount }))}>
-                Bet / raise
+                {(mySeat?.toCall ?? 0n) > 0n ? 'Raise' : 'Bet'}
               </button>
               <button className={styles.chipBtn} disabled={!!busy}
                 onClick={() => run('Folding', () => send('fold', { table_id: table.tableId, seat: String(yourSeat) }))}>
@@ -378,14 +430,23 @@ export default function PhasePanel(p: Props) {
               </span>
             </div>
           ) : null}
-          {isDealer(table, account) && table.roundComplete ? (
-            <div className={styles.actionsRow}>
+          <div className={styles.actionsRow}>
+            <label className={styles.fieldHint} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <input type="checkbox" checked={autoAdvance} onChange={(e) => setAutoAdvance(e.target.checked)} />
+              Advance the street automatically when the round completes
+            </label>
+            {table.roundComplete ? (
               <button className={uni.btn} disabled={!!busy}
                 onClick={() => run('Advancing', () => send('advance_street', { table_id: table.tableId }))}>
                 Advance street
               </button>
-            </div>
-          ) : null}
+            ) : null}
+            <span className={styles.fieldHint}>
+              Anyone may advance a completed round — it takes no input beyond the table and its
+              precondition is checked on-chain, so no dealer has to be online for the hand to
+              continue.
+            </span>
+          </div>
         </>
       ) : null}
 

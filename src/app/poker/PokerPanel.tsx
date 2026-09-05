@@ -20,7 +20,7 @@ import SelectWallet from '../components/client/WalletHandle/SelectWallet';
 import ConnectDevnet from '../components/client/WalletHandle/ConnectDevnet';
 import { useDevnetAccount } from '../components/client/provider/devnetAccountContext';
 import { useTableState } from './useTableState';
-import { asU256, decodeError, erc20ApproveCall, executeAndWait, pgCall, shortHex, toFelt } from './contract';
+import { asU256, decodeError, erc20ApproveCall, executeAndWait, pgCall, pokerGameReader, shortHex, toFelt } from './contract';
 import Felt from './components/Felt';
 import PhasePanel from './components/PhasePanel';
 import RevealPanel from './components/RevealPanel';
@@ -100,6 +100,23 @@ export default function PokerPanel() {
     : true;
 
   const { env, ready: envReady } = useProvingEnvironment();
+
+  // The table's own buy-in token, read from the contract rather than assumed.
+  // A client has to approve exactly this ERC20 before joining or betting;
+  // approving a different one produces a join that reverts inside the token
+  // with nothing in the error pointing at the cause.
+  const [tableToken, setTableToken] = useState<string>(constants.defaultDevnetToken);
+  useEffect(() => {
+    if (!tableId || !deployed || !provider) return;
+    (async () => {
+      try {
+        const t = await pokerGameReader(contract, provider).get_table_token(tableId);
+        if (BigInt(t) !== 0n) setTableToken('0x' + BigInt(t).toString(16));
+      } catch {
+        // Leaves the editable default in place rather than blocking the join.
+      }
+    })();
+  }, [tableId, deployed, provider, contract]);
 
   return (
     <div className={styles.wrap}>
@@ -190,7 +207,7 @@ export default function PokerPanel() {
         <>
           <Felt table={table} yourSeat={yourSeat} />
           <SeatControls
-            table={table} yourSeat={yourSeat} contract={contract}
+            table={table} yourSeat={yourSeat} contract={contract} token={tableToken}
             account={account} provider={provider} refresh={refresh}
           />
           <PhasePanel
@@ -220,7 +237,7 @@ export default function PokerPanel() {
 // ─── seat / buy-in ───────────────────────────────────────────────────────
 
 function SeatControls(p: any) {
-  const { table, yourSeat, contract, account, provider, refresh } = p;
+  const { table, yourSeat, contract, account, provider, refresh, token } = p;
   const [seat, setSeat] = useState('0');
   const [noteId, setNoteId] = useState('');
   const [busy, setBusy] = useState(false);
@@ -228,19 +245,32 @@ function SeatControls(p: any) {
 
   if (yourSeat !== null || table.shuffleStarted) return null;
 
+  const [allowance, setAllowance] = useState('1000000');
+
   const join = async () => {
     setBusy(true); setErr(null);
     try {
-      // join_table escrows the buy-in, so the token must be approved first.
-      // Batched into one multicall: an approve that lands without the join is
-      // a dangling allowance the player has to clean up.
-      await executeAndWait(account, provider, [
-        pgCall(contract, 'join_table', {
-          table_id: table.tableId,
-          seat,
-          hole_card_note_id: noteId.trim() || seat,
-        }),
-      ]);
+      // join_table escrows the buy-in and bet() moves tokens with
+      // transfer_from, so the token has to be approved first -- without it the
+      // join reverts inside the ERC20 with an error that says nothing about
+      // poker.
+      //
+      // Batched into ONE multicall: an approve that lands while the join fails
+      // leaves a dangling allowance the player has to notice and clean up.
+      //
+      // The allowance deliberately covers more than the buy-in, so betting
+      // works without a second approval per raise. That is a real tradeoff --
+      // a larger allowance is a larger amount this contract could pull -- so
+      // it is a visible field rather than a hidden constant.
+      const calls = [];
+      const approving = BigInt(allowance || '0');
+      if (approving > 0n) calls.push(erc20ApproveCall(token, contract, approving));
+      calls.push(pgCall(contract, 'join_table', {
+        table_id: table.tableId,
+        seat,
+        hole_card_note_id: noteId.trim() || seat,
+      }));
+      await executeAndWait(account, provider, calls);
       refresh();
     } catch (e) { setErr(decodeError(e)); } finally { setBusy(false); }
   };
@@ -255,6 +285,14 @@ function SeatControls(p: any) {
         <div className={styles.field}>
           <label className={styles.label}>seat</label>
           <input className={styles.input} value={seat} onChange={(e) => setSeat(e.target.value)} />
+        </div>
+        <div className={styles.field}>
+          <label className={styles.label}>token allowance</label>
+          <input className={styles.input} value={allowance} onChange={(e) => setAllowance(e.target.value)} />
+          <div className={styles.fieldHint}>
+            Approved to PokerGame in the same transaction as the join. Must cover the buy-in plus
+            whatever you intend to bet.
+          </div>
         </div>
         <div className={styles.field}>
           <label className={styles.label}>payout note id</label>

@@ -957,6 +957,11 @@ pub trait IPokerGame<TState> {
     // this contract's convention of reading storage defaults directly
     // rather than reverting on a nonexistent table_id for view functions).
     fn get_table_max_seats(self: @TState, table_id: felt252) -> u32;
+    // The ERC20 a table's buy-in and bets are denominated in. A client has to
+    // approve exactly this token before joining or betting; approving a
+    // different one produces a join that reverts inside the ERC20, with
+    // nothing in the error pointing at the cause.
+    fn get_table_token(self: @TState, table_id: felt252) -> ContractAddress;
 }
 
 // pub: tests/ compiles as a separate crate and needs zkpoker::PokerGame::
@@ -2308,7 +2313,33 @@ pub mod PokerGame {
             assert(!self.reentrancy_lock.read(), errors::REENTRANCY);
 
             assert(!self.table_settled.entry(table_id).read(), errors::ALREADY_SETTLED);
-            assert(get_caller_address() == self.table_dealer.entry(table_id).read(), errors::NOT_DEALER);
+
+            // PERMISSIONLESS, deliberately. This used to be dealer-only.
+            //
+            // It confers no power: the only argument is `table_id`, the
+            // precondition `round_complete` is computed here from state the
+            // contract owns, and the effect is fixed -- street + 1 and the
+            // turn reset. A caller chooses nothing, so restricting who may
+            // call it bought no safety and cost liveness.
+            //
+            // And the liveness cost was real, not theoretical: once a betting
+            // round completed, only the dealer could move the hand on, and no
+            // timeout covered a dealer who walked away -- the action clock
+            // correctly does not fire, because at that point no player owes
+            // anything. docs/PROTOCOL.md §8.0 recorded it as a known gap for
+            // exactly as long as it took someone to sit at a table and ask why
+            // the streets did not advance on their own.
+            //
+            // Same argument as settle_from_reveals, open_deck,
+            // claim_shuffle_timeout and claim_action_timeout, all of which are
+            // callable by anyone for the same reason.
+            //
+            // begin_shuffle stays dealer-only, and that is not an oversight:
+            // it freezes the participant list, so a permissionless version
+            // would let anyone start the chain the moment two of six intended
+            // players had registered, locking the rest out. Deciding when to
+            // stop waiting for players is a judgement call. Advancing a
+            // completed round is not.
             let street_entry = self.table_street.entry(table_id);
             let current = street_entry.read();
             assert(current != SHOWDOWN_STREET, errors::BETTING_CLOSED);
@@ -3817,6 +3848,10 @@ pub mod PokerGame {
 
         fn get_table_street(self: @ContractState, table_id: felt252) -> u8 {
             self.table_street.entry(table_id).read()
+        }
+
+        fn get_table_token(self: @ContractState, table_id: felt252) -> ContractAddress {
+            self.table_token.entry(table_id).read()
         }
 
         fn get_table_max_seats(self: @ContractState, table_id: felt252) -> u32 {
