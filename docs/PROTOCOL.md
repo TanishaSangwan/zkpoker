@@ -722,54 +722,136 @@ would produce a proof the on-chain verifier rejects (§ the `public_inputs_offse
 incompatibility in `circuits/shuffle_verifier/README.md`), so measuring it would
 have measured nothing.
 
-### 9.2 BLOCKER, found 2026-09-05: beta.16 cannot consume `a_0`
+### 9.2 The identity-point defect — found and FIXED, 2026-09-05
 
-Building the browser client turned up a defect that no earlier measurement
-could have caught, and it stops the first shuffle of every hand.
+Building the browser client turned up a defect that stopped the first shuffle
+of every hand, and that no earlier measurement could have caught. It is fixed;
+this is the record.
 
-`a_0` is `(identity, M_i)`, and the identity is encoded `(0, 0)` — there is no
-room for anything else, because the deck is four bare fields per card and
-Noir's `EmbeddedCurvePoint` carries a third component, `is_infinite`. The
-shuffle circuit rebuilds each ciphertext with `EmbeddedCurvePoint::new(x, y)`,
-which sets `is_infinite = false`, and then adds `r·G` to it.
+**The bug.** `a_0` is `(identity, M_i)`, and the identity is encoded `(0, 0)` —
+it has to be, because a deck slot is four bare fields and Noir's
+`EmbeddedCurvePoint` carries a third component, `is_infinite`. The circuit
+rebuilt each ciphertext with `is_infinite: false`, which is a lie for those
+slots.
 
-| Toolchain | `deck_in = a_0` |
+| Toolchain | `deck_in = a_0`, before the fix |
 |---|---|
-| nargo/acvm **1.0.0-beta.22** (project pin) | **solves** |
+| nargo/acvm **1.0.0-beta.22** (project pin) | solves |
 | acvm **1.0.0-beta.16** (what the deployed verifier requires) | **fails** |
-
-The beta.16 failure is:
 
 ```
 Failed to solve blackbox function: embedded_curve_add, reason:
 Point (0x0…0, 0x0…0) is not on curve
 ```
 
-Reproduced three ways: in the browser through the client, in Node against the
-beta.16 circuit build, and by contrast with `nargo execute` under beta.22,
-which solves the identical inputs. The two toolchains' ACIR is not even
-mutually deserialisable, so they cannot be mixed to work around it.
+**Why the obvious fix does not work.** Setting `is_infinite` honestly —
+`(x == 0) & (y == 0)` — still fails. beta.16's `embedded_curve_add` runs an
+on-curve check on the **raw coordinates** that a *witness-derived*
+`is_infinite` does not suppress. A *compile-time constant* `is_infinite: true`
+does suppress it, which is exactly why a small hand-written test of "can
+beta.16 add the point at infinity?" answers yes and misses this entirely.
 
-**Why seven rounds of review missed it.** §9.0's browser-proving measurement
-used `circuits/shuffle_verifier/example_proof/beta16_build/Prover.toml`, and
-that fixture is a **mid-chain** shuffle: its `deck_in` contains *no zeros at
-all*. Every ciphertext in it is a real point. So the identity path was never
-executed under beta.16 — only under beta.22, where it works. §10's claim that
-the pinned commitment was "verified end to end" by solving the untouched
-shuffle circuit with `deck_in = a_0` is true, and was done under beta.22,
-which is **not** the toolchain that produces proofs the deployed verifier
-accepts.
+**The fix.** Never let `(0, 0)` reach the blackbox. Substitute an arbitrary
+on-curve point for the identity, add, then discard that branch and return the
+other operand, because `O + q = q`:
 
-Only the first link is affected. Every later shuffle consumes a deck whose
-`c1` components are all real points, because link 1 adds `r·G` to each.
+```noir
+fn add_encoded(x: Field, y: Field, q: EmbeddedCurvePoint) -> EmbeddedCurvePoint {
+    let is_inf = (x == 0) & (y == 0);
+    let base = if is_inf { EmbeddedCurvePoint::generator() } else { /* (x, y) */ };
+    let sum = base + q;
+    if is_inf { q } else { sum }
+}
+```
 
-**There is no client-side fix.** `a_0`'s encoding is pinned by
-`INITIAL_DECK_COMMITMENT` in the contract and the circuit is what reads it.
-Closing this means constructing that point with an explicit `is_infinite`
-rather than `new`, recompiling under beta.16, and regenerating and
-redeploying the verifier — a circuit change, with a new VK. Until then
-`src/lib/shuffle.ts` detects the exact error and explains it rather than
-surfacing a wasm stack trace.
+Both branches are computed and one is selected, so the stand-in is never
+observed and constrains nothing. Outputs are re-encoded canonically
+(`encode_x`/`encode_y`), so a result landing on infinity is published as
+`(0, 0)` rather than whatever representation it carries — without that, the
+next link would decode a different point than this one proved.
+
+Only `(0, 0)` maps to infinity, and nothing real is captured: a curve point
+with `x = 0` needs `y² = −17`, so `y ≠ 0`.
+
+**Why seven review rounds missed it.** §9.0's browser-proving measurement used
+`circuits/shuffle_verifier/example_proof/beta16_build/Prover.toml`, and that
+fixture is a **mid-chain** shuffle — its `deck_in` contains *no zeros at all*.
+Only the first link of a chain has identity points in its input, and until a
+client existed, nothing ever ran it. §10's "verified end to end" claim for the
+pinned commitment was true and was made under beta.22, which is **not** the
+toolchain that produces proofs the deployed verifier accepts.
+
+**Verified, not assumed.** The circuit change moves the VK, so the verifier was
+regenerated (`scripts/regen_shuffle_verifier.mjs`, then `garaga gen`). Only
+`honk_verifier_constants.cairo` changed; the verifier logic is byte-identical.
+A real **first-link** proof — `hash_in` = `INITIAL_DECK_COMMITMENT` — was
+generated under beta.16 and is checked in as the test fixture. Three tests pass
+against the regenerated verifier: it accepts that proof (269.7M L2 gas, 3,053
+felts), it returns the four public inputs with `hash_in` equal to the pinned
+commitment, and it rejects a corrupted proof.
+
+**What it costs.** Measured, not estimated:
+
+| | before | after |
+|---|---:|---:|
+| ACIR opcodes (`nargo info`) | 1,756 | **4,460** |
+| `log_circuit_size` in the VK | 17 | **17** |
+| Proof size | 9,408 B | 9,408 B |
+| VK size | 1,888 B | 1,888 B |
+| Starknet calldata | 3,053 felts | 3,054 felts |
+
+Opcodes go up 2.5×, because `add_encoded` costs two point-selects and an
+equality test per ciphertext and there are 104 of them, plus the output
+re-encoding. But `log_circuit_size` is **unchanged at 17**: the circuit still
+sits in the same subgroup, which is what actually sets proving and verification
+cost. The same thing §7.1 observed about the 92,352 → 82,133 change applies
+here in reverse — this spends headroom, not time.
+
+Both circuit copies were changed together and both still solve the mid-chain
+fixture, so this is not a regression trade.
+
+`circuits/shuffle/src/main.nr` and
+`circuits/shuffle_verifier/example_proof/beta16_build/main.nr` **must stay
+semantically identical** — the latter is what Garaga compiles into the deployed
+verifier. They differ only in spelling, because beta.22 made `is_infinite` a
+private field with an accessor while beta.16 exposes it.
+
+**A rejection is a panic, not an `Err`.** Corrupting a proof desynchronises the
+MSM hints Garaga derives from it, so `msm_g1` asserts
+(`'Wrong GLV/FakeGLV decomposition'`) before any pairing check. That is safe
+here and was checked rather than assumed: all five verifier call sites in
+`PokerGame` end in `assert(..)`, so a panic and a `false` both revert with no
+state written. The difference is diagnostic only. Anything that ever wants to
+*continue* on a `false` must not assume it will get one.
+
+---
+
+### 9.4 The SRS is a third-party runtime dependency
+
+Worth stating because it is invisible until it fails: bb.js does not ship the
+structured reference string. On the first proof in a browser it fetches it from
+`https://crs.aztec.network` — a 6.4 GB file it range-requests for the points
+the circuit size needs — and caches the result in IndexedDB. The URL is
+hardcoded in bb.js's browser CRS path; there is no option to point it
+elsewhere.
+
+Three consequences a deployment should know about:
+
+- **A player's first shuffle depends on a host this project does not control.**
+  If it is down or blocked, proving does not start. Later proofs come from the
+  IndexedDB cache.
+- **It is a cross-origin fetch from a cross-origin-isolated page.** It works
+  today; a future tightening of that host's headers, or of COEP, would break it
+  in a way that looks like a client bug.
+- **Removing it means serving the SRS same-origin** and intercepting bb.js's
+  fetch, since the URL cannot be configured. Not done, and it is a deployment
+  choice rather than a protocol one — but it is the difference between a client
+  that works offline and one that does not.
+
+`scripts/check_browser_client.mjs` passes `--ignore-certificate-errors` for
+this fetch alone, because headless Chromium in the dev sandbox does not trust
+that host's CA even though `curl` on the same machine does. That flag is
+harness-only and changes nothing the app ships.
 
 ---
 
@@ -942,9 +1024,12 @@ but "should be" is not "measured," and the entire client-side story rests on it.
   `scripts/check_browser_client.mjs` drives the production build headlessly and
   confirms COOP/COEP, cross-origin isolation and 6-thread proving.
 
-  Two things were recorded rather than papered over: §9.2's beta.16 blocker,
-  which stops the first shuffle of every chain, and §9.3's deck-delivery
-  griefing gap. Neither is a UI bug and neither has a client-side fix.
+  Building it also surfaced two defects nothing else could have: §9.2's
+  identity-point bug, which stopped the first shuffle of every chain under the
+  deployed verifier's own toolchain — **now fixed**, with the verifier
+  regenerated and a real first-link proof checked in as its test fixture — and
+  §9.3's deck-delivery griefing gap, which is still open and needs a protocol
+  decision rather than a client change.
 
   Not wired up: deck opening (`src/lib/deckOpen.ts` exists and mirrors the
   contract's chunking and padding, but `circuits/deck_open` has no beta.16

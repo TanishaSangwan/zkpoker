@@ -57,7 +57,20 @@ else ok('/circuits/shuffle.json is served');
 const browser = await puppeteer.launch({
   executablePath: CHROME,
   headless: 'new',
-  args: ['--no-sandbox', '--js-flags=--max-old-space-size=4096'],
+  args: [
+    '--no-sandbox',
+    '--js-flags=--max-old-space-size=4096',
+    // HARNESS ONLY, and it does not weaken anything the app ships.
+    //
+    // bb.js downloads the SRS from https://crs.aztec.network at proving time
+    // (the URL is hardcoded in its browser CRS path -- there is no option to
+    // point it elsewhere). Headless Chromium here does not trust that host's
+    // CA even though curl on the same machine does, so without this the check
+    // dies at downloadG1Data with ERR_CERT_AUTHORITY_INVALID and tells you
+    // nothing about the code. A real browser fetches it normally and caches it
+    // in IndexedDB. See the CRS note in docs/PROTOCOL.md §9.4.
+    '--ignore-certificate-errors',
+  ],
 });
 const page = await browser.newPage();
 page.on('pageerror', (e) => fail(`page error: ${e.message}`));

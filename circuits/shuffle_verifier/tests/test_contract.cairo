@@ -89,3 +89,75 @@ fn test_verify_ultra_keccak_zk_honk_proof() {
 // assert(public_inputs.len() > 0, 'No public inputs');
 // Additional assertions on the public input values can be added here
 }
+
+// ── Added by this project (not Garaga) ──────────────────────────────────
+//
+// The generated suite proves only that a good proof is accepted, which on its
+// own is also satisfied by a verifier that accepts everything. This is the
+// other half.
+//
+// The fixture is a FIRST-LINK proof: its hash_in is PokerGame's pinned
+// INITIAL_DECK_COMMITMENT (0x1673af..71ad), so it is the exact case
+// docs/PROTOCOL.md §9.2 records as impossible to produce until the circuit
+// stopped feeding the (0, 0) identity encoding into embedded_curve_add.
+// Regenerate with scripts/regen_shuffle_verifier.mjs.
+
+// A corrupted proof is REJECTED BY PANIC, not by Err.
+//
+// Garaga's calldata carries MSM hints derived from the proof values, so
+// changing a felt leaves the hints describing a different multiplication and
+// `msm_g1` asserts on the inconsistency before any pairing check is reached:
+// 'Wrong GLV/FakeGLV decomposition'. Tried at two different offsets, both
+// panic. (circuits/shuffle_verifier/README.md records an older devnet run
+// seeing Err("Proof verification failed"); whatever the difference, panic is
+// what this version does, so that is what is pinned here.)
+//
+// Safe where it matters, and checked rather than assumed: PokerGame reaches
+// this through VerifierAdapter::check_honk, whose `Result::Err(_) => false`
+// arm a panic skips entirely -- but submit_shuffle wraps the call in
+// `assert(.., BAD_PROOF)`, so panic and false both revert with no state
+// written. The same holds at all five verifier call sites. The difference is
+// diagnostic only, and it is the same behaviour
+// cairo-verifier/tests/test_client_vectors.cairo pins for the DLEQ verifier.
+#[test]
+#[should_panic(expected: ('Wrong GLV/FakeGLV decomposition', 'ENTRYPOINT_FAILED'))]
+fn test_rejects_a_corrupted_proof() {
+    let class_hash = declare_contract("UltraKeccakZKHonkVerifier");
+    let dispatcher = IUltraKeccakZKHonkVerifierLibraryDispatcher { class_hash };
+    let file = FileTrait::new("tests/proof_calldata.txt");
+    let calldata = read_txt(@file);
+
+    let mut corrupted: Array<felt252> = array![];
+    let mut i = 0;
+    while i < calldata.len() {
+        if i == 12 {
+            corrupted.append(*calldata.at(i) + 1);
+        } else {
+            corrupted.append(*calldata.at(i));
+        }
+        i += 1;
+    }
+
+    dispatcher.verify_ultra_keccak_zk_honk_proof(corrupted.span());
+}
+
+// The public inputs a valid proof carries are the whole point of the adapter's
+// binding check: PokerGame compares them against its own stored joint key and
+// chain head. If the verifier ever stopped returning them, that binding would
+// silently have nothing to compare.
+#[test]
+fn test_returns_the_four_public_inputs() {
+    let class_hash = declare_contract("UltraKeccakZKHonkVerifier");
+    let dispatcher = IUltraKeccakZKHonkVerifierLibraryDispatcher { class_hash };
+    let file = FileTrait::new("tests/proof_calldata.txt");
+    let calldata = read_txt(@file).span();
+
+    let public_inputs = dispatcher.verify_ultra_keccak_zk_honk_proof(calldata).unwrap();
+    assert(public_inputs.len() == 4, 'expected 4 public inputs');
+
+    // hash_in must be the pinned initial deck commitment -- this fixture
+    // proves the FIRST link of a chain, the case that used to be unprovable.
+    let hash_in = *public_inputs.at(2);
+    assert(hash_in.low == 287590538483746469931956317567322321325, 'hash_in.low');
+    assert(hash_in.high == 29843680456175890265454332793043468376, 'hash_in.high');
+}

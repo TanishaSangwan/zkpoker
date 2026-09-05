@@ -81,3 +81,70 @@ garaga calldata --system ultra_keccak_zk_honk --proof proof.bin --vk vk.bin \
 pins (see `.tool-versions` in this directory) — also different from the
 main project's `cairo/.tool-versions` (2.18.0). Both installed via `asdf`
 alongside the existing versions; nothing in `cairo/` was touched.
+
+## Regenerated 2026-09-05 — the identity-point fix
+
+The circuit changed, so this verifier was regenerated. **Only
+`src/honk_verifier_constants.cairo` differs** from the previous generation;
+`honk_verifier.cairo`, `honk_verifier_circuits.cairo` and `lib.cairo` came out
+byte-identical, which is the expected shape of a VK-only change.
+
+**Why.** The old circuit fed the deck's `(0, 0)` identity encoding straight into
+`embedded_curve_add` with `is_infinite: false`. acvm 1.0.0-beta.16 — the
+toolchain this verifier is generated from — rejects that as an off-curve point,
+so the FIRST link of every shuffle chain (the only one whose input deck
+contains identity points) could not be witness-solved at all. beta.22 tolerated
+it, which is why it went unnoticed: the `Prover.toml` in `example_proof/` is a
+mid-chain shuffle whose `deck_in` contains no zeros. See docs/PROTOCOL.md §9.2.
+
+Note that setting `is_infinite` honestly does **not** fix it — beta.16's
+on-curve check ignores a witness-derived flag (a compile-time constant one it
+does honour). The fix substitutes an on-curve stand-in and discards the branch.
+
+**The example proof is now a first-link proof.** `example_proof/Prover.a0.toml`
+holds `deck_in = a_0`, so the checked-in `proof.bin` / `vk.bin` /
+`public_inputs.bin` / `calldata_array.txt` are for the exact case that used to
+be impossible. Its `hash_in` is PokerGame's pinned `INITIAL_DECK_COMMITMENT`,
+and `tests/test_contract.cairo` asserts that on-chain.
+
+**`beta16_build/src/main.nr` is now kept in sync with `beta16_build/main.nr`.**
+They had silently drifted apart; `nargo` compiles `src/`, so the root copy was
+documentation that no longer described the artifact. Both are now written
+together.
+
+### Reproducing
+
+```bash
+noirup --version 1.0.0-beta.16                 # NOT the project pin
+nargo compile --program-dir circuits/shuffle_verifier/example_proof/beta16_build
+node scripts/regen_shuffle_verifier.mjs \
+    circuits/shuffle_verifier/example_proof/beta16_build/Prover.a0.toml
+garaga gen --system ultra_keccak_zk_honk \
+    --vk circuits/shuffle_verifier/example_proof/vk.bin \
+    --project-name shuffle_verifier
+# copy the generated src/honk_verifier_constants.cairo over this package's
+garaga calldata --system ultra_keccak_zk_honk --proof proof.bin --vk vk.bin \
+    --public-inputs public_inputs.bin --format array
+# tests/proof_calldata.txt is that array, one value per line (read_txt's format)
+noirup --version 1.0.0-beta.22                 # PUT IT BACK
+```
+
+### The test suite now runs on this machine
+
+`.tool-versions` and `Scarb.toml` were moved from the Garaga defaults
+(`scarb 2.16.1` / `snforge 0.57.0`) to `scarb 2.18.0` / `snforge 0.63.0` with
+`allow-prebuilt-plugins`. At 0.57.0 snforge tries to `cargo build` its Scarb
+plugin, and with no Rust toolchain here that fails before any test runs — the
+package was effectively untestable. The generated verifier **source is
+unchanged** by this; only the test harness moved, and 2.18.0 is what the rest
+of the repo already uses.
+
+Three tests pass: a valid proof is accepted (269.7M L2 gas, 3,054 felts of
+calldata), the four public inputs come back with `hash_in` equal to the pinned
+initial commitment, and a corrupted proof is rejected. That last one rejects by
+**panic** (`'Wrong GLV/FakeGLV decomposition'`), not `Err` — Garaga's MSM hints
+are derived from the proof, so corrupting it desynchronises them before any
+pairing check. Safe at every `PokerGame` call site, all of which `assert` on the
+result, but it is not what the older devnet note above describes and the test
+pins the behaviour actually observed.
+

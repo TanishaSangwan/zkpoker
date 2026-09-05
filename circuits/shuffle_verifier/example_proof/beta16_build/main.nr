@@ -44,6 +44,55 @@ use poseidon::poseidon2::Poseidon2;
 global N: u32 = 52; // cards in a deck
 global DECK_FIELDS: u32 = 208; // 4 * N
 
+
+
+// The deck encodes the point at infinity as (0, 0), and beta.16 will not add it.
+//
+// a_0, the canonical starting deck, is encryption with r = 0, so every c1 is
+// the identity -- and a deck slot is four bare fields, with no room for Noir's
+// third `is_infinite` component. (0, 0) is a safe encoding because it
+// satisfies no curve equation (y^2 = x^3 - 17 has no root at x = y = 0), so it
+// can never collide with a real ciphertext.
+//
+// The trap: acvm 1.0.0-beta.16 -- the toolchain the DEPLOYED verifier requires
+// -- runs an on-curve check inside embedded_curve_add on the RAW coordinates,
+// and a witness-derived `is_infinite` does not suppress it. (A compile-time
+// constant `is_infinite: true` does, which is why this is easy to miss in a
+// small test.) So (0, 0) must never reach that blackbox at all.
+//
+// Hence: substitute an arbitrary on-curve point for the identity, add, then
+// throw the result away and return the other operand, because O + q = q. The
+// substituted point is never observed -- both branches are computed and one is
+// selected -- so it leaks nothing and constrains nothing.
+//
+// nargo 1.0.0-beta.22 tolerated the old form, which is why this survived until
+// a client ran the FIRST link of a chain: every fixture before that was
+// mid-chain, and only link 1 has identity points in its input. See
+// docs/PROTOCOL.md section 9.2.
+//
+// This file and circuits/shuffle/src/main.nr MUST stay semantically identical.
+// This one is what Garaga compiles into the deployed verifier; the other is
+// what the project documents and measures.
+fn add_encoded(x: Field, y: Field, q: EmbeddedCurvePoint) -> EmbeddedCurvePoint {
+    let is_inf = (x == 0) & (y == 0);
+    let stand_in = EmbeddedCurvePoint::generator();
+    let base = if is_inf { stand_in } else { EmbeddedCurvePoint { x, y, is_infinite: false } };
+    let sum = base + q;
+    if is_inf { q } else { sum }
+}
+
+// ..and re-encode canonically on the way out, so a result landing on infinity
+// is published as (0, 0) rather than whatever representation it carries.
+// Without this the asserts below could accept coordinates that are not the
+// canonical encoding, and the next link would decode a different point than
+// this one proved.
+fn encode_x(p: EmbeddedCurvePoint) -> Field {
+    if p.is_infinite { 0 } else { p.x }
+}
+fn encode_y(p: EmbeddedCurvePoint) -> Field {
+    if p.is_infinite { 0 } else { p.y }
+}
+
 fn main(
     // -- public --
     pk_x: pub Field,
@@ -81,8 +130,6 @@ fn main(
 
         // 3. Pull the source ciphertext at the secret index.
         let base = 4 * idx;
-        let src_c1 = EmbeddedCurvePoint { x: deck_in[base], y: deck_in[base + 1], is_infinite: false };
-        let src_c2 = EmbeddedCurvePoint { x: deck_in[base + 2], y: deck_in[base + 3], is_infinite: false };
 
         // 4. Re-randomize. These two scalar muls per card are the circuit's
         //    dominant cost: 2 * 52 = 104 in total.
@@ -90,14 +137,14 @@ fn main(
         let r_g = multi_scalar_mul([g], [r]);
         let r_pk = multi_scalar_mul([pk], [r]);
 
-        let out_c1 = src_c1 + r_g;
-        let out_c2 = src_c2 + r_pk;
+        let out_c1 = add_encoded(deck_in[base], deck_in[base + 1], r_g);
+        let out_c2 = add_encoded(deck_in[base + 2], deck_in[base + 3], r_pk);
 
         // 5. ..and it must equal what the prover published at slot j.
         let out_base = 4 * j;
-        assert(out_c1.x == deck_out[out_base]);
-        assert(out_c1.y == deck_out[out_base + 1]);
-        assert(out_c2.x == deck_out[out_base + 2]);
-        assert(out_c2.y == deck_out[out_base + 3]);
+        assert(encode_x(out_c1) == deck_out[out_base]);
+        assert(encode_y(out_c1) == deck_out[out_base + 1]);
+        assert(encode_x(out_c2) == deck_out[out_base + 2]);
+        assert(encode_y(out_c2) == deck_out[out_base + 3]);
     }
 }

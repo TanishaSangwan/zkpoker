@@ -13,9 +13,12 @@ sierra-replace-ids = false
 inlining-strategy = 2
 
 [dev-dependencies]
-snforge_std = "0.57.0"
+snforge_std = "0.63.0"
 assert_macros = "2.16.1"
 
 [[target.starknet-contract]]
 casm = true
 casm-add-pythonic-hints = true
+
+[tool.scarb]
+allow-prebuilt-plugins = ["snforge_std"]
