@@ -22,7 +22,7 @@ import ConnectDevnet from '../components/client/WalletHandle/ConnectDevnet';
 import ConnectLocalKey from '../components/client/WalletHandle/ConnectLocalKey';
 import { useLocalAccount } from '../components/client/provider/localAccountContext';
 import { useTableState } from './useTableState';
-import { asU256, decodeError, erc20ApproveCall, executeAndWait, pgCall, pokerGameReader, shortHex, strkToBase, toFelt } from './contract';
+import { asU256, decodeError, erc20ApproveCall, erc20Balances, executeAndWait, fmtAmount, pgCall, pokerGameReader, shortHex, strkToBase, toFelt } from './contract';
 import Felt from './components/Felt';
 import PhasePanel from './components/PhasePanel';
 import RevealPanel from './components/RevealPanel';
@@ -222,6 +222,32 @@ export default function PokerPanel() {
     })();
   }, [tableId, deployed, provider, contract]);
 
+  // What you can still bet with, and what the game may still take.
+  //
+  // There is no chip stack in this contract: `bet` does `transfer_from` at
+  // the moment you bet, so the WALLET is the stack -- and separately the game
+  // can only move what has been approved. Neither number was anywhere on the
+  // page, which makes "how much have I got left?" unanswerable from the
+  // table, and makes an exhausted allowance look like a broken bet button.
+  const [funds, setFunds] = useState<{ balance: bigint; allowance: bigint } | null>(null);
+  useEffect(() => {
+    if (!address || !provider || !deployed || !tableToken || BigInt(tableToken) === 0n) {
+      setFunds(null);
+      return;
+    }
+    let live = true;
+    (async () => {
+      try {
+        const f = await erc20Balances(tableToken, address, contract, provider);
+        if (live) setFunds(f);
+      } catch {
+        if (live) setFunds(null);
+      }
+    })();
+    return () => { live = false; };
+    // table.pot moves whenever money does, which is exactly when these change.
+  }, [address, provider, deployed, tableToken, contract, table?.pot, table?.handNumber]);
+
   // Until mounted, render markup that CANNOT differ from the server's.
   //
   // Guarding individual attributes was not enough -- React still found a
@@ -305,6 +331,23 @@ export default function PokerPanel() {
                 ? `proving on ${env.threads} threads`
                 : 'single-threaded proving (no cross-origin isolation)'}
           </div>
+          {/* There is no chip stack: `bet` pulls from the wallet at bet time,
+              so the wallet IS the stack. And the game can only move what has
+              been approved, so a spent allowance stops betting with an error
+              that comes from inside the token and names nothing. Both belong
+              in front of the player, not in a block explorer. */}
+          {funds ? (
+            <div className={styles.sectionHint}>
+              your balance <strong>{fmtAmount(funds.balance)}</strong>
+              {' · approved for this table '}
+              <strong>{fmtAmount(funds.allowance)}</strong>
+              {funds.allowance === 0n
+                ? ' — approve a stake before betting'
+                : funds.allowance < funds.balance / 100n
+                  ? ' — nearly used up; approve more before it stops your bets'
+                  : ''}
+            </div>
+          ) : null}
         </div>
         {providerIndex === constants.DEVNET_PROVIDER_INDEX ? <ConnectDevnet /> : <ConnectLocalKey />}
         <div className={styles.tableIdRow}>

@@ -31,6 +31,34 @@ export function pgCall(address: string, entrypoint: string, args: RawArgs): Call
   return { contractAddress: address, entrypoint, calldata: pgCallData.compile(entrypoint, args) };
 }
 
+/**
+ * What this address can still spend, and what it has already let the game
+ * take: `balance_of` and `allowance`.
+ *
+ * Both matter and they fail differently. There is no chip stack in this
+ * contract -- `bet` does `transfer_from` at the moment you bet, so your
+ * WALLET is your stack -- and separately the game can only move what you
+ * have approved. Run the allowance down mid-hand and betting starts
+ * reverting inside the token, with nothing in the error naming the cause.
+ *
+ * Read together so a caller can show both, since "how much have I got left"
+ * is really two questions.
+ */
+export async function erc20Balances(
+  token: string, owner: string, spender: string, provider: any,
+): Promise<{ balance: bigint; allowance: bigint }> {
+  const c = new Contract({ abi: erc20Abi as any, address: token, providerOrAccount: provider });
+  const [b, a] = await Promise.all([
+    c.balance_of(owner).catch(() => 0n),
+    c.allowance(owner, spender).catch(() => 0n),
+  ]);
+  const big = (v: any) =>
+    typeof v === 'bigint' ? v
+      : v && typeof v === 'object' && 'low' in v ? (BigInt(v.high) << 128n) | BigInt(v.low)
+      : BigInt(v ?? 0);
+  return { balance: big(b), allowance: big(a) };
+}
+
 export function erc20ApproveCall(tokenAddress: string, spender: string, amount: bigint): Call {
   return {
     contractAddress: tokenAddress,
