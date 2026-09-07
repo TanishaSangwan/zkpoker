@@ -439,7 +439,7 @@ function SeatControls(p: any) {
         <div className={styles.field}>
           <label className={styles.label}>stake you are approving (STRK)</label>
           <input className={styles.input} value={stake} onChange={(e) => setStake(e.target.value)} />
-          <span className={styles.fieldHint}>{baseUnitsHint(stake)}</span>
+          {amountProblem(stake) ? <span className={styles.fieldHint}>{amountProblem(stake)}</span> : null}
           <div className={styles.fieldHint}>
             The most this contract may move from your balance — buy-in plus whatever you intend to
             bet. Shown rather than hidden, because it is the only real decision in sitting down.
@@ -534,12 +534,12 @@ function CreateTable(p: any) {
       </div>
       <div className={styles.grid3}>
         <Field label="buy-in token" value={token} onChange={setToken} />
-        <Field label="buy-in (STRK)" value={buyIn} onChange={setBuyIn} hint={baseUnitsHint(buyIn)} />
+        <Field label="buy-in (STRK)" value={buyIn} onChange={setBuyIn} hint={amountProblem(buyIn)} />
         <Field label="max seats" value={maxSeats} onChange={setMaxSeats} />
         {blindMode === 'fixed' ? (
           <>
-            <Field label="small blind (STRK)" value={smallBlind} onChange={setSmallBlind} hint={baseUnitsHint(smallBlind)} />
-            <Field label="big blind (STRK)" value={bigBlind} onChange={setBigBlind} hint={baseUnitsHint(bigBlind)} />
+            <Field label="small blind (STRK)" value={smallBlind} onChange={setSmallBlind} hint={amountProblem(smallBlind)} />
+            <Field label="big blind (STRK)" value={bigBlind} onChange={setBigBlind} hint={amountProblem(bigBlind)} />
           </>
         ) : (
           <Field label="hands per blind level" value={levelHands} onChange={setLevelHands} />
@@ -596,14 +596,18 @@ function Field(
   );
 }
 
-/** The hint under an amount field: what the chain will receive. */
-function baseUnitsHint(v: string): string {
-  try {
-    const b = strkToBase(v);
-    return b === 0n ? 'nothing' : `${b} base units`;
-  } catch (e) {
-    return (e as Error).message;
-  }
+/**
+ * Nothing when the amount is fine; the reason when it is not.
+ *
+ * This used to echo the base units under every field -- and that is the
+ * 19-digit integer the STRK inputs exist to get rid of, so it read as noise
+ * on every box. The label says STRK; a field that is behaving needs no
+ * commentary. What IS worth interrupting for is an amount that will not
+ * parse, because the alternative is a transaction built from a
+ * misunderstanding.
+ */
+function amountProblem(v: string): string {
+  try { strkToBase(v); return ''; } catch (e) { return (e as Error).message; }
 }
 
 function YourHand({ table, yourSeat, cards }: any) {
