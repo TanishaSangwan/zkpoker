@@ -59,8 +59,21 @@ case "$NETWORK" in
     ENV_GAME="NEXT_PUBLIC_POKERGAME_SEPOLIA"
     ENV_TOKEN=""
     ;;
+  mainnet)
+    # No default RPC, deliberately. Every free public endpoint rate-limits,
+    # and a mainnet run that dies halfway has spent real money on a half-built
+    # address set. Pass one you trust.
+    if [ -z "${RPC:-}" ]; then
+      echo "NETWORK=mainnet needs an explicit RPC, e.g."
+      echo "  RPC=https://starknet-mainnet.g.alchemy.com/v2/<KEY> NETWORK=mainnet ACCOUNT=mainnet ./scripts/deploy_local.sh"
+      exit 1
+    fi
+    ACCOUNT="${ACCOUNT:-mainnet}"
+    ENV_GAME="NEXT_PUBLIC_POKERGAME_MAINNET"
+    ENV_TOKEN=""
+    ;;
   *)
-    echo "unknown NETWORK '$NETWORK' -- use devnet or sepolia"
+    echo "unknown NETWORK '$NETWORK' -- use devnet, sepolia or mainnet"
     exit 1
     ;;
 esac
@@ -218,10 +231,22 @@ DLEQ_ADDR="$(deploy_contract "$DLEQ_CLASS")";           echo "  dleq            
 ADAPTER_ADDR="$(deploy_contract "$ADAPTER_CLASS" --arguments "$SHUFFLE_ADDR,$DECKOPEN_ADDR,$SHUFFLEOPEN_ADDR,$SCHNORR_ADDR,$DLEQ_ADDR")"
 echo "  adapter            $ADAPTER_ADDR"
 
-# `pool` is the STRK20 privacy pool. There is none on devnet, so it is set to
-# the deploying account: privacy_invoke is the only entrypoint that uses it and
-# nothing in the poker flow touches it.
-POOL="$(ACCOUNT="$ACCOUNT" ACCOUNTS_FILE="$ACCOUNTS_FILE" python3 -c "
+# `pool` is the STRK20 privacy pool, and the constructor PINS it: privacy_invoke
+# asserts the caller IS this address (security review 2026-08-30 Finding 1 --
+# the original compared a caller-supplied argument against itself, which anyone
+# could satisfy). So on mainnet it has to be the REAL pool, or the pool's
+# InvokeExternal into this contract is refused with BAD_POOL and the one
+# transaction that demonstrates the app running against the pool cannot work.
+#
+# There is no pool on devnet and none on Sepolia, so off mainnet it falls back
+# to the deploying account. A live mainnet address there would be a claim about
+# something that was never wired up.
+MAINNET_POOL="0x040337b1af3c663e86e333bab5a4b28da8d4652a15a69beee2b677776ffe812a"
+POOL="${POOL:-}"
+if [ -z "$POOL" ] && [ "$NETWORK" = mainnet ]; then
+  POOL="$MAINNET_POOL"
+fi
+[ -n "$POOL" ] || POOL="$(ACCOUNT="$ACCOUNT" ACCOUNTS_FILE="$ACCOUNTS_FILE" python3 -c "
 import json, os
 d = json.load(open(os.environ['ACCOUNTS_FILE']))
 for net in d.values():
