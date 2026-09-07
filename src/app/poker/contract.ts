@@ -191,6 +191,40 @@ export function phaseOf(t: {
   return 'betting';
 }
 
+// ─── amounts ─────────────────────────────────────────────────────────────
+
+/**
+ * STRK typed by a human -> the base units the contract takes.
+ *
+ * Every amount in PokerGame is a raw u128 in the token's smallest unit, and
+ * STRK has 18 decimals. Asking people to type `10000000000000000000` was not
+ * a small annoyance: the first tables were created with blinds of 10 and 20
+ * WEI -- 1e-17 STRK -- against a hand of gas costing ~86 STRK, because "10"
+ * is a perfectly reasonable thing to type and silently meant nothing.
+ *
+ * So the field is STRK now and this does the multiply. Throws rather than
+ * guessing, because a mis-parse here becomes an on-chain amount.
+ */
+export function strkToBase(v: string): bigint {
+  const t = v.trim();
+  if (!t) return 0n;
+  if (!/^\d*\.?\d*$/.test(t) || t === '.') {
+    throw new Error(`"${v}" is not an amount. Use STRK, e.g. 10 or 0.5.`);
+  }
+  const [whole, frac = ''] = t.split('.');
+  if (frac.length > 18) {
+    throw new Error(`STRK has 18 decimal places; "${v}" has ${frac.length}.`);
+  }
+  return BigInt(whole || '0') * 10n ** 18n + BigInt(frac.padEnd(18, '0') || '0');
+}
+
+/** Base units -> STRK, for showing what will actually be sent. */
+export function baseToStrk(v: bigint): string {
+  const whole = v / 10n ** 18n;
+  const frac = (v % 10n ** 18n).toString().padStart(18, '0').replace(/0+$/, '');
+  return frac ? `${whole}.${frac}` : `${whole}`;
+}
+
 // ─── felt helpers ────────────────────────────────────────────────────────
 
 /** Text -> felt: hex, decimal, or a Cairo short string (<= 31 chars). */

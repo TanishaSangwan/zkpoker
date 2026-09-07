@@ -22,7 +22,7 @@ import ConnectDevnet from '../components/client/WalletHandle/ConnectDevnet';
 import ConnectLocalKey from '../components/client/WalletHandle/ConnectLocalKey';
 import { useLocalAccount } from '../components/client/provider/localAccountContext';
 import { useTableState } from './useTableState';
-import { asU256, decodeError, erc20ApproveCall, executeAndWait, pgCall, pokerGameReader, shortHex, toFelt } from './contract';
+import { asU256, decodeError, erc20ApproveCall, executeAndWait, pgCall, pokerGameReader, shortHex, strkToBase, toFelt } from './contract';
 import Felt from './components/Felt';
 import PhasePanel from './components/PhasePanel';
 import RevealPanel from './components/RevealPanel';
@@ -188,7 +188,18 @@ export default function PokerPanel() {
   // A client has to approve exactly this ERC20 before joining or betting;
   // approving a different one produces a join that reverts inside the token
   // with nothing in the error pointing at the cause.
-  const [tableToken, setTableToken] = useState<string>(constants.defaultDevnetToken);
+  // Seeded with canonical STRK, NOT defaultDevnetToken.
+  //
+  // The effect below reads the table's real token from the contract, but it
+  // runs AFTER render -- so anything clicked in that window used the seed.
+  // The old seed was NEXT_PUBLIC_DEVNET_TOKEN ?? "0x0", which on any
+  // deployment that does not set that variable is literally the zero address:
+  // the approve in sitDown's multicall went to 0x0 and the whole transaction
+  // failed with "Requested contract address 0x0 is not deployed", pointing at
+  // nothing. STRK sits at the same address on devnet, Sepolia and mainnet, so
+  // it is a seed that is right far more often than it is wrong -- and sitDown
+  // now refuses a zero token outright rather than building a call to it.
+  const [tableToken, setTableToken] = useState<string>(constants.defaultPokerToken);
 
   useEffect(() => {
     if (!tableId || yourSeat === null) { setMyCards([null, null]); return; }
@@ -365,7 +376,7 @@ function SeatControls(p: any) {
   // was busywork. How much of your money this contract may move is the
   // opposite: it is the whole risk of sitting down, so it stays a visible
   // number rather than a constant buried in the code.
-  const [stake, setStake] = useState('1000000');
+  const [stake, setStake] = useState('200'); // STRK
 
   // First free seat. There is nothing to choose: seats are interchangeable
   // (position in the shuffle chain follows seat order, and every seat shuffles
@@ -396,8 +407,14 @@ function SeatControls(p: any) {
     try {
       // approve + join in ONE multicall: an approve that lands while the join
       // fails leaves a dangling allowance the player has to notice and undo.
+      // A zero token means the table's token has not been read back yet, or
+      // this is not a table. Either way, approving to 0x0 produces a revert
+      // whose message names no cause.
+      if (!token || BigInt(token) === 0n) {
+        throw new Error("The table's buy-in token is not known yet — give it a second and try again.");
+      }
       const calls = [];
-      const approving = BigInt(stake || '0');
+      const approving = strkToBase(stake);
       if (approving > 0n) calls.push(erc20ApproveCall(token, contract, approving));
       calls.push(pgCall(contract, 'join_table', {
         table_id: table.tableId,
@@ -420,8 +437,9 @@ function SeatControls(p: any) {
       </div>
       <div className={styles.grid2}>
         <div className={styles.field}>
-          <label className={styles.label}>stake you are approving</label>
+          <label className={styles.label}>stake you are approving (STRK)</label>
           <input className={styles.input} value={stake} onChange={(e) => setStake(e.target.value)} />
+          <span className={styles.fieldHint}>{baseUnitsHint(stake)}</span>
           <div className={styles.fieldHint}>
             The most this contract may move from your balance — buy-in plus whatever you intend to
             bet. Shown rather than hidden, because it is the only real decision in sitting down.
@@ -449,12 +467,12 @@ function CreateTable(p: any) {
   const [token, setToken] = useState(
     providerIndex === 3 ? constants.defaultDevnetToken : constants.defaultPokerToken,
   );
-  const [buyIn, setBuyIn] = useState('200000000000000000000'); // 200 STRK
+  const [buyIn, setBuyIn] = useState('200'); // STRK
   const [maxSeats, setMaxSeats] = useState('3');
   // A conventional 1/2 of the buy-in's hundredth, i.e. a 50-big-blind stack.
   // Editable, because the right stakes for a table are the table's business.
-  const [smallBlind, setSmallBlind] = useState('10000000000000000000'); // 10 STRK
-  const [bigBlind, setBigBlind] = useState('20000000000000000000'); // 20 STRK
+  const [smallBlind, setSmallBlind] = useState('10'); // STRK
+  const [bigBlind, setBigBlind] = useState('20'); // STRK
   // Hands per rung of the rising ladder. Empty or 0 means fixed blinds, which
   // is what the two fields above are for -- the two structures are exclusive,
   // and the contract refuses a schedule of 0.
@@ -480,7 +498,9 @@ function CreateTable(p: any) {
       // there is no window in which a table exists without its structure.
       const calls = [
         pgCall(contract, 'create_table', {
-          table_id: tableId, token, buy_in: buyIn, max_seats: maxSeats,
+          table_id: tableId, token,
+          buy_in: strkToBase(buyIn).toString(),
+          max_seats: maxSeats,
         }),
       ];
       // A ladder replaces the fixed pair rather than adding to it: with a
@@ -494,9 +514,11 @@ function CreateTable(p: any) {
         calls.push(pgCall(contract, 'set_blind_schedule', {
           table_id: tableId, hands_per_level: String(ladder),
         }));
-      } else if (BigInt(bigBlind || '0') > 0n) {
+      } else if (strkToBase(bigBlind) > 0n) {
         calls.push(pgCall(contract, 'set_blinds', {
-          table_id: tableId, small_blind: smallBlind, big_blind: bigBlind,
+          table_id: tableId,
+          small_blind: strkToBase(smallBlind).toString(),
+          big_blind: strkToBase(bigBlind).toString(),
         }));
       }
       await executeAndWait(account, provider, calls);
@@ -512,12 +534,12 @@ function CreateTable(p: any) {
       </div>
       <div className={styles.grid3}>
         <Field label="buy-in token" value={token} onChange={setToken} />
-        <Field label="buy-in" value={buyIn} onChange={setBuyIn} hint={asStrk(buyIn)} />
+        <Field label="buy-in (STRK)" value={buyIn} onChange={setBuyIn} hint={baseUnitsHint(buyIn)} />
         <Field label="max seats" value={maxSeats} onChange={setMaxSeats} />
         {blindMode === 'fixed' ? (
           <>
-            <Field label="small blind" value={smallBlind} onChange={setSmallBlind} hint={asStrk(smallBlind)} />
-            <Field label="big blind" value={bigBlind} onChange={setBigBlind} hint={asStrk(bigBlind)} />
+            <Field label="small blind (STRK)" value={smallBlind} onChange={setSmallBlind} hint={baseUnitsHint(smallBlind)} />
+            <Field label="big blind (STRK)" value={bigBlind} onChange={setBigBlind} hint={baseUnitsHint(bigBlind)} />
           </>
         ) : (
           <Field label="hands per blind level" value={levelHands} onChange={setLevelHands} />
@@ -574,37 +596,16 @@ function Field(
   );
 }
 
-/**
- * Base units as a human amount.
- *
- * Every amount this contract takes is a raw u128 in the token's smallest
- * unit, and nothing converts: a "10" typed here is TEN WEI, not ten STRK.
- * With 18 decimals that is 1e-17 STRK, which is how a table ended up with
- * blinds of 10/20 while a hand of gas cost ~86 STRK -- the stakes were
- * seventeen orders of magnitude below the cost of playing for them.
- *
- * Shown next to every amount field rather than converted for you, because
- * the field is what goes on chain and a silent multiply would be its own
- * trap.
- */
-function asStrk(raw: string): string {
-  let v: bigint;
-  try { v = BigInt(raw.trim() || '0'); } catch { return 'not a number'; }
-  if (v === 0n) return '0 STRK';
-  const whole = v / 10n ** 18n;
-  const frac = (v % 10n ** 18n).toString().padStart(18, '0').replace(/0+$/, '');
-  if (whole === 0n) return `0.${frac} STRK — dust; a hand of gas costs ~86 STRK`;
-  return `= ${whole}${frac ? `.${frac}` : ''} STRK`;
+/** The hint under an amount field: what the chain will receive. */
+function baseUnitsHint(v: string): string {
+  try {
+    const b = strkToBase(v);
+    return b === 0n ? 'nothing' : `${b} base units`;
+  } catch (e) {
+    return (e as Error).message;
+  }
 }
 
-/**
- * Your own cards.
- *
- * Deliberately separate from the felt: these are private, and mixing them into
- * the shared view is how a screenshot leaks a hand. Until the reveal path is
- * driven from here they show what the CONTRACT has recorded, which is the only
- * thing that can be checked.
- */
 function YourHand({ table, yourSeat, cards }: any) {
   if (yourSeat === null) return null;
   const seat = table.seats[yourSeat];

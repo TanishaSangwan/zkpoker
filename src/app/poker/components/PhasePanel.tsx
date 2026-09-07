@@ -13,7 +13,7 @@ import styles from '../poker.module.css';
 import uni from '../../uni.module.css';
 import Why from './Why';
 import type { TableState } from '../useTableState';
-import { asU256, decodeError, executeAndWait, pgCall, erc20ApproveCall, STREET_NAMES } from '../contract';
+import { asU256, baseToStrk, decodeError, executeAndWait, pgCall, erc20ApproveCall, strkToBase, STREET_NAMES } from '../contract';
 import type { SeatIdentity } from '@/lib/identity';
 import { jointKey as sumKeys, prove as schnorrProve, initProver as initSchnorr } from '@/lib/schnorr';
 import { deckToU256, proveShuffle, proveShuffleAndOpen, submitFinalShuffleArgs } from '@/lib/shuffle';
@@ -529,7 +529,7 @@ export default function PhasePanel(p: Props) {
         <>
           <div className={styles.stateGrid}>
             <Item label="street" value={STREET_NAMES[table.street] ?? String(table.street)} />
-            <Item label="to call" value={(mySeat?.toCall ?? 0n).toString()} />
+            <Item label="to call" value={`${baseToStrk(mySeat?.toCall ?? 0n)} STRK`} />
             <Item label="your street total" value={(mySeat?.streetContributed ?? 0n).toString()} />
             <Item label="clock" value={myTurn ? clock : table.roundComplete ? 'round complete' : `seat ${table.actionTurn}`} />
           </div>
@@ -563,11 +563,11 @@ export default function PhasePanel(p: Props) {
                 </button>
               )}
               <input className={styles.input}
-                placeholder={(mySeat?.toCall ?? 0n) > 0n ? `more than ${mySeat!.toCall}` : 'amount'}
+                placeholder={(mySeat?.toCall ?? 0n) > 0n ? `more than ${baseToStrk(mySeat!.toCall)} STRK` : 'amount in STRK'}
                 value={betAmount}
                 onChange={(e) => setBetAmount(e.target.value)} style={{ maxWidth: 160 }} />
               <button className={`${styles.chipBtn} ${styles.chipBtnPrimary}`} disabled={!!busy || !betAmount}
-                onClick={() => run('Betting', () => send('bet', { table_id: table.tableId, seat: String(yourSeat), amount: betAmount }))}>
+                onClick={() => run('Betting', () => send('bet', { table_id: table.tableId, seat: String(yourSeat), amount: strkToBase(betAmount).toString() }))}>
                 {(mySeat?.toCall ?? 0n) > 0n ? 'Raise' : 'Bet'}
               </button>
               <button className={`${styles.chipBtn} ${styles.chipBtnFold}`} disabled={!!busy}
