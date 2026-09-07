@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev --webpack",
-    "build": "next build --webpack",
+    "build": "npm run circuits && next build --webpack",
     "start": "next start",
     "lint": "next lint",
     "circuits": "node scripts/build_client_circuits.mjs",
