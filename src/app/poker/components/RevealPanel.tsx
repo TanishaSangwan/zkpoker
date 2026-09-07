@@ -94,6 +94,14 @@ export default function RevealPanel(p: Props) {
     // worked perfectly. Exactly one seat's cards appear, which reads like a
     // protocol asymmetry and is not one.
     served.current = new Set();
+    // `joined` too, for the same reason and it is worse: it tracks which
+    // aggregate ROUNDS this tab has joined, keyed by deck position, and the
+    // community positions are the same small integers on every table
+    // (2*max_seats .. +4). Carrying them across meant a tab that revealed the
+    // board on one table silently refused to join the board rounds on the
+    // next -- the flop simply never appeared, with nothing logged, because
+    // `joined.current.has(pos)` returned early before any work started.
+    joined.current = new Set();
     return () => { t.close(); };
     // relayRev: changing the relay must tear the old connection down and
     // reconnect, not wait for a reload. It also clears `served`, which is
