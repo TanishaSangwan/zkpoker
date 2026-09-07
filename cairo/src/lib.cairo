@@ -533,6 +533,14 @@ pub trait IPokerGame<TState> {
     // not a refund target.
     fn reclaim_stalled_bet(ref self: TState, table_id: felt252, seat: felt252);
 
+    // Take your chips off the table and back into your wallet.
+    //
+    // Only between hands: a stack cannot be pulled out from under a pot it is
+    // committed to, which is why this refuses while a hand is live. The seat
+    // is freed, so leaving is genuinely leaving rather than sitting out with
+    // money still on the table.
+    fn leave_table(ref self: TState, table_id: felt252, seat: felt252);
+
     // ── Settlement ──────────────────────────────────────────────────────
     // `winners` is dealer-supplied trusted input — `settle_table_by_hand`
     // below is the on-chain-computed alternative, added round 6. Splits
@@ -923,7 +931,9 @@ pub trait IPokerGame<TState> {
     // is a lever on a hand in progress. The rungs themselves are fixed in the
     // contract rather than passed in, so the dealer chooses the pace and not
     // the price.
-    fn set_blind_schedule(ref self: TState, table_id: felt252, hands_per_level: u32);
+    fn set_blind_schedule(
+        ref self: TState, table_id: felt252, hands_per_level: u32, unit: u128,
+    );
 
     // Posts the small and big blinds once the button is known. Permissionless:
     // it takes no input beyond the table, the amounts and the seats are fixed
@@ -950,7 +960,15 @@ pub trait IPokerGame<TState> {
     fn get_blinds_posted(self: @TState, table_id: felt252) -> bool;
     fn get_hand_number(self: @TState, table_id: felt252) -> u32;
     // 0 when the table plays fixed blinds; otherwise hands per rung.
+    // Chips this seat has left ON THE TABLE. 0 on a wallet-funded table
+    // (one created with buy_in = 0), where the wallet is the stack.
+    fn get_seat_stack(self: @TState, table_id: felt252, seat: felt252) -> u128;
+    fn get_seat_all_in(self: @TState, table_id: felt252, seat: felt252) -> bool;
+    // Whether this table plays stacks at all: buy_in != 0.
+    fn get_table_buy_in(self: @TState, table_id: felt252) -> u128;
     fn get_blind_level_hands(self: @TState, table_id: felt252) -> u32;
+    // What one ladder rung unit is worth. 0 on a fixed-blind table.
+    fn get_blind_level_unit(self: @TState, table_id: felt252) -> u128;
     // Which rung this hand is playing. Always 0 on a fixed-blind table.
     fn get_blind_level(self: @TState, table_id: felt252) -> u32;
 
@@ -1098,6 +1116,10 @@ pub mod PokerGame {
         pub const NOT_SEAT_OWNER: felt252 = 'NOT_SEAT_OWNER';
         pub const NOTE_ID_TAKEN: felt252 = 'NOTE_ID_TAKEN';
         pub const TRANSFER_FAILED: felt252 = 'TRANSFER_FAILED';
+        pub const HAND_IN_PROGRESS: felt252 = 'HAND_IN_PROGRESS';
+        // Betting more than the chips this seat brought to the table.
+        pub const NOT_ENOUGH_CHIPS: felt252 = 'NOT_ENOUGH_CHIPS';
+        pub const BAD_AMOUNT: felt252 = 'BAD_AMOUNT';
         pub const TOO_EARLY: felt252 = 'TOO_EARLY';
         pub const ALREADY_SETTLED: felt252 = 'ALREADY_SETTLED';
         pub const BETTING_CLOSED: felt252 = 'BETTING_CLOSED';
@@ -1168,6 +1190,11 @@ pub mod PokerGame {
         pub const BLINDS_POSTED: felt252 = 'BLINDS_ALREADY_POSTED';
         pub const NEED_BLINDS: felt252 = 'BLINDS_NOT_POSTED';
         pub const BAD_BLINDS: felt252 = 'BIG_BLIND_MUST_EXCEED_SB';
+        // A ladder whose unit is zero makes every rung zero, which is a table
+        // with no blinds wearing a blind structure. Its own error because
+        // BAD_BLINDS reads "BIG_BLIND_MUST_EXCEED_SB", which is not what is
+        // wrong and would send a reader looking in the wrong place.
+        pub const BAD_BLIND_UNIT: felt252 = 'BAD_BLIND_UNIT';
         pub const EMPTY_SEAT: felt252 = 'SEAT_IS_EMPTY';
         pub const NOT_SETTLED: felt252 = 'HAND_NOT_SETTLED';
         pub const CARD_REVEALED: felt252 = 'CARD_ALREADY_REVEALED';
@@ -1490,7 +1517,24 @@ pub mod PokerGame {
         // Hands per rung of the blind ladder; 0 means the table plays the
         // fixed pair set_blinds stored. Table state, not hand state -- so it
         // is deliberately absent from reset_hand.
+        // Chips ON THE TABLE, per seat, once a table has a real buy-in.
+        //
+        // A table created with buy_in = 0 keeps the original behaviour: bet()
+        // pulls from the player's wallet at bet time and there is no stack, no
+        // cap and no all-in. That is deliberate rather than lazy -- it is the
+        // model every existing test and the whole audited betting path was
+        // written against, and preserving it exactly means adding stacks does
+        // not put the paths that already move money at risk.
+        //
+        // With buy_in > 0, join_table escrows the buy-in here and betting
+        // draws it down. `seat_all_in` records a seat that has pushed its last
+        // chip, which round_complete must treat as done acting -- it cannot
+        // match a raise however long it is given.
+        seat_stack: Map<(felt252, felt252), u128>,
+        seat_all_in: Map<(felt252, felt252), bool>,
         blind_level_hands: Map<felt252, u32>,
+        // What one ladder unit is worth in the token's smallest unit.
+        blind_level_unit: Map<felt252, u128>,
         // The dealer button. Position, not authority -- it decides who posts
         // which blind and who acts first, and nothing else. The seat holding
         // it has no more power than any other.
@@ -1597,6 +1641,9 @@ pub mod PokerGame {
         ActionTimedOut: ActionTimedOut,
         BlindsSet: BlindsSet,
         BlindScheduleSet: BlindScheduleSet,
+        AllIn: AllIn,
+        PotAwarded: PotAwarded,
+        LeftTable: LeftTable,
         ButtonSet: ButtonSet,
         BlindsPosted: BlindsPosted,
         BlindPosted: BlindPosted,
@@ -1890,11 +1937,41 @@ pub mod PokerGame {
         pub big_blind: u128,
     }
 
+    // One layer of the pot going to one seat. Emitted per layer so a side
+    // pot is legible on chain rather than inferred from stack deltas.
+    #[derive(Drop, starknet::Event)]
+    pub struct PotAwarded {
+        #[key]
+        pub table_id: felt252,
+        pub seat: felt252,
+        pub amount: u128,
+        pub level: u128,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    pub struct LeftTable {
+        #[key]
+        pub table_id: felt252,
+        pub seat: felt252,
+        pub cashed_out: u128,
+    }
+
+    // A seat has pushed its last chip. Emitted so a client can show it
+    // without inferring it from a stack that reads zero for other reasons.
+    #[derive(Drop, starknet::Event)]
+    pub struct AllIn {
+        #[key]
+        pub table_id: felt252,
+        pub seat: felt252,
+        pub total: u128,
+    }
+
     #[derive(Drop, starknet::Event)]
     pub struct BlindScheduleSet {
         #[key]
         pub table_id: felt252,
         pub hands_per_level: u32,
+        pub unit: u128,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -2197,6 +2274,11 @@ pub mod PokerGame {
                 let seat: felt252 = s.into();
                 self.seat_folded.entry((table_id, seat)).write(false);
                 self.seat_forfeited.entry((table_id, seat)).write(false);
+                // All-in is a property of a HAND, not of a seat: a seat that
+                // shoved last hand and won is not all-in this one. The STACK
+                // deliberately survives -- that is the whole point of chips on
+                // a table, and award() has already credited any winnings to it.
+                self.seat_all_in.entry((table_id, seat)).write(false);
                 // Cleared because the money is gone: award() has already
                 // moved the pot into pending_payout, so leaving a stale
                 // contribution here would let reclaim_stalled_bet pay it a
@@ -2263,16 +2345,48 @@ pub mod PokerGame {
             }
             let owner = self.seat_owner.entry((table_id, seat)).read();
             assert(owner.is_non_zero(), errors::EMPTY_SEAT);
-            let token = self.table_token.entry(table_id).read();
-            let erc20 = IErc20Dispatcher { contract_address: token };
-            let before: u256 = erc20.balance_of(get_contract_address());
-            // The allowance was granted by the player, so a permissionless
-            // caller moves the player's money only in the amount and to the
-            // destination the contract chose -- it cannot redirect a cent.
-            let ok = erc20.transfer_from(owner, get_contract_address(), amount.into());
-            assert(ok, errors::TRANSFER_FAILED);
-            let after: u256 = erc20.balance_of(get_contract_address());
-            let received: u128 = (after - before).try_into().expect(errors::AMOUNT_OVERFLOW);
+
+            // Same two sources as bet(), and the same reason. On a table with
+            // a buy-in the blind comes off the stack; without one it is pulled
+            // from the wallet as it always was.
+            let buy_in = self.table_buy_in.entry(table_id).read();
+            let received: u128 = if buy_in != 0 {
+                let stack_entry = self.seat_stack.entry((table_id, seat));
+                let stack = stack_entry.read();
+                // A blind larger than the stack puts the seat ALL-IN for what
+                // it has, rather than reverting. Refusing here would be worse
+                // than unfair: post_blinds is permissionless and posts for the
+                // whole table, so one short stack would block every other
+                // seat's blind and the hand could never start.
+                let take = if amount <= stack { amount } else { stack };
+                stack_entry.write(stack - take);
+                if stack - take == 0 && take != 0 {
+                    self.seat_all_in.entry((table_id, seat)).write(true);
+                    self
+                        .emit(
+                            AllIn {
+                                table_id,
+                                seat,
+                                total: self.seat_contributed.entry((table_id, seat)).read() + take,
+                            },
+                        );
+                }
+                take
+            } else {
+                let token = self.table_token.entry(table_id).read();
+                let erc20 = IErc20Dispatcher { contract_address: token };
+                let before: u256 = erc20.balance_of(get_contract_address());
+                // The allowance was granted by the player, so a permissionless
+                // caller moves the player's money only in the amount and to the
+                // destination the contract chose -- it cannot redirect a cent.
+                let ok = erc20.transfer_from(owner, get_contract_address(), amount.into());
+                assert(ok, errors::TRANSFER_FAILED);
+                let after: u256 = erc20.balance_of(get_contract_address());
+                (after - before).try_into().expect(errors::AMOUNT_OVERFLOW)
+            };
+            if received == 0 {
+                return;
+            }
 
             let pot_entry = self.table_pot.entry(table_id);
             pot_entry.write(pot_entry.read() + received);
@@ -2323,6 +2437,21 @@ pub mod PokerGame {
         // token-binding and remainder rules. Payout notes come from
         // seat_note, bound at join_table, so no caller can redirect one.
         fn award(ref self: ContractState, table_id: felt252, winners: Span<felt252>) {
+            let buy_in = self.table_buy_in.entry(table_id).read();
+            if buy_in == 0 {
+                // Wallet-funded table: one pot, split among the winners, paid
+                // to payout notes. Unchanged, and every existing test covers
+                // this path -- a table with no buy-in cannot produce an
+                // all-in, so it cannot produce a side pot either.
+                self.award_single_pot(table_id, winners);
+                return;
+            }
+            self.award_layered(table_id, winners);
+        }
+
+        /// The original single-pot award: split, remainder to the first
+        /// winner, credited to each seat's payout note.
+        fn award_single_pot(ref self: ContractState, table_id: felt252, winners: Span<felt252>) {
             let token = self.table_token.entry(table_id).read();
             let pot = self.table_pot.entry(table_id).read();
             let num: u128 = winners.len().into();
@@ -2350,6 +2479,109 @@ pub mod PokerGame {
                 entry.write(entry.read() + bump);
                 w += 1;
             };
+            self.table_pot.entry(table_id).write(0);
+            self.table_settled.entry(table_id).write(true);
+            self.emit(Settled { table_id, winner_count: winners.len() });
+        }
+
+        /// Award a table that plays STACKS, where a seat may be all-in for
+        /// less than the bet it faced.
+        ///
+        /// A single pot is wrong the moment two seats have put in different
+        /// amounts: a seat that is all-in for 40 against two opponents who
+        /// each put in 200 may win 40 from each of them and no more. The rest
+        /// is a SIDE POT that only the seats who paid into it can win.
+        ///
+        /// Built the standard way, by layers. Walk the distinct contribution
+        /// levels in increasing order; each layer is
+        ///
+        ///     (level - previous) x (seats who contributed at least `level`)
+        ///
+        /// and is won by the best hand among the seats eligible for it --
+        /// those who reached that level AND are still in the hand. Folded
+        /// money stays in the layer it was put into, which is what makes a
+        /// fold cost what it cost.
+        ///
+        /// `winners` is in the caller's preference order (settle_from_reveals
+        /// ranks it), so "best eligible" is the first entry of `winners` that
+        /// qualifies for the layer. A layer nobody in `winners` qualifies for
+        /// goes to the seats who paid into it -- it can only be money the
+        /// eventual winner never matched.
+        ///
+        /// Winnings are credited to the STACK, not to a payout note: chips
+        /// won at a table stay on the table and play the next hand. Cashing
+        /// out is `leave_table`.
+        fn award_layered(ref self: ContractState, table_id: felt252, winners: Span<felt252>) {
+            let max_seats = self.table_max_seats.entry(table_id).read();
+            let mut prev: u128 = 0;
+            let mut guard: u32 = 0;
+
+            // At most one layer per distinct contribution, so at most one per
+            // seat. The bound is what makes this terminate.
+            while guard != max_seats {
+                // The smallest contribution still above `prev`: the next layer
+                // boundary.
+                let mut level: u128 = 0;
+                let mut i: u32 = 0;
+                while i != max_seats {
+                    let c = self.seat_contributed.entry((table_id, i.into())).read();
+                    if c > prev && (level == 0 || c < level) {
+                        level = c;
+                    }
+                    i += 1;
+                };
+                if level == 0 {
+                    break; // nothing left above `prev`
+                }
+
+                // Everyone who reached this level pays (level - prev) into it.
+                let step = level - prev;
+                let mut layer: u128 = 0;
+                let mut j: u32 = 0;
+                while j != max_seats {
+                    if self.seat_contributed.entry((table_id, j.into())).read() >= level {
+                        layer += step;
+                    }
+                    j += 1;
+                };
+
+                // Best eligible winner: first in the caller's ranking that
+                // reached this level and is still in the hand.
+                let mut paid = false;
+                let mut w: u32 = 0;
+                while w != winners.len() {
+                    let seat = *winners.at(w);
+                    let reached = self.seat_contributed.entry((table_id, seat)).read() >= level;
+                    if reached && self.is_active(table_id, seat) {
+                        let e = self.seat_stack.entry((table_id, seat));
+                        e.write(e.read() + layer);
+                        self.emit(PotAwarded { table_id, seat, amount: layer, level });
+                        paid = true;
+                        break;
+                    }
+                    w += 1;
+                };
+
+                if !paid {
+                    // Nobody who can win the hand paid into this layer, so it
+                    // is money only the short stacks put up. Return it to them
+                    // rather than stranding it in the contract.
+                    let mut k: u32 = 0;
+                    while k != max_seats {
+                        let seat: felt252 = k.into();
+                        if self.seat_contributed.entry((table_id, seat)).read() >= level {
+                            let e = self.seat_stack.entry((table_id, seat));
+                            e.write(e.read() + step);
+                            self.emit(PotAwarded { table_id, seat, amount: step, level });
+                        }
+                        k += 1;
+                    };
+                }
+
+                prev = level;
+                guard += 1;
+            };
+
             self.table_pot.entry(table_id).write(0);
             self.table_settled.entry(table_id).write(true);
             self.emit(Settled { table_id, winner_count: winners.len() });
@@ -2398,7 +2630,9 @@ pub mod PokerGame {
                     self.big_blind.entry(table_id).read(),
                 );
             }
-            blind_level_amounts(self.blind_level_of(table_id))
+            let (small, big) = blind_level_amounts(self.blind_level_of(table_id));
+            let unit = self.blind_level_unit.entry(table_id).read();
+            (small * unit, big * unit)
         }
 
         // Stored 0 means the epoch has never been bumped; it reads as 1.
@@ -2459,7 +2693,12 @@ pub mod PokerGame {
                     break;
                 }
                 let cand = (start + step) % max_seats;
-                if self.is_active(table_id, cand.into()) {
+                // Skip all-in seats: they are in the hand but have nothing
+                // left to act with, so handing them the turn would stall the
+                // table on a seat that can only ever check. round_complete
+                // skips them for the same reason.
+                if self.is_active(table_id, cand.into())
+                    && !self.seat_all_in.entry((table_id, cand.into())).read() {
                     self.action_turn.entry(table_id).write(cand);
                     break;
                 }
@@ -2496,7 +2735,14 @@ pub mod PokerGame {
                     break;
                 }
                 let seat: felt252 = i.into();
-                if self.is_active(table_id, seat) {
+                // An all-in seat is done acting for the rest of the hand. It
+                // is still IN the hand -- it can win what it matched -- but it
+                // has no chips left, so it can never reach `high`, and waiting
+                // for it would freeze the table forever. Skipping it here is
+                // what makes all-in terminate; `award` is what makes it fair,
+                // by capping what it wins at what it actually put in.
+                if self.is_active(table_id, seat)
+                    && !self.seat_all_in.entry((table_id, seat)).read() {
                     let acted = self.seat_acted_epoch.entry((table_id, street, seat)).read();
                     let put_in = self.street_contributed.entry((table_id, street, seat)).read();
                     if acted != epoch || put_in != high {
@@ -2757,6 +3003,34 @@ pub mod PokerGame {
             // on-chain for the join call itself.
             let caller = get_caller_address();
             self.seat_owner.entry(key).write(caller);
+
+            // Buy in, if this table has one.
+            //
+            // The buy-in was written by create_table and then never read by
+            // anything -- no getter, no transfer, no cap -- so it described
+            // nothing and a seat could bet its entire wallet on one hand. It
+            // is real now: the chips move onto the table here and betting
+            // draws them down, which is what makes a stack a stack.
+            //
+            // Escrowed to THIS contract, exactly as bet() escrows a wager, so
+            // the pot and the stacks live in one place and settlement does not
+            // have to reason about two.
+            let buy_in = self.table_buy_in.entry(table_id).read();
+            if buy_in != 0 {
+                let token = self.table_token.entry(table_id).read();
+                let erc20 = IErc20Dispatcher { contract_address: token };
+                let before = erc20.balance_of(get_contract_address());
+                let ok = erc20.transfer_from(caller, get_contract_address(), buy_in.into());
+                assert(ok, errors::TRANSFER_FAILED);
+                // Measured, not assumed: a fee-on-transfer token delivers less
+                // than it was asked for, and crediting the requested amount
+                // would let a seat sit down with chips the contract never
+                // received. Same rule bet() already follows.
+                let after = erc20.balance_of(get_contract_address());
+                let received: u128 = (after - before).try_into().expect(errors::AMOUNT_OVERFLOW);
+                assert(received == buy_in, errors::TRANSFER_FAILED);
+                self.seat_stack.entry(key).write(received);
+            }
             // Security review (2026-08-30 re-audit, Finding 1): bind this
             // note_id to whoever registers it first. pending_payout and
             // payout_token are keyed by bare note_id with no table_id, so
@@ -2901,13 +3175,51 @@ pub mod PokerGame {
             // fee-on-transfer token could report success while moving less
             // than `amount` (or nothing at all) — measure the real balance
             // delta instead of trusting the nominal parameter.
-            let token = self.table_token.entry(table_id).read();
-            let erc20 = IErc20Dispatcher { contract_address: token };
-            let balance_before: u256 = erc20.balance_of(get_contract_address());
-            let transferred = erc20.transfer_from(caller, get_contract_address(), amount.into());
-            assert(transferred, errors::TRANSFER_FAILED);
-            let balance_after: u256 = erc20.balance_of(get_contract_address());
-            let received: u128 = (balance_after - balance_before).try_into().expect(errors::AMOUNT_OVERFLOW);
+            // WHERE THE CHIPS COME FROM depends on whether this table has a
+            // buy-in. Both paths end with `received` credited to the pot, so
+            // everything below is common.
+            //
+            //   buy_in == 0 -- the original model, kept exactly: pull from the
+            //     player's wallet at bet time. The wallet is the stack, there
+            //     is no cap and no all-in. Every existing table and the whole
+            //     audited betting path works this way, and preserving it means
+            //     adding stacks does not disturb it.
+            //
+            //   buy_in != 0 -- draw down the chips escrowed at join_table. The
+            //     money is already inside this contract, so no transfer runs
+            //     here at all; it moves from the seat's stack to the pot.
+            let buy_in = self.table_buy_in.entry(table_id).read();
+            let received: u128 = if buy_in == 0 {
+                // Security review (round 3, Finding 4): a malicious or
+                // fee-on-transfer token could report success while moving less
+                // than `amount` (or nothing at all) -- measure the real balance
+                // delta instead of trusting the nominal parameter.
+                let token = self.table_token.entry(table_id).read();
+                let erc20 = IErc20Dispatcher { contract_address: token };
+                let balance_before: u256 = erc20.balance_of(get_contract_address());
+                let transferred = erc20.transfer_from(caller, get_contract_address(), amount.into());
+                assert(transferred, errors::TRANSFER_FAILED);
+                let balance_after: u256 = erc20.balance_of(get_contract_address());
+                (balance_after - balance_before).try_into().expect(errors::AMOUNT_OVERFLOW)
+            } else {
+                let stack_entry = self.seat_stack.entry((table_id, seat));
+                let stack = stack_entry.read();
+                // You cannot bet chips you did not bring. This is the whole
+                // point of a buy-in, and the thing that was missing while
+                // table_buy_in was written and never read.
+                assert(amount != 0, errors::BAD_AMOUNT);
+                assert(amount <= stack, errors::NOT_ENOUGH_CHIPS);
+                stack_entry.write(stack - amount);
+                // Out of chips: this seat is all-in. It cannot match a later
+                // raise however long it is given, so round_complete stops
+                // waiting on it and settlement caps what it can win at what
+                // everyone else matched (see `award`).
+                if stack - amount == 0 {
+                    self.seat_all_in.entry((table_id, seat)).write(true);
+                    self.emit(AllIn { table_id, seat, total: self.seat_contributed.entry((table_id, seat)).read() + amount });
+                }
+                amount
+            };
 
             let pot_entry = self.table_pot.entry(table_id);
             pot_entry.write(pot_entry.read() + received);
@@ -2923,7 +3235,14 @@ pub mod PokerGame {
 
             let high_entry = self.street_high.entry((table_id, street));
             let high = high_entry.read();
-            assert(put_in >= high, errors::BELOW_CALL);
+            // Short of the call is legal ONLY when it is everything the seat
+            // has. That is the all-in rule, and it is the player's decision:
+            // facing a bet you cannot cover, you may fold or push what is
+            // left. What you may not do is put in less than the call while
+            // still holding chips -- that would be calling a bet you have not
+            // matched.
+            let is_all_in = self.seat_all_in.entry((table_id, seat)).read();
+            assert(put_in >= high || is_all_in, errors::BELOW_CALL);
             if put_in > high {
                 high_entry.write(put_in);
                 let e = self.epoch_of(table_id, street);
@@ -2939,6 +3258,45 @@ pub mod PokerGame {
             self.emit(Bet { table_id, seat, amount: received });
 
             self.reentrancy_lock.write(false);
+        }
+
+        fn leave_table(ref self: ContractState, table_id: felt252, seat: felt252) {
+            assert(self.table_exists.entry(table_id).read(), errors::NO_TABLE);
+            let caller = get_caller_address();
+            assert(caller == self.seat_owner.entry((table_id, seat)).read(), errors::NOT_SEAT_OWNER);
+
+            // Not mid-hand. A stack that is committed to a live pot cannot be
+            // withdrawn without either stealing from the pot or unwinding
+            // bets other people have already responded to, so the honest
+            // answer is to wait for the hand to end. A voided or settled
+            // table is over by definition, and a table that never started
+            // dealing has nothing at risk either.
+            let live = self.shuffle_started.entry(table_id).read()
+                && !self.table_settled.entry(table_id).read()
+                && !self.table_voided.entry(table_id).read();
+            assert(!live, errors::HAND_IN_PROGRESS);
+            assert(self.seat_contributed.entry((table_id, seat)).read() == 0, errors::HAND_IN_PROGRESS);
+
+            let stack = self.seat_stack.entry((table_id, seat)).read();
+            self.seat_stack.entry((table_id, seat)).write(0);
+            // Free the seat before the transfer, not after: the token is
+            // caller-chosen at create_table, so this is an external call to
+            // an untrusted contract and the state it could reenter must
+            // already be final.
+            self.seat_owner.entry((table_id, seat)).write(Zero::zero());
+            self.seat_taken.entry((table_id, seat)).write(false);
+            self.seat_all_in.entry((table_id, seat)).write(false);
+
+            if stack != 0 {
+                assert(!self.reentrancy_lock.read(), errors::REENTRANCY);
+                self.reentrancy_lock.write(true);
+                let token = self.table_token.entry(table_id).read();
+                let erc20 = IErc20Dispatcher { contract_address: token };
+                let ok = erc20.transfer(caller, stack.into());
+                assert(ok, errors::TRANSFER_FAILED);
+                self.reentrancy_lock.write(false);
+            }
+            self.emit(LeftTable { table_id, seat, cashed_out: stack });
         }
 
         fn reclaim_stalled_bet(ref self: ContractState, table_id: felt252, seat: felt252) {
@@ -3135,6 +3493,34 @@ pub mod PokerGame {
             assert(get_caller_address() == self.table_dealer.entry(table_id).read(), errors::NOT_DEALER);
             assert(winners.len() == payout_note_ids.len(), errors::LEN_MISMATCH);
             assert(winners.len() != 0, errors::NO_INPUT);
+
+            // A table that plays STACKS settles into stacks, in layers.
+            //
+            // This path has its own payout loop rather than going through
+            // award(), which meant it paid the whole pot to the named winners
+            // and knew nothing about all-in -- so on a stack table a seat
+            // all-in for 100 against two 400s would have been handed the
+            // 600 nobody wagered against it. The layering lives in one place
+            // and both settlement paths use it.
+            //
+            // payout_note_ids are checked above and then unused here on
+            // purpose: chips won at a table stay on the table and play the
+            // next hand. Cashing out is leave_table.
+            if self.table_buy_in.entry(table_id).read() != 0 {
+                let mut i: u32 = 0;
+                while i != winners.len() {
+                    let seat = *winners.at(i);
+                    assert(!self.seat_folded.entry((table_id, seat)).read(), errors::FOLDED);
+                    assert(
+                        self.payout_note_of(table_id, seat) == *payout_note_ids.at(i),
+                        errors::NO_TABLE,
+                    );
+                    i += 1;
+                };
+                self.award_layered(table_id, winners);
+                self.reentrancy_lock.write(false);
+                return;
+            }
 
             let token = self.table_token.entry(table_id).read();
             let pot = self.table_pot.entry(table_id).read();
@@ -4373,7 +4759,7 @@ pub mod PokerGame {
         }
 
         fn set_blind_schedule(
-            ref self: ContractState, table_id: felt252, hands_per_level: u32,
+            ref self: ContractState, table_id: felt252, hands_per_level: u32, unit: u128,
         ) {
             assert(self.table_exists.entry(table_id).read(), errors::NO_TABLE);
             assert(!self.table_settled.entry(table_id).read(), errors::ALREADY_SETTLED);
@@ -4391,8 +4777,23 @@ pub mod PokerGame {
             assert(!self.shuffle_started.entry(table_id).read(), errors::SHUFFLE_STARTED);
             assert(self.hand_number.entry(table_id).read() == 0, errors::BLINDS_LOCKED);
             assert(hands_per_level != 0, errors::BAD_BLINDS);
+            // The rungs are RELATIVE. blind_level_amounts returns 10/20 .. 300/600
+            // as bare integers, and every amount this contract takes is a raw
+            // u128 in the token's smallest unit -- so without a multiplier the
+            // top rung of the ladder is 600 wei, which against an 18-decimal
+            // token is 6e-16 of a coin. A whole rising-blind table was
+            // therefore unplayable for any stake worth playing for, while
+            // set_blinds (which takes the amount directly) was fine.
+            //
+            // `unit` is what one rung-point is worth: 10^18 gives 10/20 STRK
+            // through 300/600 STRK. It is per table rather than per rung on
+            // purpose -- the dealer picks the PACE and the SCALE, never the
+            // shape, so no dealer can flatten the ladder against a player who
+            // is winning.
+            assert(unit != 0, errors::BAD_BLIND_UNIT);
             self.blind_level_hands.entry(table_id).write(hands_per_level);
-            self.emit(BlindScheduleSet { table_id, hands_per_level });
+            self.blind_level_unit.entry(table_id).write(unit);
+            self.emit(BlindScheduleSet { table_id, hands_per_level, unit });
         }
 
 
@@ -4474,8 +4875,20 @@ pub mod PokerGame {
             let (_, big) = self.current_blinds(table_id);
             big
         }
+        fn get_seat_stack(self: @ContractState, table_id: felt252, seat: felt252) -> u128 {
+            self.seat_stack.entry((table_id, seat)).read()
+        }
+        fn get_seat_all_in(self: @ContractState, table_id: felt252, seat: felt252) -> bool {
+            self.seat_all_in.entry((table_id, seat)).read()
+        }
+        fn get_table_buy_in(self: @ContractState, table_id: felt252) -> u128 {
+            self.table_buy_in.entry(table_id).read()
+        }
         fn get_blind_level_hands(self: @ContractState, table_id: felt252) -> u32 {
             self.blind_level_hands.entry(table_id).read()
+        }
+        fn get_blind_level_unit(self: @ContractState, table_id: felt252) -> u128 {
+            self.blind_level_unit.entry(table_id).read()
         }
         fn get_blind_level(self: @ContractState, table_id: felt252) -> u32 {
             self.blind_level_of(table_id)

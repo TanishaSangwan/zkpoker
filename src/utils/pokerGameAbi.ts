@@ -326,6 +326,22 @@ export const pokerGameAbi = [
       },
       {
         "type": "function",
+        "name": "leave_table",
+        "inputs": [
+          {
+            "name": "table_id",
+            "type": "core::felt252"
+          },
+          {
+            "name": "seat",
+            "type": "core::felt252"
+          }
+        ],
+        "outputs": [],
+        "state_mutability": "external"
+      },
+      {
+        "type": "function",
         "name": "settle_table",
         "inputs": [
           {
@@ -843,6 +859,10 @@ export const pokerGameAbi = [
           {
             "name": "hands_per_level",
             "type": "core::integer::u32"
+          },
+          {
+            "name": "unit",
+            "type": "core::integer::u128"
           }
         ],
         "outputs": [],
@@ -970,6 +990,62 @@ export const pokerGameAbi = [
       },
       {
         "type": "function",
+        "name": "get_seat_stack",
+        "inputs": [
+          {
+            "name": "table_id",
+            "type": "core::felt252"
+          },
+          {
+            "name": "seat",
+            "type": "core::felt252"
+          }
+        ],
+        "outputs": [
+          {
+            "type": "core::integer::u128"
+          }
+        ],
+        "state_mutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "get_seat_all_in",
+        "inputs": [
+          {
+            "name": "table_id",
+            "type": "core::felt252"
+          },
+          {
+            "name": "seat",
+            "type": "core::felt252"
+          }
+        ],
+        "outputs": [
+          {
+            "type": "core::bool"
+          }
+        ],
+        "state_mutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "get_table_buy_in",
+        "inputs": [
+          {
+            "name": "table_id",
+            "type": "core::felt252"
+          }
+        ],
+        "outputs": [
+          {
+            "type": "core::integer::u128"
+          }
+        ],
+        "state_mutability": "view"
+      },
+      {
+        "type": "function",
         "name": "get_blind_level_hands",
         "inputs": [
           {
@@ -980,6 +1056,22 @@ export const pokerGameAbi = [
         "outputs": [
           {
             "type": "core::integer::u32"
+          }
+        ],
+        "state_mutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "get_blind_level_unit",
+        "inputs": [
+          {
+            "name": "table_id",
+            "type": "core::felt252"
+          }
+        ],
+        "outputs": [
+          {
+            "type": "core::integer::u128"
           }
         ],
         "state_mutability": "view"
@@ -2561,6 +2653,82 @@ export const pokerGameAbi = [
         "name": "hands_per_level",
         "type": "core::integer::u32",
         "kind": "data"
+      },
+      {
+        "name": "unit",
+        "type": "core::integer::u128",
+        "kind": "data"
+      }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "zkpoker::PokerGame::AllIn",
+    "kind": "struct",
+    "members": [
+      {
+        "name": "table_id",
+        "type": "core::felt252",
+        "kind": "key"
+      },
+      {
+        "name": "seat",
+        "type": "core::felt252",
+        "kind": "data"
+      },
+      {
+        "name": "total",
+        "type": "core::integer::u128",
+        "kind": "data"
+      }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "zkpoker::PokerGame::PotAwarded",
+    "kind": "struct",
+    "members": [
+      {
+        "name": "table_id",
+        "type": "core::felt252",
+        "kind": "key"
+      },
+      {
+        "name": "seat",
+        "type": "core::felt252",
+        "kind": "data"
+      },
+      {
+        "name": "amount",
+        "type": "core::integer::u128",
+        "kind": "data"
+      },
+      {
+        "name": "level",
+        "type": "core::integer::u128",
+        "kind": "data"
+      }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "zkpoker::PokerGame::LeftTable",
+    "kind": "struct",
+    "members": [
+      {
+        "name": "table_id",
+        "type": "core::felt252",
+        "kind": "key"
+      },
+      {
+        "name": "seat",
+        "type": "core::felt252",
+        "kind": "data"
+      },
+      {
+        "name": "cashed_out",
+        "type": "core::integer::u128",
+        "kind": "data"
       }
     ]
   },
@@ -2835,6 +3003,21 @@ export const pokerGameAbi = [
       {
         "name": "BlindScheduleSet",
         "type": "zkpoker::PokerGame::BlindScheduleSet",
+        "kind": "nested"
+      },
+      {
+        "name": "AllIn",
+        "type": "zkpoker::PokerGame::AllIn",
+        "kind": "nested"
+      },
+      {
+        "name": "PotAwarded",
+        "type": "zkpoker::PokerGame::PotAwarded",
+        "kind": "nested"
+      },
+      {
+        "name": "LeftTable",
+        "type": "zkpoker::PokerGame::LeftTable",
         "kind": "nested"
       },
       {

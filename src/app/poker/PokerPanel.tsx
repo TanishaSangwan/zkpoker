@@ -560,7 +560,13 @@ function CreateTable(p: any) {
       }
       if (ladder > 0) {
         calls.push(pgCall(contract, 'set_blind_schedule', {
-          table_id: tableId, hands_per_level: String(ladder),
+          table_id: tableId,
+          hands_per_level: String(ladder),
+          // One rung-point = 1 STRK, so the ladder runs 10/20 STRK up to
+          // 300/600 STRK. The rungs are bare integers in the contract, and
+          // without this multiplier the top of the whole ladder would be 600
+          // wei -- 6e-16 STRK -- which is dust against a hand of gas.
+          unit: (10n ** 18n).toString(),
         }));
       } else if (strkToBase(bigBlind) > 0n) {
         calls.push(pgCall(contract, 'set_blinds', {
@@ -606,7 +612,7 @@ function CreateTable(p: any) {
         </div>
         <span className={styles.fieldHint}>
           {blindMode === 'rising'
-            ? 'Ladder is fixed in the contract — 10/20 up to 300/600, then held. You choose the pace, not the price. DEMO SCALE ONLY: those rungs are raw base units, so the top one is 6e-16 STRK — the whole ladder is dust against a hand of gas. Use fixed blinds for a stake worth playing for.'
+            ? 'Ladder is fixed in the contract — 10/20, 20/40, 30/60, 50/100, 100/200, 200/400, 300/600 STRK, then held. You choose the pace, not the price.'
             : 'The same small/big every hand, and the only mode that can express a real stake — the amount is yours to choose.'}{' '}
           <strong>Decide now:</strong> a schedule is only accepted before the first hand, so a
           table created with fixed blinds can never be switched to rising.

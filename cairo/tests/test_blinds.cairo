@@ -643,7 +643,7 @@ fn setup_ladder(
 
     start_cheat_caller_address(game.contract_address, DEALER());
     game.create_table(TABLE_1, token_addr, 0, seats);
-    game.set_blind_schedule(TABLE_1, hands_per_level);
+    game.set_blind_schedule(TABLE_1, hands_per_level, 1);
     stop_cheat_caller_address(game.contract_address);
 
     let players = array![ALICE(), BOB(), CAROL()];
@@ -838,7 +838,7 @@ fn test_blind_schedule_non_dealer_rejected() {
 
     let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
     start_cheat_caller_address(game.contract_address, MALLORY());
-    let outcome = safe.set_blind_schedule(TABLE_1, 1);
+    let outcome = safe.set_blind_schedule(TABLE_1, 1, 1);
     stop_cheat_caller_address(game.contract_address);
     match outcome {
         Result::Ok(_) => panic!("a stranger set the blind structure"),
@@ -854,7 +854,7 @@ fn test_blind_schedule_of_zero_rejected() {
     start_cheat_caller_address(game.contract_address, DEALER());
     game.create_table(TABLE_1, token_addr, 0, TWO_SEATS);
     let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
-    let outcome = safe.set_blind_schedule(TABLE_1, 0);
+    let outcome = safe.set_blind_schedule(TABLE_1, 0, 1);
     stop_cheat_caller_address(game.contract_address);
     match outcome {
         Result::Ok(_) => panic!("zero hands per level accepted"),
@@ -870,7 +870,7 @@ fn test_blind_schedule_after_the_shuffle_starts_rejected() {
     let (game, _v, _t) = setup(2);
     let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
     start_cheat_caller_address(game.contract_address, DEALER());
-    let outcome = safe.set_blind_schedule(TABLE_1, 1);
+    let outcome = safe.set_blind_schedule(TABLE_1, 1, 1);
     stop_cheat_caller_address(game.contract_address);
     match outcome {
         Result::Ok(_) => panic!("ladder set mid-hand"),
@@ -890,7 +890,7 @@ fn test_blind_schedule_after_the_first_hand_rejected() {
 
     let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
     start_cheat_caller_address(game.contract_address, DEALER());
-    let outcome = safe.set_blind_schedule(TABLE_1, 5);
+    let outcome = safe.set_blind_schedule(TABLE_1, 5, 1);
     stop_cheat_caller_address(game.contract_address);
     match outcome {
         Result::Ok(_) => panic!("ladder re-timed after a hand had played"),

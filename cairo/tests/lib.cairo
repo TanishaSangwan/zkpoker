@@ -9,3 +9,4 @@ mod test_hand_eval;
 mod test_shuffle;
 mod test_dealing;
 mod test_blinds;
+mod test_stacks;
