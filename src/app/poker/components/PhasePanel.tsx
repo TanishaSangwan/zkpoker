@@ -344,6 +344,47 @@ export default function PhasePanel(p: Props) {
     })();
   }, [autoAdvance, table.phase, table.roundComplete, table.street, table.tableId, account, provider]);
 
+  // ── the next hand ──────────────────────────────────────────────────────
+  //
+  // start_next_hand rotates the button one occupied seat, bumps hand_number
+  // (which is what walks the blind ladder), and clears the per-hand state.
+  // It is permissionless for the same reason advance_street is: it takes only
+  // a table id, every precondition is checked on-chain, and its effect is
+  // fixed -- so whoever sends it chooses nothing.
+  //
+  // Occupied, not active, is the rule for the button: blinds are posted
+  // before anyone can fold, so a seat that folded last hand still owes one
+  // this hand.
+  //
+  // Keys survive a hand. seat_key_registered and seat_pk are deliberately not
+  // reset, so nobody re-registers between hands -- the dealer just calls
+  // begin_shuffle again, which puts the chain head back to the canonical deck
+  // and leaves the rotated button alone.
+  const startingNext = useRef(false);
+  const startNextHand = () =>
+    run('Starting the next hand', async () => {
+      const txt = await send('start_next_hand', { table_id: table.tableId });
+      return `${txt}\nbutton moves one occupied seat; hand ${table.handNumber + 1} is ready to shuffle`;
+    });
+
+  useEffect(() => {
+    if (!autoAdvance || table.phase !== 'settled') return;
+    if (!account || !provider || startingNext.current) return;
+    startingNext.current = true;
+    void (async () => {
+      try {
+        await send('start_next_hand', { table_id: table.tableId });
+        refresh();
+      } catch {
+        // Someone else started it first, which is the point of the call being
+        // permissionless -- and a table that is voided rather than settled
+        // refuses it outright, which is also correct.
+      } finally {
+        startingNext.current = false;
+      }
+    })();
+  }, [autoAdvance, table.phase, table.tableId, table.handNumber, account, provider]);
+
   // ── betting ────────────────────────────────────────────────────────────
   const [betAmount, setBetAmount] = useState('');
   const myTurn = table.phase === 'betting' && !table.roundComplete && table.actionTurn === yourSeat && !mySeat?.folded;
@@ -579,13 +620,31 @@ export default function PhasePanel(p: Props) {
           <span className={styles.fieldHint}>
             {table.phase === 'voided'
               ? 'Hand voided. Every seat can reclaim what it put in; the party that stalled has forfeited theirs.'
-              : 'Settled.'}
+              : `Hand ${table.handNumber} settled. Winnings are in pending payout until withdrawn.`}
           </span>
           {yourSeat !== null ? (
             <button className={uni.btn} disabled={!!busy}
               onClick={() => run('Reclaiming', () => send('reclaim_stalled_bet', { table_id: table.tableId, seat: String(yourSeat) }))}>
               Reclaim
             </button>
+          ) : null}
+          {/* A settled hand is not a finished table, and without this the
+              browser had no way to say so: start_next_hand existed on-chain
+              and in scripts/keeper.mjs, but no client call site, so a table
+              simply stopped here. Voided is excluded because the contract
+              refuses it -- those seats reclaim individually, and dealing over
+              the top would strand whatever had not been reclaimed. */}
+          {table.phase === 'settled' ? (
+            <button className={uni.btn} disabled={!!busy} onClick={startNextHand}>
+              Start hand {table.handNumber + 1}
+            </button>
+          ) : null}
+          {table.phase === 'settled' ? (
+            <span className={styles.fieldHint}>
+              Rotates the button one occupied seat and clears the hand. Registered keys survive,
+              so nobody registers again — the dealer just runs the shuffle. Permissionless: anyone
+              can send it, including a keeper, and it is already automatic above.
+            </span>
           ) : null}
         </div>
       ) : null}
