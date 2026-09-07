@@ -84,16 +84,19 @@
   user-select: none;
 }
 .sectionHeadToggle::-webkit-details-marker { display: none; }
-.sectionHeadToggle::before {
-  content: "\25B8";
-  flex: none;
-  align-self: center;
-  font-size: 11px;
+/* On .sectionTitle, not the summary itself: a 3rd flex item there split
+   space-between into two gaps instead of one, which is what pushed the
+   title off the left edge every other section title sits flush against. */
+.sectionHeadToggle > .sectionTitle::before {
+  content: "\25BE";
+  display: inline-block;
+  font-size: 10px;
   color: var(--muted);
-  margin-right: 2px;
+  margin-right: 6px;
+  transform: rotate(-90deg);
   transition: transform 140ms;
 }
-details[open] > .sectionHeadToggle::before { content: "\25B8"; transform: rotate(90deg); }
+details[open] > .sectionHeadToggle > .sectionTitle::before { transform: rotate(0deg); }
 .sectionHeadToggle:hover .sectionTitle { color: var(--pink-text); }
 
 .sectionTitle {
