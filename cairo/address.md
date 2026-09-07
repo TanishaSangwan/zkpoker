@@ -1,8 +1,54 @@
 # Deployments
 
-## Starknet Sepolia — 2026-09-08 (stacks, all-in, side pots)
+## Starknet Sepolia — 2026-09-08 (sitting out, end of table)
 
 The current deployment.
+
+| | class hash | address |
+|---|---|---|
+| `UltraKeccakZKHonkVerifier` (shuffle) | `0x052273e9c0b297c2aabe7f97fa2d10727a6ba113c44c69d9123eda277a3ea8c1` | `0x01611eabf8501402f7197b5f4589c9bfc7205509638db7094925f13c0f2f4c48` |
+| `UltraKeccakZKHonkVerifier` (shuffle+open) | `0x02c3c713738112c195b07aabdab09499e3ee01083ee7ab87b943a3040928ccb8` | `0x016bc0ea2cd365b48aa50697c08926baf11f48b4f3a22ee754e7977837b8b39b` |
+| `UltraKeccakZKHonkVerifier` (deck open, K=19) | `0x022c7ee726115333ef86c172dea4d794aaa5eef01ed7922d83a40811b28e28e6` | `0x05f484b5b8e6d31a9fe9ecb8981d399676d07bf647faca2236a039ed35cf20bd` |
+| `SchnorrKeyVerifier` | `0x05c89ad6970fcccd1ae338de0509b189f9a37004470898d451ebb4be92f8537e` | `0x0081a7e78a57c09085413797885e5541725d08be25256e4d34b5a85b14a1c184` |
+| `DleqVerifier` | `0x07258c8fea11a1b883e1bf8ec83d7d60898d33d09f6e7fd6e5e2efe06b793329` | `0x03f2ed20db6687e03fbbb77d828cda84356f99ac709dff45899443aa13fbff3a` |
+| `VerifierAdapter` | `0x0005ea1a1e9d87b175564e871c7c6570b8aab28f47066f74b812d6235a9c50be` | `0x0764cd547bb935624574f751a9ec7a9f0946d1ab2d0447cb4e18cf129c215a01` |
+| `PokerGame` | `0x03f6e679faa49122faf9a661cf9c2d8d0d2546fe6296fa7c14fc60835396230e` | `0x014b3c7c70159f0da82699dad66e9be372417fd6c5cb9fbe57492bd8cd19e049` |
+
+**What is new.** A player who loses their last chip sits the next hand out
+instead of staying in it: not dealt, not in the joint key, owed no blind, not
+a contender. The flag is frozen once per hand rather than derived from the
+stack, because a stack of zero also describes a seat that has just gone
+all-in. When one seat holds every chip there is no hand left to deal —
+`start_next_hand` refuses with `TABLE_IS_OVER`, and `end_table` closes the
+table and frees the seats of everyone who ran out. The last player collects
+their stack, which by then is every chip escrowed on the table, with
+`leave_table` — which now also works after the final hand, where it used to
+refuse because the settled hand's contribution record was still on the books.
+
+**All seven classes were redeclared** — the verifier classes were unchanged
+and reported as already declared, but the addresses above are fresh
+deployments, so this is a whole new address set, not a `PokerGame` swap. Any
+table on the previous contract is abandoned.
+
+Verified live on the deployed class: **102 external entrypoints**, including
+`end_table`, `get_seat_sitting_out` and `get_table_finished`, each answering a
+real `starknet_call`.
+
+### What it cost
+
+**155.10 STRK** (1606.91 -> 1451.81 on the deployer).
+
+Same rule as before: the declare's resource BOUND has to be covered by the
+balance even though the actual price is about half of it, so a redeploy needs
+roughly twice its own cost sitting in the account before it will start.
+
+**`scripts/deploy_local.sh` rewrites `.env.local` only.** `.env.production` is
+what the hosted build reads and has to be updated by hand, or the deployed
+frontend keeps pointing at the previous contract.
+
+---
+
+## Starknet Sepolia — 2026-09-08 (stacks, all-in, side pots) — SUPERSEDED
 
 | | class hash | address |
 |---|---|---|
