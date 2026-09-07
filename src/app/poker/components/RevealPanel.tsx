@@ -739,7 +739,14 @@ export default function RevealPanel(p: Props) {
   // and it does not matter which. Latched per hand rather than forever: the
   // button rotates and the blinds are posted again next hand -- and on a table
   // with a blind ladder they are posted at a different price each level.
-  const postedFor = useRef<number | null>(null);
+  // Keyed by TABLE AND hand, not hand alone.
+  //
+  // Hand numbers restart at 0 on every table, so a tab that posted the blinds
+  // for hand 0 here would skip them on the next table it opened -- the same
+  // shape of bug as `served` and `joined`, which both cached by a value that
+  // repeats across tables. Keying by both makes it self-defending rather than
+  // dependent on someone remembering to clear it.
+  const postedFor = useRef<string | null>(null);
   useEffect(() => {
     if (!autoServe || yourSeat === null || !account || !provider) return;
     if (!table.buttonSet || table.blindsPosted || table.settled || table.voided) return;
@@ -760,8 +767,9 @@ export default function RevealPanel(p: Props) {
     // a deal) holds either way. It also matches phaseOf, which already puts
     // 'posting' after 'opening'; the client was contradicting its own model.
     if (!table.deckOpened) return;
-    if (postedFor.current === table.handNumber) return;
-    postedFor.current = table.handNumber;
+    const handKey = `${table.tableId}:${table.handNumber}`;
+    if (postedFor.current === handKey) return;
+    postedFor.current = handKey;
     say('posting the blinds');
     void (async () => {
       try {

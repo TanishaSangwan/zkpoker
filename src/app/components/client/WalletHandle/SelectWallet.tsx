@@ -52,12 +52,17 @@ export default function SelectWallet({ variant = "ctaBig" }: { variant?: "nav" |
     return () => unsub();
   }, []);
 
-  // Show every detected wallet except MetaMask (its Snap probing spams an unlock popup)
-  // and Braavos (excluded from this starter's picker).
-  const pickable = wallets.filter((w) => {
-    const id = normalizeId(w.name);
-    return !id.includes("metamask") && !id.includes("braavos");
-  });
+  // Show every detected wallet except MetaMask, whose Snap probing spams an
+  // unlock popup.
+  //
+  // Braavos used to be excluded here too, inherited from the STRK20 starter
+  // this was built on with no reason given beyond "excluded from this
+  // starter's picker". It is one of the two main Starknet wallets and there is
+  // no known incompatibility -- it speaks the same wallet standard this picker
+  // discovers through -- so filtering it out just meant half the ecosystem
+  // could not sit down. If it turns out to break something specific, exclude
+  // it again WITH the symptom written down.
+  const pickable = wallets.filter((w) => !normalizeId(w.name).includes("metamask"));
 
   // Unchanged connection flow: takes the wallet-standard wallet and populates
   // the zustand store with a WalletAccountV6 + account/chain/permissions.

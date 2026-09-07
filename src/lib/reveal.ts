@@ -64,10 +64,22 @@ export function revealCommunityArgs(args: {
  * Poseidon over the combined share's four u128 limbs plus a blinding factor,
  * matching the contract's own `poseidon_hash_span` exactly.
  *
- * It is posted during DEALING, before betting. That ordering is the whole
- * point: a commitment made after the board is known would let a player shop
- * for a friendlier share set, and the shares are what determine the card. The
- * contract enforces it by refusing to overwrite a commitment once set.
+ * Posted during DEALING by this client, before betting. The CONTRACT does not
+ * require that, and the distinction matters to anyone reading this later:
+ * `commit_hole_shares` checks ownership, the slot, a non-zero value and that
+ * nothing is already stored -- it is not street-gated, so a seat can commit
+ * for the first time at showdown and then reveal.
+ *
+ * That is safe, but not for the reason the ordering suggests. There is nothing
+ * to shop for: a party's share is `x_i * c1`, fixed by the key it registered
+ * on chain, and the DLEQ each share carries is checked against exactly that
+ * key -- so the combined share, and therefore this commitment, has one
+ * possible value per (seat, slot) whenever it is computed. Committing late
+ * yields the same number as committing early.
+ *
+ * What immutability buys is that a seat cannot commit, see the board, and
+ * then substitute a different claim. What early committing buys is only that
+ * a stalled seat is visible sooner.
  */
 export function holeCommitment(share: Point, blinding: bigint): bigint {
   if (share === null) throw new Error('reveal: cannot commit to the identity');
