@@ -55,7 +55,7 @@ function Seat({
     styles.seat,
     !seat.occupied ? styles.seatEmpty : '',
     you ? styles.seatYou : '',
-    seat.occupied && seat.folded ? styles.seatFolded : '',
+    seat.occupied && (seat.folded || seat.sittingOut) ? styles.seatFolded : '',
     onTurn ? styles.seatTurn : '',
   ].filter(Boolean).join(' ');
 
@@ -75,7 +75,14 @@ function Seat({
               `stack` is what it has left to bet with. The stack only exists on
               a table with a buy-in -- without one the wallet is the stack and
               there is nothing on the table to show. */}
-          {seat.stack > 0n || seat.allIn ? (
+          {/* Sitting out is checked FIRST. A busted seat and a seat that has
+              just shoved both read zero here, and they mean opposite things:
+              one is out of the hand, the other is as deep in it as it gets. */}
+          {seat.sittingOut ? (
+            <div className={styles.seatStack} title="no chips left -- not in this hand">
+              SITTING OUT
+            </div>
+          ) : seat.stack > 0n || seat.allIn ? (
             <div className={styles.seatStack} title="chips left on the table">
               {seat.allIn ? 'ALL IN' : fmtAmount(seat.stack)}
             </div>
@@ -152,17 +159,20 @@ export default function Felt({
   // the button posts the small blind and the next one the big -- except
   // heads-up, where the button IS the small blind. Rendered rather than read
   // back because the contract stores contributions, not roles.
+  // In the hand, not merely seated -- the contract's next_occupied skips a
+  // seat sitting the hand out, and so does its heads-up test, so a table of
+  // three with one busted player posts heads-up blinds.
   const nextOccupied = (from: number) => {
     for (let step = 1; step <= table.maxSeats; step++) {
       const cand = (from + step) % table.maxSeats;
-      if (table.seats[cand]?.occupied) return cand;
+      if (table.seats[cand]?.inHand) return cand;
     }
     return from;
   };
   let smallSeat = -1, bigSeat = -1;
   if (table.buttonSet && table.bigBlind > 0n) {
     const next = nextOccupied(table.button);
-    if (table.seated.length <= 2) { smallSeat = table.button; bigSeat = next; }
+    if (table.inHand.length <= 2) { smallSeat = table.button; bigSeat = next; }
     else { smallSeat = next; bigSeat = nextOccupied(next); }
   }
 

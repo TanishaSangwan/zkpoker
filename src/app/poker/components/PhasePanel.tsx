@@ -93,7 +93,11 @@ export default function PhasePanel(p: Props) {
       // against the registered shares, so a wrong sum here is rejected rather
       // than silently accepted -- but computing it right means the transaction
       // succeeds first time.
-      const shares = table.seats.filter((s) => s.occupied && s.keyRegistered && s.pk).map((s) => s.pk!);
+      // inHand, not occupied. begin_shuffle sums exactly the seats it deals
+      // to, so a busted seat's share summed in here would produce a key the
+      // contract rejects -- and if it did not, cards under a key their holder
+      // is not part of.
+      const shares = table.seats.filter((s) => s.inHand && s.keyRegistered && s.pk).map((s) => s.pk!);
       if (shares.length < 2) throw new Error('At least two seats must have registered a key.');
       const Y = sumKeys(shares);
       if (Y === null) throw new Error('The registered shares sum to the identity — refuse to open with a degenerate joint key.');
@@ -362,20 +366,21 @@ export default function PhasePanel(p: Props) {
   // play position 0 that turns a ~5s wait on its own clock into no wait at
   // all.
   //
-  // Position 0 is the LOWEST OCCUPIED SEAT: begin_shuffle walks the seats in
-  // order, so this is knowable before the order is frozen.
+  // Position 0 is the LOWEST SEAT IN THE HAND: begin_shuffle walks the seats
+  // in order and skips the ones sitting out, so this is knowable before the
+  // order is frozen.
   //
   // The fingerprint is the registered key set. A proof is only valid under
   // the joint key it was made for, so if anyone joins, leaves or registers
   // between now and begin_shuffle, the cached proof is discarded rather than
   // spent on a turn.
   const keyFingerprint = table.seats
-    .filter((s) => s.occupied && s.keyRegistered && s.pk)
+    .filter((s) => s.inHand && s.keyRegistered && s.pk)
     .map((s) => `${s.seat}:${s.pk!.x.toString(16)}`)
     .join('|');
-  const everyoneRegistered = table.seats.filter((s) => s.occupied).length >= 2
-    && table.seats.filter((s) => s.occupied).every((s) => s.keyRegistered && s.pk);
-  const lowestOccupied = table.seats.find((s) => s.occupied)?.seat ?? null;
+  const everyoneRegistered = table.seats.filter((s) => s.inHand).length >= 2
+    && table.seats.filter((s) => s.inHand).every((s) => s.keyRegistered && s.pk);
+  const lowestOccupied = table.seats.find((s) => s.inHand)?.seat ?? null;
   const precomputing = useRef('');
   useEffect(() => {
     if (table.shuffleStarted || !everyoneRegistered || !table.jointKey) return;
@@ -420,6 +425,31 @@ export default function PhasePanel(p: Props) {
   // reset, so nobody re-registers between hands -- the dealer just calls
   // begin_shuffle again, which puts the chain head back to the canonical deck
   // and leaves the rotated button alone.
+  // ── the end of the table ───────────────────────────────────────────────
+  //
+  // Chips are conserved: every buy-in is escrowed in the contract and moves
+  // only between stacks. So once one seat holds a non-zero stack and no other
+  // does, that stack IS the table, and there is no hand left to deal --
+  // start_next_hand says so itself with TABLE_IS_OVER.
+  //
+  // Only on a table with a buy-in. Without one the wallet is the stack and a
+  // table never runs out of players.
+  const fundedSeats = table.seats.filter((s) => s.occupied && s.stack > 0n);
+  const tableOver = table.buyIn > 0n
+    && !table.voided
+    && fundedSeats.length <= 1
+    && (table.settled || !table.shuffleStarted);
+  const lastPlayer = fundedSeats.length === 1 ? fundedSeats[0] : null;
+  const endTable = () =>
+    run('Closing the table', async () => {
+      const txt = await send('end_table', { table_id: table.tableId });
+      return `${txt}\nseats with no chips are freed; the last player cashes out with Leave`;
+    });
+  const cashOut = () =>
+    run('Collecting', () => send('leave_table', {
+      table_id: table.tableId, seat: String(yourSeat),
+    }));
+
   const startingNext = useRef(false);
   const startNextHand = () =>
     run('Starting the next hand', async () => {
@@ -429,6 +459,9 @@ export default function PhasePanel(p: Props) {
 
   useEffect(() => {
     if (!autoAdvance || table.phase !== 'settled') return;
+    // Nothing to advance to. Without this the auto-advance retried
+    // start_next_hand on every poll for a table that will refuse it forever.
+    if (tableOver) return;
     if (!account || !provider || startingNext.current) return;
     startingNext.current = true;
     void (async () => {
@@ -443,7 +476,7 @@ export default function PhasePanel(p: Props) {
         startingNext.current = false;
       }
     })();
-  }, [autoAdvance, table.phase, table.tableId, table.handNumber, account, provider]);
+  }, [autoAdvance, table.phase, table.tableId, table.handNumber, tableOver, account, provider]);
 
   // ── betting ────────────────────────────────────────────────────────────
   const [betAmount, setBetAmount] = useState('');
@@ -473,7 +506,11 @@ export default function PhasePanel(p: Props) {
       {/* ── seating ─────────────────────────────────────────────────── */}
       {table.phase === 'seating' || (yourSeat === null && !table.shuffleStarted) ? (
         <p className={styles.fieldHint}>
-          {table.seated.length} of {table.maxSeats} seats taken. A hand needs at least two.
+          {table.seated.length} of {table.maxSeats} seats taken
+          {table.inHand.length !== table.seated.length
+            ? `, ${table.inHand.length} in this hand`
+            : ''}
+          . A hand needs at least two.
         </p>
       ) : null}
 
@@ -496,7 +533,7 @@ export default function PhasePanel(p: Props) {
         <>
           <p className={styles.fieldHint}>
             registered:{' '}
-            {table.seats.filter((s) => s.occupied).map((s) => (
+            {table.seats.filter((s) => s.inHand).map((s) => (
               <span key={s.seat} className={s.keyRegistered ? styles.chipOwner : styles.chipMuted}>
                 seat {s.seat} {s.keyRegistered ? '✓' : '…'}{' '}
               </span>
@@ -506,7 +543,7 @@ export default function PhasePanel(p: Props) {
             <div className={styles.actionsRow}>
               <button
                 className={`${uni.btn} ${uni.btnPrimary}`}
-                disabled={!!busy || table.seats.some((s) => s.occupied && !s.keyRegistered) || table.seated.length < 2}
+                disabled={!!busy || table.seats.some((s) => s.inHand && !s.keyRegistered) || table.inHand.length < 2}
                 onClick={beginShuffle}
               >
                 Begin shuffle
@@ -698,17 +735,51 @@ export default function PhasePanel(p: Props) {
               simply stopped here. Voided is excluded because the contract
               refuses it -- those seats reclaim individually, and dealing over
               the top would strand whatever had not been reclaimed. */}
-          {table.phase === 'settled' ? (
+          {table.phase === 'settled' && !tableOver ? (
             <button className={`${uni.btn} ${uni.btnPrimary}`} disabled={!!busy} onClick={startNextHand}>
               Start hand {table.handNumber + 1}
             </button>
           ) : null}
-          {table.phase === 'settled' ? (
+          {table.phase === 'settled' && !tableOver ? (
             <span className={styles.fieldHint}>
               Rotates the button one occupied seat and clears the hand. Registered keys survive,
               so nobody registers again — the dealer just runs the shuffle. Permissionless: anyone
               can send it, including a keeper, and it is already automatic above.
             </span>
+          ) : null}
+        </div>
+      ) : null}
+
+      {/* ── the end of the table ────────────────────────────────────── */}
+      {tableOver ? (
+        <div className={styles.actionsRow}>
+          <span className={styles.fieldHint}>
+            {lastPlayer === null
+              ? 'Every seat has cashed out. There are no chips left on this table.'
+              : table.finished
+                ? `Table over. Seat ${lastPlayer.seat} holds every chip: ${fmtAmount(lastPlayer.stack)}.`
+                : `Seat ${lastPlayer.seat} holds every chip on the table (${fmtAmount(lastPlayer.stack)}), `
+                  + 'so there is no hand left to deal.'}
+          </span>
+          {!table.finished ? (
+            <button className={uni.btn} disabled={!!busy} onClick={endTable}>
+              End table
+            </button>
+          ) : null}
+          {!table.finished ? (
+            <span className={styles.fieldHint}>
+              Closes the table and frees the seats of everyone who ran out, so they do not have to
+              send anything themselves. Permissionless and moves no money — the last player collects
+              with the button beside it.
+            </span>
+          ) : null}
+          {yourSeat !== null && mySeat && mySeat.stack > 0n ? (
+            <button className={`${uni.btn} ${uni.btnPrimary}`} disabled={!!busy} onClick={cashOut}>
+              Collect {fmtAmount(mySeat.stack)}
+            </button>
+          ) : null}
+          {yourSeat !== null && mySeat && mySeat.stack === 0n && table.finished ? (
+            <span className={styles.fieldHint}>You have no chips left on this table.</span>
           ) : null}
         </div>
       ) : null}

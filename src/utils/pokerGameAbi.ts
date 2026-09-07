@@ -342,6 +342,18 @@ export const pokerGameAbi = [
       },
       {
         "type": "function",
+        "name": "end_table",
+        "inputs": [
+          {
+            "name": "table_id",
+            "type": "core::felt252"
+          }
+        ],
+        "outputs": [],
+        "state_mutability": "external"
+      },
+      {
+        "type": "function",
         "name": "settle_table",
         "inputs": [
           {
@@ -1018,6 +1030,42 @@ export const pokerGameAbi = [
           },
           {
             "name": "seat",
+            "type": "core::felt252"
+          }
+        ],
+        "outputs": [
+          {
+            "type": "core::bool"
+          }
+        ],
+        "state_mutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "get_seat_sitting_out",
+        "inputs": [
+          {
+            "name": "table_id",
+            "type": "core::felt252"
+          },
+          {
+            "name": "seat",
+            "type": "core::felt252"
+          }
+        ],
+        "outputs": [
+          {
+            "type": "core::bool"
+          }
+        ],
+        "state_mutability": "view"
+      },
+      {
+        "type": "function",
+        "name": "get_table_finished",
+        "inputs": [
+          {
+            "name": "table_id",
             "type": "core::felt252"
           }
         ],
@@ -2832,6 +2880,45 @@ export const pokerGameAbi = [
   },
   {
     "type": "event",
+    "name": "zkpoker::PokerGame::SittingOut",
+    "kind": "struct",
+    "members": [
+      {
+        "name": "table_id",
+        "type": "core::felt252",
+        "kind": "key"
+      },
+      {
+        "name": "seat",
+        "type": "core::felt252",
+        "kind": "data"
+      }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "zkpoker::PokerGame::TableFinished",
+    "kind": "struct",
+    "members": [
+      {
+        "name": "table_id",
+        "type": "core::felt252",
+        "kind": "key"
+      },
+      {
+        "name": "seat_plus_one",
+        "type": "core::felt252",
+        "kind": "data"
+      },
+      {
+        "name": "amount",
+        "type": "core::integer::u128",
+        "kind": "data"
+      }
+    ]
+  },
+  {
+    "type": "event",
     "name": "zkpoker::PokerGame::Event",
     "kind": "enum",
     "variants": [
@@ -3038,6 +3125,16 @@ export const pokerGameAbi = [
       {
         "name": "HandStarted",
         "type": "zkpoker::PokerGame::HandStarted",
+        "kind": "nested"
+      },
+      {
+        "name": "SittingOut",
+        "type": "zkpoker::PokerGame::SittingOut",
+        "kind": "nested"
+      },
+      {
+        "name": "TableFinished",
+        "type": "zkpoker::PokerGame::TableFinished",
         "kind": "nested"
       }
     ]

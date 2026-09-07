@@ -10,3 +10,4 @@ mod test_shuffle;
 mod test_dealing;
 mod test_blinds;
 mod test_stacks;
+mod test_sitting_out;

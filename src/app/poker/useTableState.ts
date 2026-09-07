@@ -50,6 +50,18 @@ export type SeatState = {
   stack: bigint;
   /** Pushed its last chip: in the hand, but with nothing left to bet. */
   allIn: boolean;
+  /**
+   * At the table but not in THIS hand, because it had no chips when the hand
+   * started. Frozen on chain once per hand -- do NOT re-derive it from
+   * `stack === 0n`, which is also true of a seat that has just shoved.
+   */
+  sittingOut: boolean;
+  /**
+   * Dealt in: occupied and not sitting out. This, not `occupied`, is who the
+   * joint key is summed over, so anywhere the client has to agree with
+   * begin_shuffle about the participant set must read this.
+   */
+  inHand: boolean;
   holeCommitted: [boolean, boolean];
   holeRevealed: [boolean, boolean];
   holeCards: [number, number];
@@ -106,6 +118,18 @@ export type TableState = {
   phase: Phase;
   /** Seats that have taken a seat, in ascending order. */
   seated: number[];
+  /** Of those, the ones dealt into this hand. Subset of `seated`. */
+  inHand: number[];
+  /**
+   * The table is over: one player holds every chip and end_table has closed
+   * it. No further hand can start; what is left is cashing out.
+   */
+  finished: boolean;
+  /**
+   * Chips each seat escrows at join_table. Zero means the wallet-funded model,
+   * where there are no stacks and so no such thing as running out.
+   */
+  buyIn: bigint;
 };
 
 const ZERO = '0x0';
@@ -186,12 +210,15 @@ export function useTableState(args: {
             : [0n, 0n];
           // Keyed by NOTE, not by seat: pending_payout survives the seat being
           // reset between hands, which is the whole point of it.
-          const [stack, allIn] = occupied
+          const [stack, allIn, sittingOut] = occupied
             ? await Promise.all([
                 c.get_seat_stack(tableId, s).catch(() => 0n),
                 c.get_seat_all_in(tableId, s).catch(() => false),
+                // Tolerated missing so the client still renders against a
+                // contract deployed before sitting out existed.
+                c.get_seat_sitting_out(tableId, s).catch(() => false),
               ])
-            : [0n, false];
+            : [0n, false, false];
           const pendingPayout = occupied
             ? await c.get_seat_note(tableId, s)
                 .then((note: unknown) => c.get_pending_payout(toHex(note)))
@@ -213,6 +240,7 @@ export function useTableState(args: {
             pk: pointOrNull(pkRaw),
             pendingPayout: BigInt(pendingPayout ?? 0),
             stack: BigInt(stack ?? 0), allIn: !!allIn,
+            sittingOut: !!sittingOut, inHand: occupied && !sittingOut,
             holeCommitted: [BigInt(com0 ?? 0) !== 0n, BigInt(com1 ?? 0) !== 0n],
             holeRevealed: [!!hr0, !!hr1],
             holeCards: [num(hc0), num(hc1)],
@@ -236,6 +264,11 @@ export function useTableState(args: {
         : [];
 
       const seated = seats.filter((s) => s.occupied).map((s) => s.seat);
+      const inHand = seats.filter((s) => s.inHand).map((s) => s.seat);
+      const [finished, buyIn] = await Promise.all([
+        c.get_table_finished(tableId).catch(() => false),
+        c.get_table_buy_in(tableId).catch(() => 0n),
+      ]);
       const next: TableState = {
         tableId, exists: true, dealer: toHex(dealer), maxSeats: n,
         pot: BigInt(pot ?? 0), street: num(street), settled: !!settled, voided: !!voided,
@@ -253,15 +286,17 @@ export function useTableState(args: {
         blindLevelHands: num(blindLevelHands), blindLevel: num(blindLevel),
         button: Number(button ?? 0), buttonSet: !!buttonSet,
         blindsPosted: !!blindsPosted, handNumber: num(handNumber),
-        seats, community, seated,
+        seats, community, seated, inHand, finished: !!finished, buyIn: BigInt(buyIn ?? 0),
         phase: 'seating',
       };
       next.phase = phaseOf({
         exists: true, voided: next.voided, settled: next.settled,
         shuffleStarted: next.shuffleStarted, shuffleComplete: next.shuffleComplete,
         deckOpened: next.deckOpened, street: next.street,
-        seatedCount: seated.length,
-        keysRegistered: seats.filter((s) => s.occupied && s.keyRegistered).length,
+        // The count that decides whether a hand can be dealt is who is IN it.
+        // A three-seat table with one busted player is a two-handed game.
+        seatedCount: inHand.length,
+        keysRegistered: seats.filter((s) => s.inHand && s.keyRegistered).length,
         bigBlind: next.bigBlind, buttonSet: next.buttonSet, blindsPosted: next.blindsPosted,
       });
       setState(next);
@@ -309,7 +344,8 @@ function emptyTable(tableId: string): TableState {
     smallBlind: 0n, bigBlind: 0n, blindLevelHands: 0, blindLevel: 0,
     button: 0, buttonSet: false, blindsPosted: false,
     handNumber: 0,
-    seats: [], community: [], seated: [], phase: 'no-table',
+    seats: [], community: [], seated: [], inHand: [], finished: false, buyIn: 0n,
+    phase: 'no-table',
   };
 }
 

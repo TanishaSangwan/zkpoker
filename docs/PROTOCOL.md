@@ -1666,6 +1666,90 @@ left of the big blind could have called a bet nobody had posted. Routed through
 
 ---
 
+### 9.9.3 Busted seats, and the end of a table — found by play, FIXED
+
+A player who lost their last chip stayed in every subsequent hand forever.
+Nothing removed them because nothing looked: `is_active` was
+`owner != 0 && !folded`, and a stack of zero is neither.
+
+The consequences compounded. They were dealt hole cards at positions `2*seat`
+and `2*seat+1` like everyone else. They held a share of the joint key that
+every reveal at the table needed, so if they closed the tab the deck stopped
+opening and the hand ground into the accusation machinery. And when the turn
+reached them they could not act at all — `bet` asserts `amount <= stack`, and
+`check` refuses to check into a blind — so the only move available to a player
+with no money was to fold, every hand, or let the clock run.
+
+The sharp edge was in `take_blind`. Posting a blind against an empty stack
+takes zero, and the branch that marks a seat all-in requires a non-zero take,
+so a busted seat entered each hand marked *not* all-in. `round_complete` and
+`advance_turn` both skip all-in seats precisely because they have nothing left
+to say; a busted seat was invisible to that and the table waited on it.
+
+**The fix is a per-hand `seat_sitting_out` flag, and the reason it is a stored
+flag rather than a derived one is the whole design.** A stack reads zero in two
+completely different situations: the player is broke, or the player has just
+pushed everything into the pot. A predicate that read the stack live would fold
+a shover out of the pot they had just shoved into. So the set is frozen once
+per hand, in `start_next_hand`, between hands, when a zero stack means exactly
+one thing — and is cleared on `join_table`, because a seat that has just bought
+in has chips whatever the player who went broke on it was flagged as.
+
+Everything that asks *is this seat playing* now goes through `seat_in_hand`
+(`owner != 0 && !sitting_out`), and `is_active` is built on it. That single
+funnel matters more than it looks. `begin_shuffle` freezes the participant list
+from the same predicate and sums exactly those seats into the joint key, so any
+site that disagreed about who is in the hand would deal cards encrypted under a
+key their holder is not part of — the §round-8 finding D failure arrived at
+from the other direction. Excluding a sitting-out seat from the joint key is
+sound for the same reason its cards are never dealt: nobody is owed a share of
+a position nobody holds, and the participants who could jointly open it can
+jointly open everything anyway, which is what n-of-n means.
+
+Two smaller things fell out of it:
+
+* `reset_hand` opened every hand with the turn flatly on seat 0. That was
+  correct only because seat 0 was always playing — the same function had just
+  un-folded it. A seat sitting out is not un-folded into play, and
+  `assert_on_turn` compares literally, so a table whose lowest seat was busted
+  had nobody able to act. `post_blinds` would have moved it, but a table with
+  no blind structure never posts. It now opens on the lowest seat in the hand.
+* `leave_table` left `seat_key_registered` set. Now that leaving and rejoining
+  is how a busted player re-buys, the next occupant of a seat is very often a
+  different person, and they would have inherited a public key whose secret
+  they did not hold. The key goes with the player; the seat is cleared.
+
+**The end of the table.** Chips are conserved — every buy-in is escrowed in the
+contract and only ever moves between stacks — so once one seat holds a non-zero
+stack and no other does, that stack is the entire table. There is no hand left
+to deal, and `start_next_hand` says so with `TABLE_IS_OVER` rather than letting
+a lone seat post both blinds to itself and win them straight back forever.
+
+`end_table` closes it. Permissionless, because the player who most wants the
+table closed is the one with no chips left and the one with the least standing
+to be made to pay for it. It frees the seats of everyone who ran out, so a
+broke player does not have to send a transaction purely to stop being dealt
+into hands they cannot play, and it marks the table finished so nobody sits
+down at it.
+
+It deliberately does **not** pay the winner. Their stack already is the whole
+table, and they collect it with `leave_table`, which transfers to the caller
+after checking the caller owns the seat. Paying out from `end_table` instead
+would mean a permissionless function making a token transfer to an address its
+caller does not control: one winner whose account reverts on receipt and no
+busted player could ever free their seat.
+
+Cashing out after the final hand was impossible before this, for an unrelated
+reason that only the endgame exposed. `leave_table` required
+`seat_contributed == 0`, and only `reset_hand` clears that — which
+`start_next_hand` does, and a table that has just played its last hand never
+reaches. The money sat in the stack, unreachable. A settled hand's
+contributions are last hand's record, not money at risk; a *voided* hand's
+still are, and those still block leaving, because `reclaim_stalled_bet` has not
+run yet.
+
+---
+
 ### 9.4 The SRS is a third-party runtime dependency
 
 Worth stating because it is invisible until it fails: bb.js does not ship the

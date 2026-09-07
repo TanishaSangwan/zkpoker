@@ -127,7 +127,10 @@ export default function RevealPanel(p: Props) {
 
   const keys = useMemo(() => {
     const m = new Map<number, Point>();
-    for (const s of table.seats) if (s.occupied && s.keyRegistered && s.pk) m.set(s.seat, s.pk);
+    // The participant set, which is who begin_shuffle summed into the joint
+    // key -- not everyone with a chair. A seat sitting the hand out holds no
+    // share of this hand's key and is owed no share of anyone's card.
+    for (const s of table.seats) if (s.inHand && s.keyRegistered && s.pk) m.set(s.seat, s.pk);
     return m;
   }, [table.seats]);
 
@@ -481,7 +484,8 @@ export default function RevealPanel(p: Props) {
     if (yourSeat === null) return [];
     const out: { pos: number; to: number | null }[] = [];
     for (const s of table.seats) {
-      if (!s.occupied || s.seat === yourSeat) continue;
+      // A seat sitting out was dealt nothing, so nobody owes it a share.
+      if (!s.inHand || s.seat === yourSeat) continue;
       for (const pos of seatHolePositions(s.seat)) out.push({ pos, to: s.seat });
     }
     for (let k = 0; k < 5; k++) {
@@ -1039,7 +1043,7 @@ export default function RevealPanel(p: Props) {
 
           {!autoServe ? (
             <div className={styles.actionsRow}>
-              {table.seats.filter((s) => s.occupied && s.seat !== yourSeat).flatMap((s) =>
+              {table.seats.filter((s) => s.inHand && s.seat !== yourSeat).flatMap((s) =>
                 seatHolePositions(s.seat).map((pos) => (
                   <button key={pos} className={styles.chipBtn} disabled={!!busy}
                     onClick={() => contribute(pos, s.seat)}>
@@ -1077,7 +1081,7 @@ export default function RevealPanel(p: Props) {
             <div className={styles.stateGrid}>
               <Item label="clock" value={<ShowdownClock deadline={table.showdownDeadline} />} />
               <Item label="showing"
-                value={table.seats.filter((s) => s.occupied && !s.folded)
+                value={table.seats.filter((s) => s.inHand && !s.folded)
                   .map((s) => `${s.seat}${s.forfeited
                     ? ' (forfeit)'
                     : s.holeRevealed[0] && s.holeRevealed[1] ? ' ✓' : ' …'}`)

@@ -540,6 +540,11 @@ pub trait IPokerGame<TState> {
     // is freed, so leaving is genuinely leaving rather than sitting out with
     // money still on the table.
     fn leave_table(ref self: TState, table_id: felt252, seat: felt252);
+    // Close a table that can no longer deal a hand -- at most one seat still
+    // holds chips -- and free the seats of the players who ran out. Callable
+    // by anyone; moves no money. The last player collects their stack, which
+    // by then is every chip on the table, with leave_table.
+    fn end_table(ref self: TState, table_id: felt252);
 
     // ── Settlement ──────────────────────────────────────────────────────
     // `winners` is dealer-supplied trusted input — `settle_table_by_hand`
@@ -964,6 +969,11 @@ pub trait IPokerGame<TState> {
     // (one created with buy_in = 0), where the wallet is the stack.
     fn get_seat_stack(self: @TState, table_id: felt252, seat: felt252) -> u128;
     fn get_seat_all_in(self: @TState, table_id: felt252, seat: felt252) -> bool;
+    // True while this seat is at the table but not in the current hand,
+    // because it had no chips when the hand started.
+    fn get_seat_sitting_out(self: @TState, table_id: felt252, seat: felt252) -> bool;
+    // True once end_table has closed the table: no further hand can start.
+    fn get_table_finished(self: @TState, table_id: felt252) -> bool;
     // Whether this table plays stacks at all: buy_in != 0.
     fn get_table_buy_in(self: @TState, table_id: felt252) -> u128;
     fn get_blind_level_hands(self: @TState, table_id: felt252) -> u32;
@@ -1120,6 +1130,16 @@ pub mod PokerGame {
         // Betting more than the chips this seat brought to the table.
         pub const NOT_ENOUGH_CHIPS: felt252 = 'NOT_ENOUGH_CHIPS';
         pub const BAD_AMOUNT: felt252 = 'BAD_AMOUNT';
+        // Fewer than two seats still have chips, so there is no hand left to
+        // deal. Distinct from TABLE_FINISHED: this is the table noticing, that
+        // is end_table having been called on it.
+        pub const TABLE_OVER: felt252 = 'TABLE_IS_OVER';
+        pub const TABLE_FINISHED: felt252 = 'TABLE_IS_FINISHED';
+        // end_table on a table that can still deal a hand.
+        pub const TABLE_PLAYABLE: felt252 = 'TABLE_STILL_PLAYABLE';
+        // end_table on a wallet-funded table, which has no stacks to be the
+        // last of.
+        pub const NO_STACKS: felt252 = 'TABLE_HAS_NO_STACKS';
         pub const TOO_EARLY: felt252 = 'TOO_EARLY';
         pub const ALREADY_SETTLED: felt252 = 'ALREADY_SETTLED';
         pub const BETTING_CLOSED: felt252 = 'BETTING_CLOSED';
@@ -1532,6 +1552,17 @@ pub mod PokerGame {
         // match a raise however long it is given.
         seat_stack: Map<(felt252, felt252), u128>,
         seat_all_in: Map<(felt252, felt252), bool>,
+        // A seat that is at the table but not in THIS hand, because it had no
+        // chips when the hand started. Frozen once per hand by start_next_hand
+        // and never recomputed inside one, which is the whole point: a stack
+        // hits zero mid-hand every time someone goes all-in, and a seat that
+        // shoved is emphatically still in the hand.
+        //
+        // Read wherever "is this seat playing" is asked -- see seat_in_hand.
+        seat_sitting_out: Map<(felt252, felt252), bool>,
+        // The table is over: one player holds every chip. Nothing more can be
+        // dealt; what is left is for the seats to cash out.
+        table_finished: Map<felt252, bool>,
         blind_level_hands: Map<felt252, u32>,
         // What one ladder unit is worth in the token's smallest unit.
         blind_level_unit: Map<felt252, u128>,
@@ -1648,6 +1679,8 @@ pub mod PokerGame {
         BlindsPosted: BlindsPosted,
         BlindPosted: BlindPosted,
         HandStarted: HandStarted,
+        SittingOut: SittingOut,
+        TableFinished: TableFinished,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -1948,6 +1981,28 @@ pub mod PokerGame {
         pub level: u128,
     }
 
+    // This seat had no chips when the hand started, so the hand is being
+    // dealt without it. Emitted once per hand it sits out, on the transition
+    // only, so a client can say "busted" rather than leaving a seat that
+    // never acts looking like a seat that is thinking.
+    #[derive(Drop, starknet::Event)]
+    pub struct SittingOut {
+        #[key]
+        pub table_id: felt252,
+        pub seat: felt252,
+    }
+
+    // One player holds every chip. `seat_plus_one` is 0 if nobody does --
+    // everyone cashed out first -- and seat + 1 otherwise, so that seat 0 is
+    // distinguishable from no seat.
+    #[derive(Drop, starknet::Event)]
+    pub struct TableFinished {
+        #[key]
+        pub table_id: felt252,
+        pub seat_plus_one: felt252,
+        pub amount: u128,
+    }
+
     #[derive(Drop, starknet::Event)]
     pub struct LeftTable {
         #[key]
@@ -2229,7 +2284,6 @@ pub mod PokerGame {
             self.showdown_deadline.entry(table_id).write(0);
             self.blinds_posted.entry(table_id).write(false);
             self.share_defaulter_plus_one.entry(table_id).write(0);
-            self.action_turn.entry(table_id).write(0);
             self.action_deadline.entry(table_id).write(0);
             self.seed_committed.entry(table_id).write(false);
             self.seed_revealed.entry(table_id).write(false);
@@ -2298,11 +2352,36 @@ pub mod PokerGame {
                 };
                 s += 1;
             };
+
+            // Whose turn it is when the hand opens. This used to be a flat
+            // write of seat 0, which was right only because seat 0 was always
+            // in the hand -- the loop above had just un-folded it. A seat
+            // sitting the hand out is not un-folded into play, and
+            // assert_on_turn compares action_turn to the seat literally, so
+            // leaving the turn on a busted seat 0 would mean nobody at the
+            // table could act. post_blinds would move it, but a table with no
+            // blind structure never posts, and the hand would simply hang.
+            //
+            // Runs after the loop above, not before: is_active reads
+            // seat_folded, which the loop is what clears.
+            let mut i: u32 = 0;
+            loop {
+                if i == max_seats {
+                    break;
+                }
+                if self.is_active(table_id, i.into()) {
+                    self.action_turn.entry(table_id).write(i);
+                    break;
+                }
+                i += 1;
+            };
         }
 
-        // The next occupied seat clockwise from `seat`, wrapping. Occupied,
-        // not active: blinds are posted before anyone can fold, and a seat
-        // that folded last hand still owes a blind this one.
+        // The next seat clockwise from `seat` that is in this hand, wrapping.
+        // In the hand, not active: blinds are posted before anyone can fold,
+        // and a seat that folded last hand still owes a blind this one. A seat
+        // sitting the hand out owes nothing and gets no button -- it is not
+        // playing, so the rotation passes over it entirely.
         fn next_occupied(self: @ContractState, table_id: felt252, seat: felt252) -> felt252 {
             let max_seats = self.table_max_seats.entry(table_id).read();
             let start: u32 = seat.try_into().expect(errors::BAD_SEAT);
@@ -2310,7 +2389,7 @@ pub mod PokerGame {
             let mut step: u32 = 1;
             while step != max_seats + 1 {
                 let cand = (start + step) % max_seats;
-                if self.seat_owner.entry((table_id, cand.into())).read().is_non_zero() {
+                if self.seat_in_hand(table_id, cand.into()) {
                     found = cand.into();
                     break;
                 }
@@ -2319,12 +2398,32 @@ pub mod PokerGame {
             found
         }
 
-        fn occupied_count(self: @ContractState, table_id: felt252) -> u32 {
+        // How many seats are playing this hand. Not how many are seated: the
+        // heads-up blind rule is about who is dealt in, so a table of three
+        // with one busted seat plays heads-up and posts heads-up blinds.
+        fn in_hand_count(self: @ContractState, table_id: felt252) -> u32 {
             let max_seats = self.table_max_seats.entry(table_id).read();
             let mut n: u32 = 0;
             let mut i: u32 = 0;
             while i != max_seats {
-                if self.seat_owner.entry((table_id, i.into())).read().is_non_zero() {
+                if self.seat_in_hand(table_id, i.into()) {
+                    n += 1;
+                }
+                i += 1;
+            };
+            n
+        }
+
+        // How many seats hold chips, whether or not they are in this hand.
+        // This is what decides whether the table has a future.
+        fn funded_count(self: @ContractState, table_id: felt252) -> u32 {
+            let max_seats = self.table_max_seats.entry(table_id).read();
+            let mut n: u32 = 0;
+            let mut i: u32 = 0;
+            while i != max_seats {
+                let seat: felt252 = i.into();
+                if self.seat_owner.entry((table_id, seat)).read().is_non_zero()
+                    && self.seat_stack.entry((table_id, seat)).read() != 0 {
                     n += 1;
                 }
                 i += 1;
@@ -2648,8 +2747,24 @@ pub mod PokerGame {
         }
 
         // Seated and still in the hand.
-        fn is_active(self: @ContractState, table_id: felt252, seat: felt252) -> bool {
+        // Seated AND dealt in. The second half is what makes a busted player
+        // harmless: they keep their seat (and can re-buy by leaving and
+        // rejoining) but this hand happens without them.
+        //
+        // Every "is this seat playing" question goes through here or through
+        // is_active, which builds on it. That matters more than it looks:
+        // begin_shuffle freezes the participant set from this predicate and
+        // sums exactly those seats into the joint key, so any place that
+        // disagreed about who is in the hand would hand out cards encrypted
+        // under a key their holder is not part of -- the round 8 finding D
+        // failure, arrived at from the other direction.
+        fn seat_in_hand(self: @ContractState, table_id: felt252, seat: felt252) -> bool {
             self.seat_owner.entry((table_id, seat)).read().is_non_zero()
+                && !self.seat_sitting_out.entry((table_id, seat)).read()
+        }
+
+        fn is_active(self: @ContractState, table_id: felt252, seat: felt252) -> bool {
+            self.seat_in_hand(table_id, seat)
                 && !self.seat_folded.entry((table_id, seat)).read()
         }
 
@@ -2973,6 +3088,11 @@ pub mod PokerGame {
             // doesn't even parse as a u32 (negative-looking or too large a
             // felt252) is rejected the same way as one that's in range but
             // >= max_seats; both are BAD_SEAT.
+            // Checked before ALREADY_SETTLED, which would otherwise shadow it
+            // in the case that matters: a table is always settled when it
+            // finishes, and "this hand is over" is the wrong thing to tell
+            // someone trying to sit down at a table that is over for good.
+            assert(!self.table_finished.entry(table_id).read(), errors::TABLE_FINISHED);
             assert(!self.table_settled.entry(table_id).read(), errors::ALREADY_SETTLED);
             assert(!self.table_voided.entry(table_id).read(), errors::TABLE_VOIDED);
             // Seats freeze once the hand is underway. Joining is free and
@@ -3031,6 +3151,10 @@ pub mod PokerGame {
                 assert(received == buy_in, errors::TRANSFER_FAILED);
                 self.seat_stack.entry(key).write(received);
             }
+            // A seat that just bought in is in the next hand, whatever the
+            // player who sat here before it went broke was flagged as. The
+            // flag is per-seat, not per-player, and this seat has chips now.
+            self.seat_sitting_out.entry(key).write(false);
             // Security review (2026-08-30 re-audit, Finding 1): bind this
             // note_id to whoever registers it first. pending_payout and
             // payout_token are keyed by bare note_id with no table_id, so
@@ -3275,7 +3399,23 @@ pub mod PokerGame {
                 && !self.table_settled.entry(table_id).read()
                 && !self.table_voided.entry(table_id).read();
             assert(!live, errors::HAND_IN_PROGRESS);
-            assert(self.seat_contributed.entry((table_id, seat)).read() == 0, errors::HAND_IN_PROGRESS);
+            // A SETTLED hand's contributions are last hand's record, not money
+            // at risk: award() has already moved the pot into the stacks, and
+            // only reset_hand clears the record -- which start_next_hand does,
+            // and which a table that has just played its last hand will never
+            // reach. Requiring zero here regardless is what made cashing out
+            // after the final hand impossible.
+            //
+            // A VOIDED hand's contributions are a different thing entirely.
+            // Those chips are still sitting in the contract waiting for
+            // reclaim_stalled_bet, so freeing the seat while they do would
+            // strand them.
+            if !self.table_settled.entry(table_id).read() {
+                assert(
+                    self.seat_contributed.entry((table_id, seat)).read() == 0,
+                    errors::HAND_IN_PROGRESS,
+                );
+            }
 
             let stack = self.seat_stack.entry((table_id, seat)).read();
             self.seat_stack.entry((table_id, seat)).write(0);
@@ -3286,6 +3426,17 @@ pub mod PokerGame {
             self.seat_owner.entry((table_id, seat)).write(Zero::zero());
             self.seat_taken.entry((table_id, seat)).write(false);
             self.seat_all_in.entry((table_id, seat)).write(false);
+            self.seat_sitting_out.entry((table_id, seat)).write(false);
+            // The key goes with the player, not with the chair. Leaving it
+            // registered would hand the next occupant -- which, now that
+            // leaving and rejoining is how a busted player re-buys, is very
+            // often a DIFFERENT person -- a seat already carrying a public key
+            // whose secret they do not hold. begin_shuffle would then sum that
+            // stranger's share into the joint key and deal them cards nobody
+            // at the table could open.
+            self.seat_key_registered.entry((table_id, seat)).write(false);
+            self.seat_pk_x.entry((table_id, seat)).write(0);
+            self.seat_pk_y.entry((table_id, seat)).write(0);
 
             if stack != 0 {
                 assert(!self.reentrancy_lock.read(), errors::REENTRANCY);
@@ -3297,6 +3448,80 @@ pub mod PokerGame {
                 self.reentrancy_lock.write(false);
             }
             self.emit(LeftTable { table_id, seat, cashed_out: stack });
+        }
+
+        /// Close a table that cannot deal another hand, and free the seats of
+        /// the players who ran out of chips.
+        ///
+        /// Permissionless on purpose. The player who lost their last chip has
+        /// the strongest reason to want the table closed and the weakest
+        /// standing to be made to pay for it, and the winner may simply have
+        /// walked away. Anyone may call it, and it moves no money, so there is
+        /// nothing to steer by calling it.
+        ///
+        /// It does NOT pay the winner. Their stack already IS the whole table
+        /// -- chips are conserved, so once one seat holds a non-zero stack and
+        /// no other does, it holds every buy-in ever escrowed here -- and they
+        /// collect it with leave_table, which transfers to the caller after
+        /// checking the caller owns the seat. Paying out from here instead
+        /// would mean this permissionless function making a token transfer to
+        /// an address its caller does not control: one winner whose account
+        /// reverts on receipt, and no busted player could ever free their seat.
+        fn end_table(ref self: ContractState, table_id: felt252) {
+            assert(self.table_exists.entry(table_id).read(), errors::NO_TABLE);
+            assert(!self.table_voided.entry(table_id).read(), errors::TABLE_VOIDED);
+            assert(!self.table_finished.entry(table_id).read(), errors::TABLE_FINISHED);
+            // Only a table with a buy-in has stacks, and without stacks
+            // "the last player with chips" names nothing. On a wallet-funded
+            // table the wallet is the stack and the table never runs out.
+            assert(self.table_buy_in.entry(table_id).read() != 0, errors::NO_STACKS);
+
+            // The same rule leave_table applies, for the same reason: chips
+            // committed to a live pot cannot be accounted for until the hand
+            // that they are in ends.
+            let live = self.shuffle_started.entry(table_id).read()
+                && !self.table_settled.entry(table_id).read();
+            assert(!live, errors::HAND_IN_PROGRESS);
+
+            // Two funded seats can still play, and this would end their game
+            // out from under them.
+            assert(self.funded_count(table_id) <= 1, errors::TABLE_PLAYABLE);
+
+            let max_seats = self.table_max_seats.entry(table_id).read();
+            let mut seat_plus_one: felt252 = 0;
+            let mut amount: u128 = 0;
+            let mut s: u32 = 0;
+            while s != max_seats {
+                let seat: felt252 = s.into();
+                if self.seat_owner.entry((table_id, seat)).read().is_non_zero() {
+                    let stack = self.seat_stack.entry((table_id, seat)).read();
+                    // Last hand's residue. Safe to drop because !live above
+                    // means the pot is already settled into the stacks (or was
+                    // never bet into at all), so none of this describes money
+                    // the contract still owes anyone.
+                    self.seat_contributed.entry((table_id, seat)).write(0);
+                    self.seat_all_in.entry((table_id, seat)).write(false);
+                    self.seat_folded.entry((table_id, seat)).write(false);
+                    self.seat_forfeited.entry((table_id, seat)).write(false);
+                    self.seat_sitting_out.entry((table_id, seat)).write(false);
+                    if stack != 0 {
+                        seat_plus_one = seat + 1;
+                        amount = stack;
+                    } else {
+                        // Nothing to collect, so free it here. Making a player
+                        // with no money left send a transaction purely to stop
+                        // being dealt into hands they cannot play is the thing
+                        // this whole change exists to remove.
+                        self.seat_owner.entry((table_id, seat)).write(Zero::zero());
+                        self.seat_taken.entry((table_id, seat)).write(false);
+                        self.emit(LeftTable { table_id, seat, cashed_out: 0 });
+                    }
+                }
+                s += 1;
+            };
+
+            self.table_finished.entry(table_id).write(true);
+            self.emit(TableFinished { table_id, seat_plus_one, amount });
         }
 
         fn reclaim_stalled_bet(ref self: ContractState, table_id: felt252, seat: felt252) {
@@ -3928,7 +4153,7 @@ pub mod PokerGame {
                     break;
                 }
                 let seat: felt252 = s.into();
-                if self.seat_owner.entry((table_id, seat)).read().is_non_zero() {
+                if self.seat_in_hand(table_id, seat) {
                     assert(self.seat_key_registered.entry((table_id, seat)).read(), errors::NO_KEY);
                     self.shuffle_order.entry((table_id, position)).write(seat);
                     shares.append(self.seat_pk_x.entry((table_id, seat)).read());
@@ -4820,7 +5045,7 @@ pub mod PokerGame {
             // pre-flop, then last on every later street. That is a real rule,
             // not a shortcut: with three or more, the small blind is the seat
             // left of the button.
-            let (small_seat, big_seat) = if self.occupied_count(table_id) <= 2 {
+            let (small_seat, big_seat) = if self.in_hand_count(table_id) <= 2 {
                 (button, next)
             } else {
                 (next, self.next_occupied(table_id, next))
@@ -4852,11 +5077,53 @@ pub mod PokerGame {
             // strand whatever had not been reclaimed yet.
             assert(!self.table_voided.entry(table_id).read(), errors::TABLE_VOIDED);
             assert(self.table_settled.entry(table_id).read(), errors::NOT_SETTLED);
+            assert(!self.table_finished.entry(table_id).read(), errors::TABLE_FINISHED);
             assert(!self.reentrancy_lock.read(), errors::REENTRANCY);
             // The button must exist before it can move. begin_shuffle puts it
             // on the lowest occupied seat for the table's first hand, so this
             // can only fail on a table that never dealt at all.
             assert(self.button_set.entry(table_id).read(), errors::NO_BUTTON);
+
+            // WHO IS IN THIS HAND, decided once, here, before anything else
+            // reads it.
+            //
+            // A seat with no chips cannot post, call, or bet -- bet() asserts
+            // amount <= stack and check() refuses to check into a blind -- so
+            // left in the hand it is a seat that can only fold, every hand,
+            // forever, while the table waits out its clock. Worse, take_blind
+            // takes zero from it without marking it all-in (the all-in branch
+            // needs a non-zero take), so round_complete and advance_turn both
+            // keep waiting on a seat that has nothing to say.
+            //
+            // So it sits out: dealt nothing, owing nothing, holding no share
+            // of the joint key. It keeps its seat and can re-buy by leaving
+            // and rejoining.
+            //
+            // FROZEN, not derived on demand. Every all-in drives a stack to
+            // zero mid-hand and an all-in seat is very much still in the hand;
+            // a predicate that read the stack live would fold the shover out
+            // of the pot it just pushed into. This runs between hands, when a
+            // zero stack means exactly one thing.
+            let max_seats = self.table_max_seats.entry(table_id).read();
+            if self.table_buy_in.entry(table_id).read() != 0 {
+                let mut s: u32 = 0;
+                while s != max_seats {
+                    let seat: felt252 = s.into();
+                    let out = self.seat_owner.entry((table_id, seat)).read().is_non_zero()
+                        && self.seat_stack.entry((table_id, seat)).read() == 0;
+                    let was = self.seat_sitting_out.entry((table_id, seat)).read();
+                    self.seat_sitting_out.entry((table_id, seat)).write(out);
+                    if out && !was {
+                        self.emit(SittingOut { table_id, seat });
+                    }
+                    s += 1;
+                };
+                // One player holding every chip is not a hand, it is the end
+                // of the table. Refusing here is what stops the alternative:
+                // a lone seat posting both blinds to itself and winning them
+                // back, hand after hand, forever.
+                assert(self.in_hand_count(table_id) >= 2, errors::TABLE_OVER);
+            }
 
             let button = self.next_occupied(table_id, self.button.entry(table_id).read());
             self.button.entry(table_id).write(button);
@@ -4877,6 +5144,14 @@ pub mod PokerGame {
         }
         fn get_seat_stack(self: @ContractState, table_id: felt252, seat: felt252) -> u128 {
             self.seat_stack.entry((table_id, seat)).read()
+        }
+        fn get_seat_sitting_out(
+            self: @ContractState, table_id: felt252, seat: felt252,
+        ) -> bool {
+            self.seat_sitting_out.entry((table_id, seat)).read()
+        }
+        fn get_table_finished(self: @ContractState, table_id: felt252) -> bool {
+            self.table_finished.entry(table_id).read()
         }
         fn get_seat_all_in(self: @ContractState, table_id: felt252, seat: felt252) -> bool {
             self.seat_all_in.entry((table_id, seat)).read()
@@ -4988,12 +5263,13 @@ pub mod PokerGame {
                     break;
                 }
                 let seat: felt252 = s.into();
-                let owner = self.seat_owner.entry((table_id, seat)).read();
                 // A forfeited seat is not a contender. Its chips stay in the
                 // pot -- forfeiting gives up the claim, it does not block the
                 // hand -- but a hand nobody showed says nothing, and cards
-                // speak: only what was tabled and verified can win.
-                if owner.is_non_zero()
+                // speak: only what was tabled and verified can win. A seat
+                // sitting the hand out put in nothing and was dealt nothing,
+                // so it is not a contender either.
+                if self.seat_in_hand(table_id, seat)
                     && !self.seat_folded.entry((table_id, seat)).read()
                     && !self.seat_forfeited.entry((table_id, seat)).read() {
                     contenders.append(seat);
