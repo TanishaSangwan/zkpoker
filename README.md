@@ -18,7 +18,7 @@ yourself; two people on two machines need the share relay (below).
 
 | | |
 |---|---|
-| Contract | Deployed and playable on **Starknet Sepolia** |
+| Contract | Deployed and playable on **Starknet Sepolia** — `PokerGame` at [`0x014b3c7c…9e049`](https://sepolia.voyager.online/contract/0x014b3c7c70159f0da82699dad66e9be372417fd6c5cb9fbe57492bd8cd19e049), plus six verifier/adapter contracts ([`cairo/address.md`](cairo/address.md)) |
 | Mainnet | **Not deployed.** No transactions against the live STRK20 pool |
 | Tests | 282 passing (`snforge`), including the shuffle chain, side pots and the hand evaluator |
 | Security | 8 recorded review rounds in `security-review-*.md`; findings fixed and referenced from the code |
