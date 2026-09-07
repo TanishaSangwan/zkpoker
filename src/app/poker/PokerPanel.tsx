@@ -589,16 +589,16 @@ function CreateTable(p: any) {
         )}
       </div>
       <div className={styles.actionsRow}>
-        <label className={styles.fieldHint} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          <input type="radio" name="blindMode" checked={blindMode === 'fixed'}
-            onChange={() => setBlindMode('fixed')} />
-          Fixed blinds
-        </label>
-        <label className={styles.fieldHint} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          <input type="radio" name="blindMode" checked={blindMode === 'rising'}
-            onChange={() => setBlindMode('rising')} />
-          Rising blinds
-        </label>
+        <div className={styles.modeToggle} style={{ marginBottom: 0 }}>
+          <button type="button" className={`${styles.modeBtn} ${blindMode === 'fixed' ? styles.modeBtnActive : ''}`}
+            onClick={() => setBlindMode('fixed')}>
+            Fixed blinds
+          </button>
+          <button type="button" className={`${styles.modeBtn} ${blindMode === 'rising' ? styles.modeBtnActive : ''}`}
+            onClick={() => setBlindMode('rising')}>
+            Rising blinds
+          </button>
+        </div>
         <span className={styles.fieldHint}>
           {blindMode === 'rising'
             ? 'Ladder is fixed in the contract — 10/20 up to 300/600, then held. You choose the pace, not the price. DEMO SCALE ONLY: those rungs are raw base units, so the top one is 6e-16 STRK — the whole ladder is dust against a hand of gas. Use fixed blinds for a stake worth playing for.'

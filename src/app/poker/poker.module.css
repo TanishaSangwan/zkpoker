@@ -17,7 +17,41 @@
   border-radius: 16px;
   padding: 20px;
   margin-bottom: 16px;
+  box-shadow: 0 1px 2px rgba(13, 14, 14, 0.03), 0 12px 28px -18px rgba(13, 14, 14, 0.14);
 }
+
+/* ── phase progress ──────────────────────────────────────────────────── */
+.stepper { display: flex; align-items: center; margin: 2px 0 28px; }
+.stepperStep { position: relative; flex: none; display: flex; flex-direction: column; align-items: center; }
+.stepperDot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--card);
+  border: 2px solid var(--inset-2);
+  transition: background 200ms, border-color 200ms, transform 200ms;
+}
+.stepperDotDone { background: var(--green); border-color: var(--green); }
+.stepperDotCurrent {
+  background: var(--pink);
+  border-color: var(--pink);
+  transform: scale(1.3);
+  box-shadow: 0 0 0 4px var(--pink-soft);
+}
+.stepperLabel {
+  position: absolute;
+  top: 15px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--pink-text);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+}
+.stepperLine { flex: 1; height: 2px; background: var(--inset-2); border-radius: 1px; }
+.stepperLineDone { background: var(--green); }
 
 .sectionHead {
   display: flex;
@@ -97,7 +131,11 @@
   width: 100%;
   box-sizing: border-box;
 }
-.input:focus, .textarea:focus, .select:focus { border-color: var(--pink-soft-2); background: var(--card); }
+.input:focus, .textarea:focus, .select:focus {
+  border-color: var(--pink-soft-2);
+  background: var(--card);
+  box-shadow: 0 0 0 3px var(--pink-soft);
+}
 .textarea { font-family: var(--font-mono-ui, monospace); min-height: 64px; resize: vertical; }
 
 .fieldHint { color: var(--muted); font-size: 12px; line-height: 1.4; }
@@ -254,6 +292,13 @@
 .feltCards { display: flex; gap: 6px; margin-top: 12px; justify-content: center; }
 .feltSub { font-size: 11px; opacity: 0.75; margin-top: 6px; }
 
+/* Cards animate in once, on mount -- slot/index keys are stable across
+   polling re-renders, so this never replays on a routine refresh, only when
+   a card first appears (dealt, or revealed). */
+@keyframes cardIn {
+  from { opacity: 0; transform: translateY(5px) scale(0.88); }
+  to { opacity: 1; transform: none; }
+}
 .cardBack {
   width: 32px;
   height: 44px;
@@ -262,6 +307,7 @@
   border: 1px solid rgba(255, 255, 255, 0.45);
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
   flex: none;
+  animation: cardIn 220ms ease-out;
 }
 .cardFace {
   width: 32px;
@@ -277,6 +323,7 @@
   justify-content: center;
   flex: none;
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+  animation: cardIn 220ms ease-out;
 }
 
 .seat {
@@ -338,14 +385,22 @@
   background: var(--inset);
   color: var(--ink);
   cursor: pointer;
+  transition: background 140ms, transform 120ms, box-shadow 140ms;
 }
-.chipBtn:hover { background: var(--inset-2); }
+.chipBtn:not(:disabled):hover { background: var(--inset-2); transform: translateY(-1px); }
+.chipBtn:not(:disabled):active { transform: scale(0.97); }
 .chipBtn:disabled { opacity: 0.5; cursor: default; }
 
 .chipBtnFold { border-color: #e3b3ab; background: #fdf1ef; color: #a33b2e; }
-.chipBtnFold:hover { background: #fbe3df; }
+.chipBtnFold:not(:disabled):hover { background: #fbe3df; }
 .chipBtnPrimary { border-color: var(--pink-soft-2); background: var(--pink); color: #fff; }
-.chipBtnPrimary:hover { background: var(--pink-text); }
+.chipBtnPrimary:not(:disabled):hover {
+  background: var(--pink-text);
+  box-shadow: 0 6px 14px -6px rgba(229, 107, 67, 0.55);
+}
+@media (prefers-reduced-motion: reduce) {
+  .chipBtn:not(:disabled):hover { transform: none; }
+}
 
 /* ── "your turn" callout (Play mode, betting phase) ──────────────────── */
 .turnBanner {
@@ -361,8 +416,16 @@
   color: var(--pink-text);
   font-weight: 600;
   font-size: 13.5px;
+  animation: turnBannerPulse 1.8s ease-in-out infinite;
+}
+@keyframes turnBannerPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(229, 107, 67, 0.28); }
+  50% { box-shadow: 0 0 0 6px rgba(229, 107, 67, 0); }
 }
 .turnBannerClock { font-family: var(--font-mono-ui, monospace); font-weight: 700; }
+@media (prefers-reduced-motion: reduce) {
+  .turnBanner, .cardBack, .cardFace { animation: none; }
+}
 
 /* ── collapsible "why" explanation ───────────────────────────────────── */
 .why { margin-top: 2px; }

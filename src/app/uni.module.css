@@ -108,19 +108,27 @@
   padding: 11px 18px;
   cursor: pointer;
   white-space: nowrap;
-  transition: background 140ms, opacity 140ms, transform 120ms, border-color 140ms;
+  transition: background 140ms, opacity 140ms, transform 120ms, border-color 140ms, box-shadow 140ms;
   background: var(--inset);
   color: var(--ink);
 }
-.btn:not(:disabled):hover { background: var(--inset-2); }
+.btn:not(:disabled):hover { background: var(--inset-2); transform: translateY(-1px); }
 .btn:active { transform: scale(0.98); }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn:focus-visible { outline: 2px solid var(--pink-soft-2); outline-offset: 2px; }
 /* The forward-moving action in a panel -- the one thing to click next. */
 .btnPrimary { border-color: var(--pink-soft-2); background: var(--pink); color: #fff; }
-.btnPrimary:not(:disabled):hover { filter: brightness(1.06); background: var(--pink); }
+.btnPrimary:not(:disabled):hover {
+  filter: brightness(1.06);
+  background: var(--pink);
+  box-shadow: 0 6px 16px -6px rgba(229, 107, 67, 0.55);
+}
 .btnGreen { color: var(--green); background: var(--green-soft); border-color: transparent; }
 .btnGreen:not(:disabled):hover { filter: brightness(0.97); }
 .btnBlock { width: 100%; padding: 15px; font-size: 16px; margin-top: 6px; }
+@media (prefers-reduced-motion: reduce) {
+  .btn:not(:disabled):hover { transform: none; }
+}
 
 /* --- Readable result receipt ------------------------------------------- */
 .receipt {

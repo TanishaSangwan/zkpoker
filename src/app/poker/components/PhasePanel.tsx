@@ -13,7 +13,7 @@ import styles from '../poker.module.css';
 import uni from '../../uni.module.css';
 import Why from './Why';
 import type { TableState } from '../useTableState';
-import { asU256, baseToStrk, fmtAmount, decodeError, executeAndWait, pgCall, erc20ApproveCall, strkToBase, STREET_NAMES } from '../contract';
+import { asU256, baseToStrk, fmtAmount, decodeError, executeAndWait, pgCall, erc20ApproveCall, strkToBase, STREET_NAMES, type Phase } from '../contract';
 import type { SeatIdentity } from '@/lib/identity';
 import { jointKey as sumKeys, prove as schnorrProve, initProver as initSchnorr } from '@/lib/schnorr';
 import { deckToU256, proveShuffle, proveShuffleAndOpen, submitFinalShuffleArgs } from '@/lib/shuffle';
@@ -399,6 +399,8 @@ export default function PhasePanel(p: Props) {
         <div className={styles.sectionHint}>{hintFor(table, yourSeat)}</div>
       </div>
 
+      <PhaseStepper phase={table.phase} />
+
       {envReady && !env.multithreaded && (table.phase === 'keys' || table.phase === 'shuffling') ? (
         <div className={styles.caution}>
           This page is <strong>not cross-origin isolated</strong>, so bb.js falls back to a single
@@ -717,6 +719,41 @@ export default function PhasePanel(p: Props) {
           <pre className={uni.receiptNote}>{error}</pre>
         </div>
       ) : null}
+    </div>
+  );
+}
+
+// The hand's progress through the protocol, at a glance. 'voided' and
+// 'no-table' are terminal/exception states that don't fit a linear
+// progress bar, so the stepper simply doesn't render for them.
+const PHASE_STEPS: Phase[] = ['seating', 'keys', 'shuffling', 'opening', 'posting', 'dealing', 'betting', 'showdown', 'settled'];
+const PHASE_STEP_LABELS: Record<string, string> = {
+  seating: 'Seat', keys: 'Keys', shuffling: 'Shuffle', opening: 'Open',
+  posting: 'Blinds', dealing: 'Deal', betting: 'Betting', showdown: 'Showdown', settled: 'Settled',
+};
+
+function PhaseStepper({ phase }: { phase: Phase }) {
+  const current = PHASE_STEPS.indexOf(phase);
+  if (current < 0) return null;
+  return (
+    <div className={styles.stepper}>
+      {PHASE_STEPS.flatMap((key, i) => {
+        const dot = (
+          <div key={key} className={styles.stepperStep} title={PHASE_STEP_LABELS[key]}>
+            <div
+              className={`${styles.stepperDot} ${
+                i < current ? styles.stepperDotDone : i === current ? styles.stepperDotCurrent : ''
+              }`}
+            />
+            {i === current ? <div className={styles.stepperLabel}>{PHASE_STEP_LABELS[key]}</div> : null}
+          </div>
+        );
+        if (i === PHASE_STEPS.length - 1) return [dot];
+        const line = (
+          <div key={`${key}-line`} className={`${styles.stepperLine} ${i < current ? styles.stepperLineDone : ''}`} />
+        );
+        return [dot, line];
+      })}
     </div>
   );
 }
