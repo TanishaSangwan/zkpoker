@@ -18,9 +18,9 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 const root='/home/x/Documents/zkpoker', out=`${root}/node_modules/.cache/zkpoker-units`;
 mkdirSync(out,{recursive:true});
-writeFileSync(`${out}/e.ts`, `export { strkToBase, baseToStrk } from ${JSON.stringify(root+'/src/app/poker/contract.ts')};`);
+writeFileSync(`${out}/e.ts`, `export { strkToBase, baseToStrk, fmtAmount } from ${JSON.stringify(root+'/src/app/poker/contract.ts')};`);
 await build({entryPoints:[`${out}/e.ts`],bundle:true,format:'esm',platform:'node',outfile:`${out}/t.mjs`,logLevel:'error',alias:{'@':`${root}/src`}});
-const { strkToBase, baseToStrk } = await import(pathToFileURL(`${out}/t.mjs`).href+`?v=${Date.now()}`);
+const { strkToBase, baseToStrk, fmtAmount } = await import(pathToFileURL(`${out}/t.mjs`).href+`?v=${Date.now()}`);
 
 const E = 10n**18n;
 const ok = [
@@ -49,6 +49,20 @@ for (const [v, want] of [[10n*E,'10'],[0n,'0'],[E+1n,'1.000000000000000001'],[5n
 for (const s of ['10','0.5','1234.567','0.000000000000000001']) {
   const rt = baseToStrk(strkToBase(s)); const pass = rt === s; if (!pass) bad++;
   console.log(`${pass?'ok  ':'FAIL'} round-trip ${s} -> ${rt}`);
+}
+// fmtAmount is for DISPLAY: readable at both ends, never a 17-zero decimal.
+for (const [v, want] of [
+  [0n, '0 STRK'],
+  [10n*E, '10 STRK'],
+  [30n*E, '30 STRK'],
+  [5n*10n**17n, '0.5 STRK'],
+  [E + 10n**14n, '1.0001 STRK'],
+  [30n, '30 wei'],                 // a legacy wei-denominated table
+  [10n, '10 wei'],
+  [10n**13n, '10000000000000 wei'] // just under the 0.0001 STRK cutoff
+]) {
+  const got = fmtAmount(v); const pass = got === want; if (!pass) bad++;
+  console.log(`${pass?'ok  ':'FAIL'} fmtAmount(${v}) = ${got}${pass?'':`  want ${want}`}`);
 }
 console.log(bad === 0 ? '\nPASS: all units cases' : `\nFAIL: ${bad} case(s)`);
 process.exit(bad === 0 ? 0 : 1);

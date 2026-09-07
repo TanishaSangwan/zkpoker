@@ -9,7 +9,7 @@
 import styles from '../poker.module.css';
 import { cardToGlyph } from '@/lib/grumpkin';
 import type { SeatState, TableState } from '../useTableState';
-import { STREET_NAMES, baseToStrk } from '../contract';
+import { STREET_NAMES, baseToStrk , fmtAmount } from '../contract';
 
 function Card({ card }: { card: number }) {
   const { rank, suit, red } = cardToGlyph(card);
@@ -56,7 +56,7 @@ function Seat({
       ) : (
         <>
           <div className={styles.seatAddr}>{you ? 'you' : `${seat.owner.slice(0, 6)}…${seat.owner.slice(-4)}`}</div>
-          <div className={styles.seatChips}>{baseToStrk(seat.contributed)}</div>
+          <div className={styles.seatChips}>{fmtAmount(seat.contributed)}</div>
           {/* Winnings are NOT in the pot and not in `contributed`. award()
               moves the pot into pending_payout keyed by the seat's payout
               note and zeroes the pot, so between hands a winner's money is
@@ -64,7 +64,7 @@ function Seat({
               page -- the pot cleared and nothing said where it went. */}
           {seat.pendingPayout > 0n ? (
             <div className={styles.seatWon} title="won and banked to this seat's payout note, not yet withdrawn">
-              won {baseToStrk(seat.pendingPayout)}
+              won {fmtAmount(seat.pendingPayout)}
             </div>
           ) : null}
           <div className={styles.seatBadges}>
@@ -143,7 +143,7 @@ export default function Felt({
   return (
     <div className={styles.felt}>
       <div className={styles.feltCenter}>
-        <div className={styles.feltPot}>pot {baseToStrk(table.pot)} STRK</div>
+        <div className={styles.feltPot}>pot {fmtAmount(table.pot)}</div>
         <div className={styles.feltStreet}>
           {table.voided ? 'voided'
             : table.settled ? 'settled'
@@ -151,7 +151,7 @@ export default function Felt({
         </div>
         {table.bigBlind > 0n ? (
           <div className={styles.feltSub}>
-            blinds {table.smallBlind.toString()}/{table.bigBlind.toString()}
+            blinds {fmtAmount(table.smallBlind)}/{fmtAmount(table.bigBlind)}
             {table.blindLevelHands > 0 ? ` · level ${table.blindLevel + 1}` : ''}
             {table.handNumber > 0 ? ` · hand ${table.handNumber + 1}` : ''}
           </div>

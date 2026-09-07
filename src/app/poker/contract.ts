@@ -218,6 +218,33 @@ export function strkToBase(v: string): bigint {
   return BigInt(whole || '0') * 10n ** 18n + BigInt(frac.padEnd(18, '0') || '0');
 }
 
+/**
+ * Base units -> a string a person can read at a glance.
+ *
+ * `baseToStrk` is exact and round-trips, which is what the call sites that
+ * build transactions need. This one is for DISPLAY, and the two differ
+ * because exactness reads terribly at both ends of the range:
+ *
+ *   * a table created before amounts were STRK-denominated holds blinds of
+ *     10 and 20 WEI, and rendering those exactly gives
+ *     "0.00000000000000001" -- seventeen zeroes, which is less legible than
+ *     the raw integer it replaced;
+ *   * a normal pot of 30 STRK should just say "30".
+ *
+ * So: anything below 0.0001 STRK is shown in base units and LABELLED as
+ * such, rather than as a decimal nobody can count. Above that, up to four
+ * decimal places with trailing zeros trimmed. The exact value is always one
+ * hover away in the field hints, and the chain only ever sees baseToStrk.
+ */
+export function fmtAmount(v: bigint): string {
+  if (v === 0n) return '0 STRK';
+  const E = 10n ** 18n;
+  if (v < E / 10_000n) return `${v} wei`;
+  const whole = v / E;
+  const frac = (v % E).toString().padStart(18, '0').slice(0, 4).replace(/0+$/, '');
+  return `${whole}${frac ? `.${frac}` : ''} STRK`;
+}
+
 /** Base units -> STRK, for showing what will actually be sent. */
 export function baseToStrk(v: bigint): string {
   const whole = v / 10n ** 18n;

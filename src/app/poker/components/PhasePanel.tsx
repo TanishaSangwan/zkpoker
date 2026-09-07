@@ -13,7 +13,7 @@ import styles from '../poker.module.css';
 import uni from '../../uni.module.css';
 import Why from './Why';
 import type { TableState } from '../useTableState';
-import { asU256, baseToStrk, decodeError, executeAndWait, pgCall, erc20ApproveCall, strkToBase, STREET_NAMES } from '../contract';
+import { asU256, baseToStrk, fmtAmount, decodeError, executeAndWait, pgCall, erc20ApproveCall, strkToBase, STREET_NAMES } from '../contract';
 import type { SeatIdentity } from '@/lib/identity';
 import { jointKey as sumKeys, prove as schnorrProve, initProver as initSchnorr } from '@/lib/schnorr';
 import { deckToU256, proveShuffle, proveShuffleAndOpen, submitFinalShuffleArgs } from '@/lib/shuffle';
@@ -529,8 +529,8 @@ export default function PhasePanel(p: Props) {
         <>
           <div className={styles.stateGrid}>
             <Item label="street" value={STREET_NAMES[table.street] ?? String(table.street)} />
-            <Item label="to call" value={`${baseToStrk(mySeat?.toCall ?? 0n)} STRK`} />
-            <Item label="your street total" value={(mySeat?.streetContributed ?? 0n).toString()} />
+            <Item label="to call" value={fmtAmount(mySeat?.toCall ?? 0n)} />
+            <Item label="your street total" value={fmtAmount(mySeat?.streetContributed ?? 0n)} />
             <Item label="clock" value={myTurn ? clock : table.roundComplete ? 'round complete' : `seat ${table.actionTurn}`} />
           </div>
           {myTurn ? (
@@ -563,7 +563,7 @@ export default function PhasePanel(p: Props) {
                 </button>
               )}
               <input className={styles.input}
-                placeholder={(mySeat?.toCall ?? 0n) > 0n ? `more than ${baseToStrk(mySeat!.toCall)} STRK` : 'amount in STRK'}
+                placeholder={(mySeat?.toCall ?? 0n) > 0n ? `more than ${fmtAmount(mySeat!.toCall)}` : 'amount in STRK'}
                 value={betAmount}
                 onChange={(e) => setBetAmount(e.target.value)} style={{ maxWidth: 160 }} />
               <button className={`${styles.chipBtn} ${styles.chipBtnPrimary}`} disabled={!!busy || !betAmount}
@@ -674,7 +674,7 @@ export default function PhasePanel(p: Props) {
       {table.phase === 'posting' ? (
         <>
           <div className={styles.stateGrid}>
-            <Item label="blinds" value={`${table.smallBlind} / ${table.bigBlind}`} />
+            <Item label="blinds" value={`${fmtAmount(table.smallBlind)} / ${fmtAmount(table.bigBlind)}`} />
             <Item label="button" value={`seat ${table.button}`} />
             <Item
               label="level"
