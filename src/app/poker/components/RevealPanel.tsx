@@ -25,7 +25,7 @@ import {
   revealHoleArgs, saveHoleOpening,
 } from '@/lib/reveal';
 import { BroadcastTransport, type Transport } from '@/lib/shares';
-import { RelayTransport, relayOverride, relayUrl, setRelayOverride } from '@/lib/relayTransport';
+import { RelayStatus, RelayTransport, relayOverride, relayUrl, setRelayOverride } from '@/lib/relayTransport';
 import { communityPosition, seatHolePositions } from '@/lib/deck';
 
 type Props = {
@@ -71,11 +71,13 @@ export default function RevealPanel(p: Props) {
   const [relayInput, setRelayInput] = useState('');
   const [relayRev, setRelayRev] = useState(0);
   const [activeRelay, setActiveRelay] = useState<string | null>(null);
+  const [relayStatus, setRelayStatus] = useState<RelayStatus>('connecting');
   useEffect(() => { setRelayInput(relayOverride() ?? ''); }, []);
   useEffect(() => {
     const url = relayUrl();
+    setRelayStatus('connecting');
     const t: Transport & { close: () => void } = url
-      ? new RelayTransport(table.tableId, url)
+      ? new RelayTransport(table.tableId, url, { onStatus: setRelayStatus })
       : new BroadcastTransport(table.tableId);
     transport.current = t;
     setTransportKind(url ? 'relay' : 'local');
@@ -828,8 +830,20 @@ export default function RevealPanel(p: Props) {
           the failure is silent: with BroadcastChannel the buttons work, the
           messages go nowhere a second client can hear, and both sides sit
           waiting for shares that were genuinely sent. */}
-      <div className={transportKind === 'relay' ? styles.chip : styles.caution}>
-        {transportKind === 'relay' ? (
+      <div className={transportKind === 'relay' && relayStatus === 'open' ? styles.chip : styles.caution}>
+        {transportKind === 'relay' && relayStatus !== 'open' ? (
+          <>
+            {/* A relay that is DOWN must not read the same as one that is
+                working. Reconnection is automatic and backs off, but silently
+                retrying while the chip still says "shares reach other clients"
+                recreates the exact failure this chip exists to warn about:
+                the buttons respond, nothing arrives, and both players wait. */}
+            <strong>Relay {relayStatus === 'retrying' ? 'unreachable' : 'connecting'}.</strong>{' '}
+            {relayStatus === 'retrying'
+              ? 'Retrying with backoff. Shares are not moving while this says so — check the relay is up and that everyone is pointed at the same url.'
+              : 'Opening the stream.'}
+          </>
+        ) : transportKind === 'relay' ? (
           <>
             <strong>Relay:</strong> shares reach other clients, each encrypted to its recipient&apos;s
             registered key. The relay cannot read them.

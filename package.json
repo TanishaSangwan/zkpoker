@@ -14,7 +14,8 @@
     "check:browser": "node scripts/check_browser_client.mjs",
     "deploy:local": "./scripts/deploy_local.sh",
     "smoke:local": "node scripts/smoke_local.mjs",
-    "check:ui": "node scripts/check_ui_local.mjs"
+    "check:ui": "node scripts/check_ui_local.mjs",
+    "check:relay": "node scripts/check_relay_reconnect.mjs"
   },
   "dependencies": {
     "@aztec/bb.js": "3.0.0-nightly.20251104",

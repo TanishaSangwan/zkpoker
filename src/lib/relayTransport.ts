@@ -13,6 +13,16 @@
 import { shareRelayUrl } from '@/utils/constants';
 import type { Envelope, Transport } from './shares';
 
+/**
+ * Connection state, reported so a caller can say so.
+ *
+ * A relay that is merely down must not look like a relay that is working:
+ * the whole failure mode this transport exists to avoid is silent -- buttons
+ * respond, messages go nowhere, and both players wait for shares that were
+ * genuinely sent.
+ */
+export type RelayStatus = 'connecting' | 'open' | 'retrying';
+
 const bigintReplacer = (_: string, v: unknown) =>
   typeof v === 'bigint' ? `0x${v.toString(16)}n` : v;
 const bigintReviver = (_: string, v: unknown) =>
@@ -22,6 +32,10 @@ export class RelayTransport implements Transport {
   private handlers = new Set<(e: Envelope) => void>();
   private source: EventSource | null = null;
   private abort: AbortController | null = null;
+  private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  private attempt = 0;
+  private closed = false;
+  private status: RelayStatus = 'connecting';
 
   /**
    * Envelopes already received, re-delivered to handlers that subscribe later.
@@ -55,7 +69,7 @@ export class RelayTransport implements Transport {
   constructor(
     private readonly tableId: string,
     private readonly baseUrl: string,
-    private readonly opts: { replay?: boolean } = {},
+    private readonly opts: { replay?: boolean; onStatus?: (s: RelayStatus) => void } = {},
   ) {}
 
   private get streamUrl() {
@@ -84,8 +98,58 @@ export class RelayTransport implements Transport {
     }
   }
 
+  private setStatus(next: RelayStatus) {
+    if (this.status === next) return;
+    this.status = next;
+    try { this.opts.onStatus?.(next); } catch { /* the caller's problem */ }
+  }
+
+  /** A stream that just came up: report it and forget the retry history. */
+  private markOpen() {
+    this.attempt = 0;
+    this.setStatus('open');
+  }
+
+  /** Drop the current stream without ending the transport. */
+  private teardownStream() {
+    this.source?.close();
+    this.source = null;
+    this.abort?.abort();
+    this.abort = null;
+  }
+
+  /**
+   * Reconnect, backing off, until close().
+   *
+   * This is not defensive padding. The relay used to be assumed local, where
+   * it either runs for the whole session or was never there; a drop was not a
+   * case worth handling. It is a REMOTE service now -- a player's box, a free
+   * tier that idles out, a tunnel whose hostname rotates -- so drops are
+   * ordinary, and a dropped stream that stays dropped strands the table:
+   * shares stop arriving, nobody can combine one, and the hand cannot finish.
+   *
+   * What it replaced was worse than nothing: the fetch branch rethrew out of
+   * a `void`-called async method, so a drop surfaced as an unhandled
+   * rejection and the stream stayed dead. The EventSource branch had no
+   * `onerror` at all, so it went quiet.
+   */
+  private scheduleReconnect() {
+    if (this.closed || this.retryTimer !== null) return;
+    this.setStatus('retrying');
+    this.teardownStream();
+    // 0.5s doubling to a 10s ceiling, jittered so a table full of clients
+    // that lost the same relay does not return in lockstep.
+    const wait = Math.min(500 * 2 ** this.attempt, 10_000) + Math.floor(Math.random() * 250);
+    this.attempt += 1;
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null;
+      if (this.closed) return;
+      this.ensureStream();
+    }, wait);
+  }
+
   private ensureStream() {
-    if (this.source || this.abort) return;
+    if (this.closed || this.source || this.abort) return;
 
     // EventSource in the browser; a streamed fetch elsewhere.
     //
@@ -96,8 +160,19 @@ export class RelayTransport implements Transport {
     // the terminal side sends its shares and then waits forever for replies it
     // cannot receive.
     if (typeof EventSource !== 'undefined') {
-      this.source = new EventSource(this.streamUrl);
-      this.source.onmessage = (ev) => this.dispatch(ev.data);
+      const es = new EventSource(this.streamUrl);
+      this.source = es;
+      es.onopen = () => this.markOpen();
+      es.onmessage = (ev) => this.dispatch(ev.data);
+      es.onerror = () => {
+        // EventSource retries on its own while the connection is merely
+        // interrupted (readyState CONNECTING) and gives up permanently once
+        // it is CLOSED -- which is what a refused connection or a relay that
+        // went away produces. Take over only in that second case, so the
+        // native retry is not fought with a second one.
+        if (es.readyState === 2 /* CLOSED */) this.scheduleReconnect();
+        else this.setStatus('retrying');
+      };
       return;
     }
 
@@ -110,6 +185,7 @@ export class RelayTransport implements Transport {
     try {
       const res = await fetch(this.streamUrl, { signal });
       if (!res.ok || !res.body) throw new Error(`relay stream failed (${res.status})`);
+      this.markOpen();
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
@@ -126,8 +202,15 @@ export class RelayTransport implements Transport {
           if (line.startsWith('data: ')) this.dispatch(line.slice(6));
         }
       }
-    } catch (e) {
-      if (!signal.aborted) throw e;
+      // The loop ended without an error, so the relay closed the stream --
+      // an idle timeout, a restart, a proxy cutting a long-lived connection.
+      // Indistinguishable from a failure as far as the table is concerned:
+      // no more shares arrive. Reconnect rather than return quietly.
+      if (!signal.aborted) this.scheduleReconnect();
+    } catch {
+      // Never rethrow: this runs as a floating promise, so throwing here is
+      // an unhandled rejection and the stream stays dead either way.
+      if (!signal.aborted) this.scheduleReconnect();
     }
   }
 
@@ -176,13 +259,19 @@ export class RelayTransport implements Transport {
   }
 
   private stop() {
-    this.source?.close();
-    this.source = null;
-    this.abort?.abort();
-    this.abort = null;
+    if (this.retryTimer !== null) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = null;
+    }
+    this.teardownStream();
   }
 
-  close() { this.stop(); this.handlers.clear(); }
+  /** Permanent: no reconnect is attempted after this. */
+  close() {
+    this.closed = true;
+    this.stop();
+    this.handlers.clear();
+  }
 }
 
 /** Where a viewer-set relay override is kept. Per browser, per device. */
