@@ -16,7 +16,10 @@
   --pink-text: #b0491f;
   --green: #0e9f6e;
   --green-soft: #e7f7ef;
+  --green-soft-2: #cdeede;
   --danger: #e5484d;
+  --danger-soft: #fdeceb;
+  --danger-soft-2: #f4cccb;
 
   position: relative;
   min-height: 100vh;
@@ -121,7 +124,9 @@
 .btnPrimary:not(:disabled):hover {
   filter: brightness(1.06);
   background: var(--pink);
-  box-shadow: 0 6px 16px -6px rgba(229, 107, 67, 0.55);
+  /* color-mix rather than a fixed rgba: this file is shared with the poker
+     page's dark/violet skin, where --pink is a different colour entirely. */
+  box-shadow: 0 6px 16px -6px color-mix(in srgb, var(--pink) 55%, transparent);
 }
 .btnGreen { color: var(--green); background: var(--green-soft); border-color: transparent; }
 .btnGreen:not(:disabled):hover { filter: brightness(0.97); }
@@ -138,8 +143,8 @@
   background: var(--card);
   border: 1px solid var(--line);
 }
-.receiptOk { border-color: #cdeede; background: var(--green-soft); }
-.receiptError { border-color: #f4cccb; background: #fdeceb; }
+.receiptOk { border-color: var(--green-soft-2); background: var(--green-soft); }
+.receiptError { border-color: var(--danger-soft-2); background: var(--danger-soft); }
 .receiptPending { border-color: var(--pink-soft-2); background: var(--pink-soft); }
 .receiptHead {
   display: flex;
@@ -199,8 +204,8 @@
   margin: 12px 0 0;
   padding: 10px 12px;
   border-radius: 12px;
-  background: rgba(0, 0, 0, 0.04);
-  color: #24242c;
+  background: var(--inset);
+  color: var(--ink);
   font-family: var(--font-mono-ui), monospace;
   font-size: 12px;
   line-height: 1.55;
@@ -268,7 +273,7 @@
   font-size: 13px;
   font-weight: 700;
   color: var(--ink);
-  background: #fff;
+  background: var(--card);
   border: 1px solid var(--line);
   border-radius: 999px;
   padding: 7px 7px 7px 13px;
@@ -339,7 +344,7 @@
   padding: 13px 14px;
   border: 1px solid var(--line);
   border-radius: 15px;
-  background: #fff;
+  background: var(--card);
   cursor: pointer;
   text-align: left;
   transition: background 140ms, border-color 140ms;

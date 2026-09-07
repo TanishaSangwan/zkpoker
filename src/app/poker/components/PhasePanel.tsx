@@ -474,7 +474,7 @@ export default function PhasePanel(p: Props) {
                 Shuffle &amp; prove
               </button>
               {shuffleBlocker ? (
-                <span className={styles.fieldHint} style={{ color: '#c0392b' }}>
+                <span className={styles.fieldHint} style={{ color: 'var(--danger)' }}>
                   Not shuffling automatically: {shuffleBlocker}.
                 </span>
               ) : null}

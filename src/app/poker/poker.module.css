@@ -1,9 +1,47 @@
-/* Poker page — reuses the CSS custom properties declared on .page in
-   ../uni.module.css (--ink, --muted, --pink, --pink-soft, --pink-text,
-   --green, --green-soft, --danger, --line, --inset, --inset-2). Those only
-   need to be inherited from an ancestor with that class, so page.tsx wraps
-   this page's content in uni.module.css's .page too — nothing here
-   redeclares them. */
+/* Poker page — a dark/neon skin, deliberately distinct from the STRK20
+   page's light "aurora" theme. Self-contained: .pokerPage redeclares the
+   SAME custom-property names uni.module.css's .page defines (--ink, --muted,
+   --pink, --pink-soft, --pink-text, --green, --green-soft, --danger, --line,
+   --inset, --inset-2, ...) so every uni.* component (buttons, receipts, the
+   wallet modal) re-themes automatically just by being a descendant — nothing
+   in uni.module.css or this file needs an if/else for which page it's on.
+   Applied on the page root INSTEAD OF uni.page (not alongside it), so there
+   is no cross-file cascade order to reason about. */
+.pokerPage {
+  --ink: #eef0fb;
+  --muted: #9791b8;
+  --bg: #06050c;
+  /* Ramp, darkest to lightest: bg < inset (recessed wells: inputs, chips,
+     the toggle track) < card (elevated surfaces: section cards, modal) <
+     inset-2 (hover/pressed -- brightens, mirroring the light theme's
+     darken-on-hover). .modeBtnActive relies on card being lighter than the
+     inset track it sits on to read as "raised/selected". */
+  --inset: #100d1e;
+  --card: #171330;
+  --inset-2: #221c40;
+  --line: rgba(176, 130, 255, 0.16);
+  /* Brand/CTA accent -- neon violet, in the vars every button and chip
+     already reads as "the pink". */
+  --pink: #b166ff;
+  --pink-soft: rgba(177, 102, 255, 0.14);
+  --pink-soft-2: rgba(177, 102, 255, 0.45);
+  --pink-text: #dcb8ff;
+  /* Success/positive -- neon green. */
+  --green: #3cf0a8;
+  --green-soft: rgba(60, 240, 168, 0.14);
+  --green-soft-2: rgba(60, 240, 168, 0.4);
+  --danger: #ff5d7a;
+  --danger-soft: rgba(255, 93, 122, 0.12);
+  --danger-soft-2: rgba(255, 93, 122, 0.4);
+
+  position: relative;
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-body), system-ui, sans-serif;
+  overflow-x: hidden;
+  isolation: isolate;
+}
 
 .wrap {
   width: min(720px, calc(100vw - 32px));
@@ -12,12 +50,25 @@
 }
 
 .section {
+  position: relative;
   background: var(--card);
   border: 1px solid var(--line);
   border-radius: 16px;
   padding: 20px;
   margin-bottom: 16px;
-  box-shadow: 0 1px 2px rgba(13, 14, 14, 0.03), 0 12px 28px -18px rgba(13, 14, 14, 0.14);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 16px 36px -22px rgba(177, 102, 255, 0.22);
+  overflow: hidden;
+}
+/* A HUD-panel accent stripe -- restrained, one per card, not on every
+   sub-element, so it reads as a system detail rather than decoration. */
+.section::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: linear-gradient(180deg, var(--pink), var(--green));
 }
 
 /* ── phase progress ──────────────────────────────────────────────────── */
@@ -178,9 +229,9 @@
 }
 
 .caution {
-  border: 1px solid #f4dcc9;
-  background: #fdf3ea;
-  color: #8a5a1f;
+  border: 1px solid rgba(240, 180, 41, 0.35);
+  background: rgba(240, 180, 41, 0.08);
+  color: #ffd166;
   border-radius: 12px;
   padding: 12px 14px;
   font-size: 12.5px;
@@ -192,9 +243,9 @@
    e.g. the relay is reachable. A bare .chip pill was being reused here for
    a full sentence, which rendered as unstyled text with no container. */
 .bannerOk {
-  border: 1px solid #bfe9d5;
+  border: 1px solid var(--green-soft-2);
   background: var(--green-soft);
-  color: #1b7a53;
+  color: var(--green);
   border-radius: 12px;
   padding: 12px 14px;
   font-size: 12.5px;
@@ -220,16 +271,90 @@
 .navLink:hover { color: var(--ink); }
 .navLinkActive { color: var(--pink-text); }
 
-.hero { text-align: center; margin: 34px auto 26px; padding: 0 20px; }
+.hero { position: relative; text-align: center; margin: 40px auto 30px; padding: 0 20px; }
+/* A soft light behind the title -- the "glow around headings" look, done as
+   a blurred radial gradient rather than a text-shadow so it reads as ambient
+   light, not a cartoon outline. */
+.heroGlow {
+  position: absolute;
+  top: -70px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(680px, 92vw);
+  height: 320px;
+  background: radial-gradient(ellipse at center, rgba(177, 102, 255, 0.35), rgba(60, 240, 168, 0.14) 45%, transparent 72%);
+  filter: blur(50px);
+  pointer-events: none;
+  z-index: 0;
+}
+.heroEyebrow {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--font-mono-ui, monospace);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--green);
+  margin-bottom: 16px;
+}
+.heroEyebrow::before, .heroEyebrow::after { content: ''; width: 22px; height: 1px; background: currentColor; opacity: 0.5; }
 .heroTitle {
-  font-weight: 600;
-  font-size: clamp(30px, 5vw, 46px);
-  line-height: 1.08;
-  letter-spacing: -0.03em;
+  position: relative;
+  font-family: var(--font-display, var(--font-body)), sans-serif;
+  font-weight: 800;
+  font-size: clamp(32px, 6vw, 58px);
+  line-height: 1.04;
+  letter-spacing: 0.01em;
   margin: 0;
   color: var(--ink);
+  text-shadow: 0 0 26px rgba(177, 102, 255, 0.6), 0 0 70px rgba(60, 240, 168, 0.2);
 }
-.heroSub { margin: 12px auto 0; max-width: 480px; color: var(--muted); font-size: 15px; line-height: 1.5; }
+.heroTagline {
+  position: relative;
+  margin: 16px auto 0;
+  max-width: 540px;
+  font-size: clamp(16px, 2.4vw, 19px);
+  font-weight: 700;
+  color: var(--pink-text);
+  line-height: 1.4;
+  letter-spacing: -0.01em;
+}
+.heroSub {
+  position: relative;
+  margin: 10px auto 0;
+  max-width: 460px;
+  color: var(--muted);
+  font-size: 13.5px;
+  line-height: 1.5;
+}
+.heroPills {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 9px;
+  margin: 22px auto 0;
+  max-width: 580px;
+  list-style: none;
+}
+.heroPill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  padding: 8px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--card);
+  color: var(--ink);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+}
+.heroPillDot { width: 6px; height: 6px; border-radius: 50%; flex: none; box-shadow: 0 0 8px 1px currentColor; }
 
 .tableIdRow {
   display: flex;
@@ -268,14 +393,38 @@
   aspect-ratio: 16 / 10;
   min-height: 280px;
   border-radius: 50% / 45%;
-  background: radial-gradient(circle at 50% 42%, #1c6b4d, #0e4a34 72%, #0a3a29);
-  border: 10px solid #5c3a22;
+  /* A neon rail instead of a wood one -- still reads as "table edge", now in
+     the page's own violet/green accents rather than a mismatched brown. */
+  border: 8px solid transparent;
+  background-image:
+    radial-gradient(circle at 50% 42%, #163524, #0c2419 72%, #081810),
+    linear-gradient(135deg, #b166ff, #3cf0a8);
+  background-origin: border-box;
+  background-clip: padding-box, border-box;
   box-shadow:
-    inset 0 0 40px rgba(0, 0, 0, 0.45),
-    0 6px 18px rgba(0, 0, 0, 0.18);
+    inset 0 0 50px rgba(0, 0, 0, 0.6),
+    0 0 0 1px rgba(0, 0, 0, 0.4),
+    0 10px 40px -10px rgba(177, 102, 255, 0.35),
+    0 0 60px -20px rgba(60, 240, 168, 0.3);
   margin-bottom: 18px;
 }
+/* A faint suit watermark, dead centre -- felt tables have a printed logo;
+   this is that, at a low enough opacity it never competes with the pot. */
+.felt::after {
+  content: '♠';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  font-family: var(--font-display, var(--font-body)), sans-serif;
+  font-size: min(34vw, 240px);
+  line-height: 1;
+  color: rgba(177, 102, 255, 0.05);
+  pointer-events: none;
+  z-index: 0;
+}
 .feltCenter {
+  z-index: 1;
   position: absolute;
   left: 50%;
   top: 50%;
@@ -283,11 +432,17 @@
   text-align: center;
   color: #eafff4;
 }
-.feltPot { font-size: 22px; font-weight: 700; letter-spacing: -0.02em; text-shadow: 0 1px 3px rgba(0, 0, 0, 0.4); }
+.feltPot {
+  font-family: var(--font-display, var(--font-body)), sans-serif;
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  text-shadow: 0 0 16px rgba(60, 240, 168, 0.65), 0 1px 3px rgba(0, 0, 0, 0.5);
+}
 .feltStreet {
   display: inline-block;
   font-size: 11px; font-weight: 600; margin-top: 6px; text-transform: uppercase; letter-spacing: 0.05em;
-  color: #eafff4; background: rgba(0, 0, 0, 0.28); padding: 2px 10px; border-radius: 999px;
+  color: #eafff4; background: rgba(0, 0, 0, 0.35); border: 1px solid rgba(177, 102, 255, 0.4); padding: 2px 10px; border-radius: 999px;
 }
 .feltCards { display: flex; gap: 6px; margin-top: 12px; justify-content: center; }
 .feltSub { font-size: 11px; opacity: 0.75; margin-top: 6px; }
@@ -300,49 +455,98 @@
   to { opacity: 1; transform: none; }
 }
 .cardBack {
-  width: 32px;
-  height: 44px;
-  border-radius: 5px;
-  background: repeating-linear-gradient(135deg, #b0491f, #b0491f 3px, #e56b43 3px, #e56b43 6px);
-  border: 1px solid rgba(255, 255, 255, 0.45);
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+  width: 38px;
+  height: 52px;
+  border-radius: 6px;
+  background:
+    radial-gradient(circle at 50% 50%, rgba(60, 240, 168, 0.3), transparent 65%),
+    repeating-linear-gradient(135deg, #180f2c, #180f2c 4px, #6d28d9 4px, #6d28d9 8px);
+  border: 1px solid rgba(60, 240, 168, 0.55);
+  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.4), inset 0 0 0 1px rgba(177, 102, 255, 0.25);
   flex: none;
   animation: cardIn 220ms ease-out;
 }
 .cardFace {
-  width: 32px;
-  height: 44px;
-  border-radius: 5px;
-  background: #fff;
+  position: relative;
+  width: 38px;
+  height: 52px;
+  border-radius: 6px;
+  /* Deliberately NOT var(--ink): this stays a physical white card regardless
+     of page theme, so its text stays a fixed dark ink to read against it --
+     var(--ink) is near-white on the dark skin, which would vanish here. */
+  background: linear-gradient(160deg, #ffffff, #ece7fb);
   border: 1px solid rgba(0, 0, 0, 0.12);
-  color: var(--ink);
-  font-size: 14px;
-  font-weight: 700;
+  color: #17162a;
   display: flex;
   align-items: center;
   justify-content: center;
   flex: none;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.45), inset 0 0 0 1px rgba(255, 255, 255, 0.6);
   animation: cardIn 220ms ease-out;
 }
+.cardFaceRed { color: #c0392b; }
+.cardCorner {
+  position: absolute;
+  top: 3px;
+  left: 4px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0;
+  line-height: 1;
+  font-size: 9px;
+  font-weight: 800;
+}
+.cardPip { font-size: 21px; font-weight: 800; }
 
 .seat {
+  z-index: 1;
   position: absolute;
   transform: translate(-50%, -50%);
-  min-width: 96px;
-  max-width: 136px;
-  padding: 9px 10px;
-  border-radius: 12px;
-  background: rgba(13, 14, 14, 0.78);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  min-width: 104px;
+  max-width: 144px;
+  padding: 12px 10px 10px;
+  border-radius: 14px;
+  background: linear-gradient(165deg, rgba(28, 22, 56, 0.92), rgba(9, 8, 18, 0.92));
+  border: 1px solid rgba(177, 102, 255, 0.28);
   color: #f2f2f0;
   text-align: center;
   font-size: 11.5px;
   line-height: 1.4;
-  backdrop-filter: blur(2px);
-  transition: box-shadow 0.15s ease;
+  backdrop-filter: blur(3px);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  transition: box-shadow 0.15s ease, transform 0.15s ease;
 }
-.seatEmpty { background: rgba(13, 14, 14, 0.35); color: rgba(242, 242, 240, 0.6); font-style: italic; }
+.seatAvatar {
+  width: 26px;
+  height: 26px;
+  margin: 0 auto 6px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  background: radial-gradient(circle at 34% 30%, rgba(177, 102, 255, 0.6), rgba(60, 240, 168, 0.25) 72%, transparent 100%);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  box-shadow: 0 0 10px rgba(177, 102, 255, 0.4);
+}
+.seatEmpty {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px dashed rgba(151, 145, 184, 0.35);
+  color: rgba(151, 145, 184, 0.75);
+  box-shadow: none;
+}
+.seatEmptyInner { display: flex; flex-direction: column; align-items: center; gap: 3px; }
+.seatEmptyMark {
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  border: 1px dashed rgba(151, 145, 184, 0.4);
+  font-size: 12px;
+  font-weight: 700;
+}
 .seatYou { outline: 2px solid var(--pink); outline-offset: 2px; }
 .seatFolded { opacity: 0.5; filter: saturate(0.6); }
 .seatTurn {
@@ -391,12 +595,12 @@
 .chipBtn:not(:disabled):active { transform: scale(0.97); }
 .chipBtn:disabled { opacity: 0.5; cursor: default; }
 
-.chipBtnFold { border-color: #e3b3ab; background: #fdf1ef; color: #a33b2e; }
-.chipBtnFold:not(:disabled):hover { background: #fbe3df; }
+.chipBtnFold { border-color: var(--danger-soft-2); background: var(--danger-soft); color: var(--danger); }
+.chipBtnFold:not(:disabled):hover { background: var(--danger-soft-2); }
 .chipBtnPrimary { border-color: var(--pink-soft-2); background: var(--pink); color: #fff; }
 .chipBtnPrimary:not(:disabled):hover {
   background: var(--pink-text);
-  box-shadow: 0 6px 14px -6px rgba(229, 107, 67, 0.55);
+  box-shadow: 0 6px 14px -6px rgba(177, 102, 255, 0.55);
 }
 @media (prefers-reduced-motion: reduce) {
   .chipBtn:not(:disabled):hover { transform: none; }
@@ -419,8 +623,8 @@
   animation: turnBannerPulse 1.8s ease-in-out infinite;
 }
 @keyframes turnBannerPulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(229, 107, 67, 0.28); }
-  50% { box-shadow: 0 0 0 6px rgba(229, 107, 67, 0); }
+  0%, 100% { box-shadow: 0 0 0 0 rgba(177, 102, 255, 0.28); }
+  50% { box-shadow: 0 0 0 6px rgba(177, 102, 255, 0); }
 }
 .turnBannerClock { font-family: var(--font-mono-ui, monospace); font-weight: 700; }
 @media (prefers-reduced-motion: reduce) {
@@ -459,7 +663,7 @@
   background: var(--inset);
 }
 .deckCellSelf { background: var(--pink-soft); border-color: var(--pink-soft-2); }
-.deckCellCommunity { background: var(--green-soft); border-color: #cdeede; }
+.deckCellCommunity { background: var(--green-soft); border-color: var(--green-soft-2); }
 .deckPos { font-size: 9.5px; color: var(--muted); }
 .deckCard { font-family: var(--font-mono-ui, monospace); font-weight: 700; font-size: 13px; margin-top: 2px; }
 .deckWho { font-size: 9px; color: var(--muted); margin-top: 1px; }

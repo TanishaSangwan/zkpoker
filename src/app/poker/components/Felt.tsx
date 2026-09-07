@@ -14,12 +14,20 @@ import { STREET_NAMES, baseToStrk , fmtAmount } from '../contract';
 function Card({ card }: { card: number }) {
   const { rank, suit, red } = cardToGlyph(card);
   return (
-    <div className={styles.cardFace} style={red ? { color: '#c0392b' } : undefined} title={`${rank}${suit}`}>
-      {rank}
-      {suit}
+    <div className={`${styles.cardFace} ${red ? styles.cardFaceRed : ''}`} title={`${rank}${suit}`}>
+      <span className={styles.cardCorner}>
+        <span>{rank}</span>
+        <span>{suit}</span>
+      </span>
+      <span className={styles.cardPip}>{suit}</span>
     </div>
   );
 }
+
+// A seat's little identity mark -- deterministic per seat index (not per
+// address), so it's stable across a poll refresh and identical on the
+// server's first render and the client's.
+const SEAT_SUITS = ['♠', '♥', '♦', '♣'];
 
 /** Seat positions around an ellipse, seat 0 at the bottom (the player's side). */
 function seatStyle(index: number, total: number): React.CSSProperties {
@@ -52,9 +60,13 @@ function Seat({
   return (
     <div className={cls} style={seatStyle(seat.seat, total)}>
       {!seat.occupied ? (
-        <>seat {seat.seat}<br />empty</>
+        <div className={styles.seatEmptyInner}>
+          <div className={styles.seatEmptyMark}>+</div>
+          <div>seat {seat.seat}</div>
+        </div>
       ) : (
         <>
+          <div className={styles.seatAvatar} aria-hidden>{SEAT_SUITS[seat.seat % SEAT_SUITS.length]}</div>
           <div className={styles.seatAddr}>{you ? 'you' : `${seat.owner.slice(0, 6)}…${seat.owner.slice(-4)}`}</div>
           <div className={styles.seatChips}>{fmtAmount(seat.contributed)}</div>
           {/* Winnings are NOT in the pot and not in `contributed`. award()
@@ -71,7 +83,7 @@ function Seat({
             {/* Two different things that both used to be "D". The creator
                 runs begin_shuffle; the button decides the blinds and moves
                 every hand. Conflating them made the blinds look arbitrary. */}
-            {dealer ? <span className={styles.seatBadge} style={{ background: '#7a5cff' }} title="created the table">host</span> : null}
+            {dealer ? <span className={styles.seatBadge} style={{ background: 'var(--pink)' }} title="created the table">host</span> : null}
             {button ? <span className={styles.seatBadge} style={{ background: '#fff', color: '#222' }} title="dealer button">BTN</span> : null}
             {blind ? <span className={styles.seatBadge} style={{ background: '#2d8a4e' }} title={blind === 'SB' ? 'small blind' : 'big blind'}>{blind}</span> : null}
             {seat.folded ? <span className={styles.seatBadge} style={{ background: '#8a8a8a' }}>folded</span> : null}
