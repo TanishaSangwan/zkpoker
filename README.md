@@ -14,6 +14,8 @@ answering the [Provably Fair On-Chain Poker RFP](https://strk20.starknet.io/rfp/
 Sepolia. Open it in two browser tabs and you can play a whole hand against
 yourself; two people on two machines need the share relay (below).
 
+**Demo video:** [3-minute walkthrough](https://drive.google.com/file/d/1yQK8YbUfJGtkqUj9W8cwJHoYybyRgOjM/view?usp=sharing)
+
 ## Status, stated plainly
 
 | | |
