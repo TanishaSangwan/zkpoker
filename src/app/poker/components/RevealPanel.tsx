@@ -21,11 +21,11 @@ import * as dealing from '@/lib/dealing';
 import { initProver as initDleqProver } from '@/lib/dleq';
 import {
   cardFromShare, commitHoleSharesArgs, loadHoleOpening, revealCommunityArgs,
-  revealDrawArgs, revealHoleArgs, saveHoleOpening,
+  revealHoleArgs, saveHoleOpening,
 } from '@/lib/reveal';
 import { BroadcastTransport, type Transport } from '@/lib/shares';
 import { RelayTransport, relayUrl } from '@/lib/relayTransport';
-import { communityPosition, drawPosition, seatHolePositions } from '@/lib/deck';
+import { communityPosition, seatHolePositions } from '@/lib/deck';
 
 type Props = {
   table: TableState;
@@ -81,8 +81,9 @@ export default function RevealPanel(p: Props) {
   // initDleqProver loads garaga's wasm for the MSM hints. It is idempotent and
   // cheap afterwards, but the FIRST call is not, and every showdown path used
   // to pay it inside a ten-second deadline -- so a tab's first reveal was its
-  // slowest, which is exactly the one that gets mucked. Paying it during
-  // dealing costs nothing: there is no clock there.
+  // slowest, which is exactly the one that ran out of time. The clock is far
+  // more forgiving now, but paying this during dealing still costs nothing:
+  // there is no clock there.
   useEffect(() => {
     if (!table.deckOpened) return;
     void initDleqProver().catch(() => {
@@ -279,7 +280,7 @@ export default function RevealPanel(p: Props) {
     if (!stored) {
       throw new Error(
         `No stored opening for slot ${slot}. It was written at dealing time and is needed to ` +
-          `show — without it you can only muck, which forfeits the pot rather than blocking it.`,
+          `show — and a seat that cannot show forfeits its claim on the pot when the clock runs out.`,
       );
     }
     const position = seatHolePositions(yourSeat!)[slot];
@@ -307,16 +308,15 @@ export default function RevealPanel(p: Props) {
   /**
    * Show every card this seat still owes, in ONE transaction.
    *
-   * Both halves of that matter, because the showdown clock is ten seconds and
-   * the old shape could not fit inside it. It built one card's aggregate, sent
+   * Both halves of that matter. The old shape built one card's aggregate, sent
    * it, then built the other's and sent that: two relay round-trips and two
-   * transactions in series. Every seat at the table showed its first card and
-   * was mucked before the second -- so a hand where everyone did the right
-   * thing ended with nobody able to win it.
-   *
-   * The two aggregates are independent, so they run concurrently, and the
-   * reveals go as a single multicall: one signature, one confirmation, and no
-   * window between the two where the clock can bite.
+   * transactions in series. Against the ten-second-per-seat clock this failed
+   * outright -- every seat at the table showed its first card and was mucked
+   * before the second, so a hand where everyone did the right thing ended with
+   * nobody able to win it. That clock is gone, and this shape is still the
+   * right one: the two aggregates are independent, so they run concurrently,
+   * and the reveals go as a single multicall -- one signature, one
+   * confirmation, and half as many round trips against a public chain.
    */
   const showHoleCards = (slots: number[]) =>
     run('Showing my hand', async () => {
@@ -338,8 +338,10 @@ export default function RevealPanel(p: Props) {
   // proving the protocol worked; leaving them as the only way to play would
   // mean two people clicking in lockstep for every card, which is not a game.
   //
-  // What stays manual is what actually involves a choice: bet / check / fold,
-  // and whether to show or muck at showdown.
+  // What stays manual is what actually involves a choice: bet / check / fold.
+  // Showing is no longer one of them -- every contender shows -- but the toggle
+  // stays, because a client that sends transactions on its own should always be
+  // stoppable.
   //
   // ── The one rule that makes this safe ─────────────────────────────────
   //
@@ -395,21 +397,8 @@ export default function RevealPanel(p: Props) {
       if (table.street < streetFor(k)) continue;
       out.push({ pos: communityPosition(k, table.maxSeats), to: null });
     }
-    // The button draws. Note this includes THIS seat's own draw, which is the
-    // one place the "never serve your own position" rule does not apply --
-    // and deliberately so. A draw card is public by design: everyone must see
-    // every draw to agree on who has the highest. Withholding your own share
-    // here would not protect information, it would just stop the table
-    // deciding a button. Hole cards are the opposite, which is why they are
-    // the only positions the rule guards.
-    if (!table.buttonSet) {
-      for (const s of table.seats) {
-        if (!s.occupied || s.drawRevealed) continue;
-        out.push({ pos: drawPosition(s.seat, table.maxSeats), to: null });
-      }
-    }
     return out;
-  }, [table.seats, table.maxSeats, yourSeat, table.street, table.buttonSet]);
+  }, [table.seats, table.maxSeats, yourSeat, table.street]);
 
   // Serve every share owed, once each, as soon as the deck is open.
   useEffect(() => {
@@ -517,6 +506,21 @@ export default function RevealPanel(p: Props) {
    * share the same `joined` guard, or a client that does both ends up running
    * two sessions for one position and answering its own rounds twice.
    */
+  // ── did somebody else already do it? ─────────────────────────────────
+  // Both of these are read straight from the contract when a submission
+  // fails. The alternative -- trusting `table`, which is refreshed by a poll
+  // running at twelve seconds on a public chain -- reports a lost race as an
+  // error for as long as the poll is behind, which is exactly the window in
+  // which races are lost.
+  const blindsAreIn = useCallback(async (): Promise<boolean> => {
+    try {
+      const c = pokerGameReader(contract, provider!);
+      return !!Number(await c.get_blinds_posted(latest.current.table.tableId));
+    } catch {
+      return false;
+    }
+  }, [contract, provider]);
+
   const runFor = useCallback(async (pos: number) => {
     const L = latest.current;
     await initDleqProver();
@@ -557,24 +561,8 @@ export default function RevealPanel(p: Props) {
       : await gatherThenAggregate();
     setBusy(null);
     const communityBase = 2 * L.table.maxSeats;
-    const drawBase = communityBase + 5;
     const card = cardFromShare({ c1, c2 }, agg.share);
     if (card === null) return;
-
-    if (pos >= drawBase) {
-      const seat = pos - drawBase;
-      if (L.table.seats[seat]?.drawRevealed || L.table.buttonSet) return;
-      try {
-        await L.send('reveal_draw_card', revealDrawArgs({
-          tableId: L.table.tableId, seat, share: agg.share, card, proof: agg.proof,
-        }));
-        say(`seat ${seat} drew ${cardToName(card)}`);
-        L.refresh();
-      } catch {
-        // Already revealed by whoever got there first -- the correct outcome.
-      }
-      return;
-    }
 
     if (pos < communityBase) return; // a hole card: participation only
     const index = pos - communityBase;
@@ -615,25 +603,26 @@ export default function RevealPanel(p: Props) {
         //   * the request came from the card's OWNER, not a third party. Any
         //     seat could otherwise nonce-commit on a rival's hole position and
         //     have the rest of the table hand over the pieces of their hand;
-        //   * it is that owner's TURN to show. The contract enforces the order
-        //     for the reveal itself, but the shares travel off-chain and would
-        //     not be covered by it.
+        //   * the owner is still entitled to show: not folded, and not already
+        //     forfeited on the showdown clock.
+        //
+        // There is no third condition about whose TURN it is, because there is
+        // no turn order any more -- every contender shows, so nothing is
+        // protected by making them queue.
         //
         // Together: this seat helps expose a hole card only when its owner
-        // asks, on their own turn, at showdown -- which is the one moment
-        // showing it is what they are entitled to do.
+        // asks, at showdown, while they may still show it.
         const owner = Math.floor(pos / 2);
         if (!T.showdownStarted || T.settled) return;
         if (e.from !== owner) return;
-        if (T.showdownTurn !== owner) return;
-        if (T.seats[owner]?.mucked || T.seats[owner]?.folded) return;
+        if (T.seats[owner]?.forfeited || T.seats[owner]?.folded) return;
       }
       // And never help open a board card before its street. Same reasoning as
       // `owed`: the contract refuses the reveal, but there is no reason to
       // contribute to it in the first place.
       const communityIndex = pos - 2 * latest.current.table.maxSeats;
-      // Only indices 0..4 are board cards. Anything past them is a button
-      // draw, which has no street gate -- it is drawn before the hand starts.
+      // Indices 0..4 are the board. Nothing sits past them -- the in-play
+      // block ends at 2*max_seats + 5 now that the button is not dealt.
       if (communityIndex >= 0 && communityIndex < 5
           && latest.current.table.street < streetFor(communityIndex)) return;
       joined.current.add(pos);
@@ -682,34 +671,10 @@ export default function RevealPanel(p: Props) {
   // ── draw for the button, then post the blinds ─────────────────────────
   //
   // Neither of these is a decision, so neither should be a button.
-  //
-  // The draw runs once per table, before the first hand: every seated player
-  // takes one card from the same committed deck and the highest takes the
-  // button. Every client starts a run for every seat's draw, including its
-  // own -- see `owed` for why that is safe here and nowhere else -- and
-  // whoever's transaction lands first wins the race, which is the correct
-  // outcome rather than an error.
-  const drawsDone = table.buttonSet;
-  useEffect(() => {
-    if (!autoServe || !deckIsOpen || yourSeat === null || !mySecretHex) return;
-    if (!table.jointKey || drawsDone) return;
-    for (const seat of table.seated) {
-      if (table.seats[seat]?.drawRevealed) continue;
-      const pos = drawPosition(seat, table.maxSeats);
-      if (joined.current.has(pos)) continue;
-      joined.current.add(pos);
-      say(`drawing for the button: seat ${seat}`);
-      void runFor(pos).catch((err) => {
-        joined.current.delete(pos);
-        say(`draw for seat ${seat} failed: ${String(err?.message ?? err).slice(0, 110)}`);
-      });
-    }
-  }, [autoServe, deckIsOpen, yourSeat, mySecretHex, drawsDone, table.seated, table.seats,
-      table.jointKey, table.maxSeats, runFor, say]);
-
   // Posting is permissionless and takes no arguments, so any client can do it
   // and it does not matter which. Latched per hand rather than forever: the
-  // button rotates and the blinds are posted again next hand.
+  // button rotates and the blinds are posted again next hand -- and on a table
+  // with a blind ladder they are posted at a different price each level.
   const postedFor = useRef<number | null>(null);
   useEffect(() => {
     if (!autoServe || yourSeat === null || !account || !provider) return;
@@ -717,15 +682,17 @@ export default function RevealPanel(p: Props) {
     if (table.bigBlind === 0n) return; // a table with no structure
     if (postedFor.current === table.handNumber) return;
     postedFor.current = table.handNumber;
-    say('button decided -- posting the blinds');
+    say('posting the blinds');
     void (async () => {
       try {
         await send('post_blinds', { table_id: table.tableId });
         refresh();
       } catch (e) {
-        // Almost always "someone else already posted", which is fine. Anything
-        // else -- a player with no allowance, most likely -- has to be visible
-        // or the table just sits there.
+        // Almost always "someone else already posted", which is fine -- and
+        // confirmed against the chain rather than the poll, which lags. Any
+        // other failure -- a player with no allowance, most likely -- has to
+        // be visible or the table just sits there.
+        if (await blindsAreIn()) return;
         postedFor.current = null;
         say(`post_blinds: ${decodeError(e).slice(0, 110)}`);
       }
@@ -769,35 +736,33 @@ export default function RevealPanel(p: Props) {
   // stopping a hand from resolving. The auto-join above already covers that --
   // it skips only this seat's OWN hole positions.
   //
-  // Showing YOUR hand is a choice. Mucking is legal, the contract pays only
-  // hands it verified, and there is no obligation to expose a loser. So this
-  // defaults to showing -- which is what almost everyone wants almost always,
-  // and what makes a hand actually finish -- but it is a toggle, not a rule.
+  // Showing YOUR hand is now the rule rather than a choice: every contender
+  // shows, and the only way not to is to let the showdown clock run out, which
+  // forfeits. The toggle stays because a client that fires transactions on its
+  // own should always be stoppable -- but leaving it off costs the pot rather
+  // than protecting a losing hand from view.
   //
-  // Folded seats are skipped: they have nothing to show and the contract would
-  // reject it.
+  // Folded and already-forfeited seats are skipped: they have nothing to show
+  // and the contract would reject it.
   const showing = useRef(false);
   useEffect(() => {
     if (!autoShow || yourSeat === null || !mySecretHex) return;
     if (!table.showdownStarted || table.settled) return;
     const me = table.seats[yourSeat];
-    if (!me || me.folded || me.mucked || showing.current) return;
-    // Only on this seat's turn. The contract enforces the order anyway --
-    // showing early would just revert -- but firing at the wrong moment would
-    // burn a transaction and, worse, look like the client being broken.
-    if (table.showdownTurn !== yourSeat) return;
+    if (!me || me.folded || me.forfeited || showing.current) return;
     const pending = [0, 1].filter((slot) => !me.holeRevealed[slot]);
     if (pending.length === 0) return;
     showing.current = true;
     void showHoleCards(pending).finally(() => { showing.current = false; });
-  }, [autoShow, yourSeat, mySecretHex, table.showdownStarted, table.showdownTurn, table.settled, table.seats]);
+  }, [autoShow, yourSeat, mySecretHex, table.showdownStarted, table.settled, table.seats]);
 
-  // Muck the seat whose clock has run out.
+  // Close the showdown once its clock has run out.
   //
-  // Not showing in time IS mucking: there is nothing to reconstruct and nobody
-  // to punish beyond the pot that seat gives up. Callable by anyone, so any
-  // client at the table can unstick a showdown somebody walked away from --
-  // the same reasoning as every other timeout here.
+  // Not showing in time forfeits: there is nothing to reconstruct and nobody
+  // to punish beyond the pot that seat gives up. One call closes the whole
+  // showdown, because there is one deadline for the table rather than one per
+  // seat. Callable by anyone, so any client can unstick a showdown somebody
+  // walked away from -- the same reasoning as every other timeout here.
   const clearing = useRef(false);
   useEffect(() => {
     if (!table.showdownStarted || table.settled || !table.showdownDeadline) return;
@@ -815,7 +780,7 @@ export default function RevealPanel(p: Props) {
         clearing.current = false;
       }
     })();
-  }, [table.showdownStarted, table.showdownDeadline, table.settled, table.showdownTurn, account, provider]);
+  }, [table.showdownStarted, table.showdownDeadline, table.settled, account, provider]);
 
   // ── accusations ────────────────────────────────────────────────────────
   const [accSeat, setAccSeat] = useState('0');
@@ -935,13 +900,13 @@ export default function RevealPanel(p: Props) {
 
           {table.showdownStarted ? (
             <div className={styles.stateGrid}>
-              <Item label="showing now"
-                value={table.showdownTurn === yourSeat ? 'you' : `seat ${table.showdownTurn}`} />
               <Item label="clock" value={<ShowdownClock deadline={table.showdownDeadline} />} />
-              <Item label="order"
+              <Item label="showing"
                 value={table.seats.filter((s) => s.occupied && !s.folded)
-                  .map((s) => `${s.seat}${s.mucked ? ' (muck)' : s.holeRevealed[0] && s.holeRevealed[1] ? ' ✓' : ''}`)
-                  .join(' → ')} />
+                  .map((s) => `${s.seat}${s.forfeited
+                    ? ' (forfeit)'
+                    : s.holeRevealed[0] && s.holeRevealed[1] ? ' ✓' : ' …'}`)
+                  .join('  ')} />
             </div>
           ) : null}
 
@@ -951,8 +916,9 @@ export default function RevealPanel(p: Props) {
                 <input type="checkbox" checked={autoShow} onChange={(e) => setAutoShow(e.target.checked)} />
                 Show my hand automatically at showdown
               </label>
-              {/* One button for the hand, not one per card: the clock is ten
-                  seconds and both reveals go in a single transaction. */}
+              {/* One button for the hand, not one per card: both reveals go in
+                  a single transaction, which is also one fewer round trip
+                  against the showdown clock. */}
               {(() => {
                 const owed = [0, 1].filter((slot) => !mySeatState?.holeRevealed[slot]);
                 return owed.length ? (
@@ -961,24 +927,17 @@ export default function RevealPanel(p: Props) {
                   </button>
                 ) : null;
               })()}
-              {table.showdownTurn === yourSeat && !table.seats[yourSeat]?.mucked ? (
-                <button className={styles.chipBtn} disabled={!!busy}
-                  onClick={() => run('Mucking', () => send('muck', {
-                    table_id: table.tableId, seat: String(yourSeat),
-                  }))}>
-                  Muck
-                </button>
-              ) : null}
               <button className={uni.btn} disabled={!!busy}
                 onClick={() => run('Settling', () => send('settle_from_reveals', { table_id: table.tableId }))}>
                 Settle
               </button>
               <span className={styles.fieldHint}>
                 Settling takes no input beyond the table — every card comes from storage a reveal
-                proof bound — so anyone may call it and nobody can steer it. Declining to show
-                forfeits rather than blocks: untick the box above to muck. Helping others show is
-                automatic either way, since their card needs a share from every seat and sitting out
-                only stops the hand resolving.
+                proof bound — so anyone may call it and nobody can steer it, and it is refused until
+                the showdown is actually over. There is no muck: every contender shows, and a seat
+                that does not show before the clock runs out forfeits its claim on the pot.
+                Helping others show is automatic, since their card needs a share from every seat and
+                sitting out only stops the hand resolving.
               </span>
             </div>
           ) : null}

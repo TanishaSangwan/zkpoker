@@ -202,6 +202,7 @@ pub mod MockShuffleVerifier {
         reject: bool,
         reject_key: bool,
         reject_opening: bool,
+        reject_shuffle_open: bool,
         reject_reveal: bool,
         reject_joint_key: bool,
         reject_share: bool,
@@ -227,6 +228,16 @@ pub mod MockShuffleVerifier {
             self: @ContractState, proof: Span<felt252>, public_inputs: Span<felt252>,
         ) -> bool {
             !self.reject_opening.read()
+        }
+
+        // Rejected on its OWN flag, not reject/reject_opening: the fused
+        // proof is a distinct statement against a distinct verifier class, so
+        // a test that rejects plain shuffles must not silently also reject
+        // the final one -- that would hide which path a failure came from.
+        fn verify_shuffle_and_open(
+            self: @ContractState, proof: Span<felt252>, public_inputs: Span<felt252>,
+        ) -> bool {
+            !self.reject_shuffle_open.read()
         }
 
         // The real adapter sums the shares on Grumpkin. The fixtures in
@@ -276,6 +287,10 @@ pub mod MockShuffleVerifier {
             self.reject_key.write(reject);
         }
 
+        fn set_reject_shuffle_open(ref self: ContractState, reject: bool) {
+            self.reject_shuffle_open.write(reject);
+        }
+
         fn set_reject_opening(ref self: ContractState, reject: bool) {
             self.reject_opening.write(reject);
         }
@@ -299,6 +314,7 @@ pub trait IMockVerifierAdminTrait<TState> {
     fn set_reject(ref self: TState, reject: bool);
     fn set_reject_key(ref self: TState, reject: bool);
     fn set_reject_opening(ref self: TState, reject: bool);
+    fn set_reject_shuffle_open(ref self: TState, reject: bool);
     fn set_reject_reveal(ref self: TState, reject: bool);
     fn set_reject_joint_key(ref self: TState, reject: bool);
     fn set_reject_share(ref self: TState, reject: bool);

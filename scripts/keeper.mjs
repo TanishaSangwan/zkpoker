@@ -126,6 +126,10 @@ export { readPublishedDeck, findDeckPublishedTx } from ${JSON.stringify(join(roo
   return deckLib;
 }
 
+// Chunk 0 never reaches here: the last shuffler proves it inside its own
+// shuffle proof, so deck_open_chunk is already 1 by the time the chain
+// completes. On a table of seven seats or fewer there is nothing left to open
+// and this is never called at all.
 async function openChunk(maxSeats) {
   if (!deckLib) await loadDeckLib();
   const { deck, deckOpen, readPublishedDeck, findDeckPublishedTx } = deckLib;
@@ -235,16 +239,9 @@ for (;;) {
       } else if (!opened) {
         note('deck not opened (OPEN_DECK=0)');
       } else if (!(await view.get_button_set(TABLE))) {
-        // The draw itself needs a decryption share from every player, so the
-        // keeper structurally cannot do it -- it holds no key share. Players'
-        // clients run it between themselves; this only waits.
-        let drawn = 0, seated = 0;
-        for (let seat = 0; seat < maxSeats; seat++) {
-          if (BigInt(await view.get_seat_owner(TABLE, String(seat))) === 0n) continue;
-          seated += 1;
-          if (await view.get_draw_revealed(TABLE, String(seat))) drawn += 1;
-        }
-        note(`drawing for the button: ${drawn}/${seated} cards turned`);
+        // begin_shuffle sets the button, so reaching here with the deck open
+        // means the table never opened its shuffle chain at all.
+        note('no button: begin_shuffle has not run');
       } else if (BigInt(await view.get_big_blind(TABLE)) !== 0n
                  && !(await view.get_blinds_posted(TABLE))) {
         const button = Number(await view.get_button(TABLE));
@@ -258,20 +255,19 @@ for (;;) {
         // payout note from join_table -- so anyone may call it and nobody can
         // steer it, which is exactly why a keeper is allowed to.
         //
-        // A seat that declines to show simply does not win; mucking forfeits
-        // rather than blocking, so a hand where somebody stays quiet still
-        // resolves for everyone else.
-        // Mucked seats are NOT contenders. Counting them was a live-lock:
-        // a seat that muck or the clock removed can never reveal, so
-        // `shown === contenders` was unreachable and the keeper waited on a
-        // hand that was already decided. settle_from_reveals itself treats a
-        // muck as a forfeit rather than a veto, so there was nothing to wait
-        // for.
+        // A seat that declines to show simply does not win: not showing
+        // forfeits rather than blocking, so a hand where somebody stays quiet
+        // still resolves for everyone else.
+        // Forfeited seats are NOT contenders. Counting them was a live-lock: a
+        // seat the clock removed can never reveal, so `shown === contenders`
+        // was unreachable and the keeper waited on a hand that was already
+        // decided. settle_from_reveals itself treats a forfeit as exactly that
+        // rather than a veto, so there was nothing to wait for.
         let contenders = 0, shown = 0;
         for (let seat = 0; seat < maxSeats; seat++) {
           if (BigInt(await view.get_seat_owner(TABLE, String(seat))) === 0n) continue;
           if (await view.get_seat_folded(TABLE, String(seat))) continue;
-          if (await view.get_seat_mucked(TABLE, String(seat))) continue;
+          if (await view.get_seat_forfeited(TABLE, String(seat))) continue;
           contenders += 1;
           if (await view.get_hole_revealed(TABLE, String(seat), 0)
               && await view.get_hole_revealed(TABLE, String(seat), 1)) shown += 1;

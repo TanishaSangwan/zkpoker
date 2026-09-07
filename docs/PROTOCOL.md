@@ -307,45 +307,66 @@ cost scales with the deck, so a larger deck, a wider re-randomisation, or a
 second statement folded into the same circuit all spend from those 398 million
 gas. Past the cap the proof cannot be verified in one transaction at all, and
 the fix is not tuning — it is splitting the statement, the way `open_deck`
-already chunks at K=16.
+already chunks at K=19.
 
-### 6.2 K was raised from 5 to 16 — measured, then done
+That "second statement folded into the same circuit" is no longer
+hypothetical: §6.5 folds the deck opening into the last shuffle proof and it
+cost 8.0M gas of the margin, not 261.8M, because the fused circuit stays at
+2^17. Folding is cheap when the second statement reuses the first's witness.
+
+### 6.2 K was raised from 5 to 16, then to 19 — measured, then done
 
 The corollary of 6.1's cost model is that **the number of proofs is what
 costs money, not the size of each**. `deck_open` opened K=5 positions per
 proof, so a table's in-play slots took several: three for a two-seat table,
 ten for a fifteen-seat one, each paying the same ~587M fixed verification.
 
-Raising K to 16 collapses that, and the circuit did not grow at all doing it —
-`log_n` stayed 14, so a proof costs exactly what it did before:
+Raising K collapses that, and the circuit did not grow at all doing it —
+`log_n` stayed 14 at both 16 and 19, so a proof costs what it always did.
+In-play slots are `2·max_seats + 5` since the button draw was dropped (§9.9.1):
 
-| table | in-play slots | proofs at K=5 | at K=16 |
-|---|---|---|---|
-| 2 seats | 11 | 3 | **1** |
-| 3 seats | 14 | 3 | **1** |
-| 4 seats | 17 | 4 | 2 |
-| 15 seats | 50 | 10 | **4** |
+| table | in-play slots | proofs at K=5 | at K=16 | at K=19 | separate `open_deck` txs |
+|---|---|---|---|---|---|
+| 2 seats | 9 | 3 | 1 | **1** | **0** |
+| 3 seats | 11 | 3 | 1 | **1** | **0** |
+| 7 seats | 19 | 4 | 2 | **1** | **0** |
+| 8 seats | 21 | 5 | 2 | **2** | 1 |
+| 15 seats | 35 | 7 | 3 | **2** | 1 |
 
-**16 is the ceiling, not a preference.** Garaga counts SIXTEEN more public
+The last column is the one that matters, and it is not the same question: the
+fused proof (§6.5) always carries chunk 0, so a table only pays for a separate
+opening transaction when its deck needs more than one chunk. **Below eight
+seats, `open_deck` is unreachable.**
+
+**The ceiling is public inputs, not gates.** Garaga counts SIXTEEN more public
 inputs than the circuit declares — the pairing-point accumulator — against its
-cap of 99, so the real budget is 83. This circuit publishes `1 + 5K`, giving
-`K ≤ 16.4`. An attempt at 19 was refused outright:
+cap of 99, so the real budget is 83. Publishing `K` explicit positions costs
+`1 + 5K`, giving `K ≤ 16.4`; an attempt at 19 in that form was refused
+outright:
 
 ```
 Name 'zk_honk_sumcheck_size_14_pub_112' is too long to fit in a felt252
 ```
 
+Deriving the positions from `chunk` and `k_total` instead costs `3 + 4K`,
+which allows K=20 — and K is 19 because `circuits/shuffle_open` must agree
+with this circuit on chunk arithmetic while also carrying the shuffle's four
+inputs, and `6 + 4K` caps IT at 19. See §6.5.
+
 Nothing about the checks changed: the same positions are bound to the same
 commitment by the same proof system. Only the packaging did.
 
-One thing it cost, worth recording: at K=16 a two-seat table opens atomically,
-so the fixtures that used to exercise chunk ordering and the "not opened until
-the last chunk" rule stopped testing anything. A four-seat fixture (17 slots,
-two chunks) keeps that coverage — `max_seats` drives the slot count, not how
-many seats are occupied, so it needs no extra players.
+One thing it cost, worth recording: a two-seat table opens atomically, so the
+fixtures that used to exercise chunk ordering and the "not opened until the
+last chunk" rule stopped testing anything. A wider fixture keeps that
+coverage — `max_seats` drives the slot count, not how many seats are occupied,
+so it needs no extra players. That fixture has had to widen twice: four seats
+(17 slots) at K=16 with the button draw, six once the draw was dropped, and
+**eight now** (21 slots), because K=19 and the fused chunk 0 mean seven seats
+open in a single proof.
 
-**And K=16 is now bounded twice over, which §6.1 did not anticipate.** Measured
-on Sepolia after the redeploy:
+**And K is now bounded twice over, which §6.1 did not anticipate.** Measured
+on Sepolia after the K=16 redeploy:
 
 ```
 (open_deck: bound 1224841560 exceeds the 1209000000 cap -- clamping)
@@ -353,7 +374,7 @@ ok  chunk 0 (positions 0,1,...,10,10,10,10,10,10): accepted in 19578 ms
 ```
 
 At K=5 deck-opening estimated comfortably under Starknet's per-transaction gas
-ceiling. At K=16 it does not: the estimator's bound lands **above** the
+ceiling. From K=16 on it does not: the estimator's bound lands **above** the
 1,210,000,000 cap, so `open_deck` has joined the shuffle proof in needing that
 bound clamped before the transaction is even accepted for execution. The work
 itself still fits — the proof verified once the ceiling was trimmed — but the
@@ -490,6 +511,104 @@ overhead to be optimised away.
 
 Cheap hands stay cheap: everyone folding pre-flop reveals no community cards
 and reaches no showdown, costing **zero** verifications beyond the shuffle.
+
+### 6.4 A whole hand, measured on Sepolia — 2026-09-06
+
+Everything above is devnet gas or estimate. This is one complete three-handed
+hand on Sepolia, from `create_table` to the (failed) showdown, read back from
+the receipts: **46 transactions, 114.3680 STRK, 35.8 minutes** of on-chain span.
+
+| call | n | total STRK | each | % | L2 gas/tx |
+|---|---:|---:|---:|---:|---:|
+| `submit_shuffle` | 3 | 69.5074 | 23.1691 | **60.8** | 815,933,973 |
+| `open_deck` | 1 | 23.6500 | 23.6500 | **20.7** | 828,105,280 |
+| `reveal_community_card` | 5 | 9.4495 | 1.8899 | 8.3 | 65,515,680 |
+| `reveal_draw_card` | 3 | 5.6442 | 1.8814 | 4.9 | 65,889,920 |
+| `register_shuffle_key` | 3 | 2.9151 | 0.9717 | 2.5 | 34,257,786 |
+| everything else (26 txs) | 26 | 3.2058 | — | 2.8 | 2–10M |
+
+**Four SNARK verifications are 81.5% of a hand.** Every bet, check, fold,
+blind, street, hole-share commitment and all eight aggregate DLEQ reveals are
+the other 18%.
+
+Fitting the two circuit sizes actually deployed (shuffle SIZE_17 at 811.9M,
+deck-open SIZE_14 at 772.3M) gives **587M fixed + 13.2M per sumcheck round** —
+72% of every proof is a constant no circuit change touches. So:
+
+> Cost ≈ 587M × (number of proof verifications). Circuit size barely registers.
+
+That is what makes the levers what they are, and rules out the obvious ones:
+
+* **Fewer, bigger circuits win; smaller circuits do not.** The deck-open
+  circuit is 8× smaller than the shuffle and verifies for only 5% less.
+* **`k = n` is not negotiable** (§9.1), so the shuffle term scales with seats
+  and stays.
+* **A Poseidon transcript is still unavailable and still small.** Re-checked
+  2026-09-06: garaga is 1.1.0 on PyPI, upstream `main` ships only
+  `KeccakHasherState`, and the swap is worth ~4.8% (§2.2).
+* **`max_seats`, not seats filled, drives `k_total`.** A six-max table with
+  three players pays for a second opening proof — 23.65 STRK — for three empty
+  chairs. Size tables to the players.
+
+Acted on since, all three in this document rather than only in a diff: the
+button draw removed (−5.64 STRK at three seats, −31 at four, §9.9.1), the
+showdown clock made meetable (§9.8.2), and **the deck opening folded into the
+last shuffler's proof (§6.5) — built, measured, and worth −22.6 STRK**.
+
+### 6.5 The opening folded into the last shuffle — measured, BUILT
+
+The cost model says a hand costs `587M × (number of proofs)`. A hand ran four
+SNARK verifications: three shuffles and one deck opening. It runs three now.
+
+`circuits/shuffle_open` is `circuits/shuffle` and `circuits/deck_open` proved
+as one statement. The join is one public input doing two jobs: the shuffle's
+`hash_out` **is** the opening's `deck_hash`. The last shuffler already holds
+the final deck in private witness and already pays to Poseidon2-hash it, so
+the opening's constraints are 76 field equalities against an array that is
+already there — and the whole opening rides along for almost nothing:
+
+| verifier | log_n | public inputs | verification gas |
+|---|---:|---:|---:|
+| `shuffle` (unchanged) | 17 | 20 | 269,747,761 |
+| **`shuffle_open`** | **17** | **98** | **277,724,119** |
+| `deck_open` | 14 | 95 | 261,803,742 |
+
+The merged circuit is **the same 2^17** as the plain shuffle: not one extra
+sumcheck round. Measured end to end on a devnet, `submit_final_shuffle` costs
+853,313,040 L2 gas against `submit_shuffle`'s 817,218,400 — **+4.4% to absorb
+a transaction that cost 828,105,280 on Sepolia**. Net: **−790M gas per hand,
+≈ −22.6 STRK**, and proving is unchanged (19,978 ms vs 20,345 ms for a plain
+shuffle, same machine, same run).
+
+**What made it fit.** Garaga 1.1.0 names its verifier
+`zk_honk_sumcheck_size_<log_n>_pub_<n>` and asserts that fits a felt252 short
+string, so `n ≤ 99`; it counts 16 more than the circuit declares (Honk's
+pairing-point accumulator), leaving 83. The opening used to publish `K`
+explicit positions at `1 + 5K`, and merging that with the shuffle's four came
+to 84 at K=16 — **one over, so the fusion did not fit at all.**
+
+Positions are DERIVED now, from `chunk` and `k_total`, which costs `6 + 4K`
+and fits K=19 at 82 declared (98 counted, one under the cap). That is sound
+because the in-play slots are contiguous by construction — 2 hole cards per
+seat then 5 community cards — so slot `i` of chunk `c` is deck position
+`19c + i`. Nothing about who controls them changed: the contract still derives
+`k_total = 2·max_seats + 5` from its own storage and never takes it from a
+caller, exactly as it did when it passed the positions themselves.
+
+K=19 is a second saving on its own. `open_deck` is now unreachable below
+**eight seats**: a seven-seat table's 19 positions fit the one chunk the fused
+proof already carries, so a table that used to pay for a separate opening now
+pays for none at all.
+
+**The chain has exactly one shape.** `submit_shuffle` refuses the last turn
+(`USE_FINAL_SHUFFLE`) and `submit_final_shuffle` refuses every other one
+(`NOT_FINAL_SHUFFLE`). That is what makes "the chain completed ⇒ chunk 0 is
+proved" an invariant rather than a hope, and it survives timeout because
+`claim_shuffle_timeout` voids the table rather than completing a short chain.
+Without the first half, a plain shuffle proof could close the chain and leave
+a complete shuffle over a deck `open_deck` can no longer open — it starts at
+chunk 1. Without the second, a mid-chain seat could bind cards from a deck the
+remaining shufflers have not touched.
 
 ### 6.2 Still estimated
 
@@ -695,7 +814,7 @@ computed. Improving that means changing the trust model, and the answer is no.
 | Shuffle chain | `claim_shuffle_timeout`, 10 min | hand voided, walker named, **stake forfeited** to the others |
 | Betting round | `claim_action_timeout`, 10 min | walker **folded**, hand continues; their chips stay in the pot |
 | Decryption / reveals | `accuse_share` → `claim_share_timeout`, 1 h | hand voided, walker named, **stake forfeited** |
-| Showdown | none needed | mucking forfeits rather than blocks; everyone else settles |
+| Showdown | `claim_showdown_timeout`, 10 min | walker **forfeits** its claim on the pot; everyone else settles |
 
 The betting row is the only *recoverable* stall, and it is handled
 differently for that reason. A missing decryption share can never be produced
@@ -893,6 +1012,73 @@ hand nobody has to trust anyone for, this project takes the second.
 Also unverified: the 5.67 s was measured with the WASM backend *server-side*.
 **Browser proving has never been tested.** Same WASM, so it should be comparable —
 but "should be" is not "measured," and the entire client-side story rests on it.
+
+---
+
+### 9.1.1 The same conclusion from decryption: colliding `c1` — analysed 2026-09-06
+
+§9.1 argues `k = n` from the *permutation*. There is a second, independent
+route to the same requirement, and it comes from the decryption side. It was
+raised as a question during play — *"when everyone shares his own part, can't
+the same thing be used for the other cards?"* — and the answer is no, but the
+reason it is no is not the obvious one.
+
+**Why a share does not transfer.** A decryption share for position `p` is
+`d_i = x_i · c1_p`, bound to that ciphertext's own ephemeral point. Position
+`q` carries a different `c1_q`, so `d_i` is simply the wrong group element
+there; recovering `x_i` from `x_i · c1_p` to compute a usable share is a
+discrete log. The Chaum–Pedersen proof closes the loop by proving
+`log_G(pk_i) == log_{c1}(d_i)` against the *registered* key, so a share can
+neither be reused nor invented.
+
+That argument depends entirely on `c1_p ≠ c1_q`. **If two positions ever
+carried the same `c1`, shares would transfer between them** — `D = X · c1`
+would be identical, so the publicly revealed shares of a community card would
+decrypt a hole card sharing its `c1`, with no key recovery and nothing to
+detect.
+
+**And nothing in the circuit forbids it.** Two facts combine:
+
+* `a_0` is encryption with `r = 0`, so **all 52 `c1` start as the identity**
+  (`src/lib/deck.ts`, `initialDeck`);
+* `circuits/shuffle/src/main.nr` constrains `perm` to a genuine bijection —
+  step 2, the `seen` array — but places **no constraint on `r_lo`/`r_hi`**.
+  They need not be distinct, and need not be nonzero.
+
+So the *first* shuffler can hand two slots the same scalar and collide their
+`c1` exactly. It knows which slots matter: hole cards sit at `2i`, `2i+1` and
+the board at `2·max_seats + j`, all fixed by position.
+
+**What prevents it is the rest of the chain.** Every later shuffler adds its
+own independent per-slot randomness, so two colliding slots diverge at the
+next link. Forcing a collision *after* the first link is not a matter of
+choosing carelessly — it requires `r_p − r_q = dlog(c1_q − c1_p)`, i.e. a
+discrete log. So the collision survives only if **every** shuffler is in on
+it.
+
+Which is the point: because `k = n`, **your own shuffle is what protects your
+own cards.** A player cannot be robbed this way by any coalition that does not
+include them, and a coalition that includes them has nothing left to steal.
+The property is not "the circuit forbids colliding randomness" — it does not —
+it is "one honest re-randomisation destroys the collision, and you are always
+one of the re-randomisers."
+
+Two consequences worth stating plainly:
+
+1. This is a second reason the `k < n` cap of §9.1 is unsound, reached from
+   decryption rather than from the permutation. Under a cap, a player outside
+   the chain has no honest link of their own, so a colluding chain could aim a
+   colliding `c1` at their hole cards and open them from a board reveal. The
+   permutation argument already sank the cap; this sinks it again.
+2. Constraining the randomness in-circuit (distinctness, or nonzero) would
+   **not** buy the property on its own and is not proposed: distinctness of
+   `r` within one link does not imply distinctness of the accumulated `c1`
+   across links, which is what actually matters. The chain is what carries the
+   guarantee.
+
+Not a defect, and nothing to fix — but it was undocumented, and the safety
+here reads like an accident of the construction rather than a property
+somebody checked. It is now checked.
 
 ---
 
@@ -1156,32 +1342,49 @@ that preceded it.
 
 ---
 
-### 9.8 Showdown order and the muck clock
+### 9.8 The showdown — one clock, no order, no muck
 
-Hold'em's showdown rules, implemented 2026-09-05.
+Rewritten 2026-09-06 after a hand on Sepolia could not finish. What follows is
+the current design; §9.8.1 records what it replaced and why.
 
-**Order.** The last player to bet or raise on the river shows first. If everyone
-checked there is no aggressor, and the first seat still in the hand shows
-first. After that it is clockwise — here, ascending seat index, wrapping.
+**Every contender shows.** There is no `muck` entrypoint. A seat still in the
+hand at showdown reveals both hole cards, and the best hand takes the pot.
 
-**On-chain, not by convention.** Showing is *information*: a player who has
-already seen a better hand may muck rather than expose their own, so who
-reveals first is worth something. A rule only clients follow is advisory, so
-`reveal_hole_card` refuses out of turn and `bet` records the aggressor per
-street (as `seat + 1`, so `0` means nobody bet).
+**No show order.** `reveal_hole_card` does not care which seat goes first.
+Ordering existed only to protect a decision — a player who had seen a better
+hand could decline to expose their own, so who spoke first was worth something
+— and with that decision gone the rule protects nothing. What it cost was real:
+it serialised `n` reveals behind a per-seat clock, on a chain where one
+transaction takes tens of seconds. Contenders now reveal concurrently, from
+their own accounts, in any order.
 
-**Mucking.** A seat may decline to show at its turn. It cannot win, its chips
-stay in the pot, and settlement skips it — mucking forfeits rather than
-blocking, so a hand where somebody stays quiet still resolves for everyone
-else. **Running out of time is mucking**: `SHOWDOWN_SECS = 10`, and
-`claim_showdown_timeout` is callable by anyone, like every other timeout here,
-because the seat holding everyone up will not report itself.
+**One clock for the table.** `SHOWDOWN_SECS = 600`, set once when the river
+betting round closes, cleared when the last contender's second card lands.
+`claim_showdown_timeout` is callable by anyone once it has passed — the seat
+holding everyone up will not report itself — and it forfeits **every** seat
+that has not shown both cards, in one transaction, because they all missed the
+same deadline.
 
-Ten seconds is short deliberately. Showing needs no proving work the player has
-not already done — the shares were exchanged at dealing time and the aggregate
-is assembled from them — so the only thing the clock waits on is a person
-deciding whether to expose a loser, and the cost of running out is exactly what
-a player choosing to muck would have picked anyway.
+**Not showing forfeits.** A player who would rather not expose a loser can
+still simply not reveal. They pay for it in wall-clock time instead of getting
+a button that ends the hand early for everyone else, and their chips stay in the
+pot for whoever does show.
+
+**Settlement is gated on the showdown being over.** `settle_from_reveals`
+refuses unless every contender has shown or the deadline has passed. Without
+that check anyone could call it in the block the river closed, before a single
+reveal had landed: every contender would score as unshown and the pot would
+void — a free undo of a losing hand, available to anyone, for one cheap
+transaction. This was a real hole, opened by removing the per-seat turn (which
+had previously made an early call impossible for a different reason), and
+closed in the same change.
+
+**Nobody showed → void.** If the showdown is over and no contender tabled a
+hand, the table voids and every seat reclaims its contribution immediately.
+This used to revert `HOLE_NOT_REVEALED`, which stranded the pot until the
+24-hour reclaim — the same dead end §9.8.1's all-muck fix was written to
+escape. The state was reachable two ways and answered two ways; both answer
+the same now.
 
 **Already true, so unchanged:** best five of seven with any combination
 including playing the board (`best_of_7`), ties split evenly (`award`), cards
@@ -1189,14 +1392,14 @@ speak (the contract reads what a reveal proof bound, never what a caller
 claims), and an uncontested pot needs no cards shown at all.
 
 **Not implemented: show one, show all.** Excluded on request. It would need a
-way to compel a reveal from a seat that has already mucked, and nothing in this
-protocol can produce a share its owner declines to compute.
+way to compel a reveal from a seat that declines, and nothing in this protocol
+can produce a share its owner refuses to compute.
 
-Six tests pin it: order from the first active seat when all check, order from
-the **river aggressor** when someone bets (the case a "first active seat" rule
-alone gets wrong), a refused out-of-turn show, mucking passing the turn while
-leaving the pot untouched, a timeout mucking the seat, and the clock refusing
-to be claimed early.
+Pinned by: a showdown opening one clock and no turn, a seat that would have
+been second in line showing first, forfeiting leaving the pot untouched, one
+timeout call forfeiting every unshown seat, the clock refusing to be claimed
+early, settlement refused while a seat can still show, and settlement voiding
+when nobody showed.
 
 ### 9.8.1 An all-muck showdown — found by play, FIXED
 
@@ -1217,35 +1420,54 @@ nobody proved entitlement to the pot, and picking a seat anyway — the last
 aggressor, the lowest index — would pay out on something the contract never
 verified. Same reasoning as `dispute_deck`.
 
-It is not forgeable into a way to cancel a losing hand. A seat becomes mucked
-only by its own `muck` or by `claim_showdown_timeout` after its deadline, both
-irreversible within the hand, and `fold` refuses to leave fewer than two
-active seats. Reaching zero contenders costs every player their claim on the
-pot, so there is nothing to gain.
+It is not forgeable into a way to cancel a losing hand. A seat becomes
+forfeited only through `claim_showdown_timeout`, after the table's deadline has
+passed, and `fold` refuses to leave fewer than two active seats. Reaching zero
+contenders costs every player their claim on the pot, so there is nothing to
+gain.
 
-The asymmetry is deliberate: voiding is gated on there being no contender
-LEFT, not on nobody having shown YET. A seat that has not mucked is still
-entitled to show, so settlement then is early rather than terminal — and if
-that voided, anyone could cancel a hand the instant the showdown opened by
-calling settlement before the first reveal. That case still reverts
-`HOLE_NOT_REVEALED`.
+**Client fixes**, kept: both reveals go in one multicall with their aggregates
+built concurrently, the table polls faster while the clock runs, and garaga's
+wasm is warmed when the deck opens rather than inside the deadline — a tab's
+first reveal used to be its slowest, which is exactly the one that ran out of
+time.
 
-**Client fixes**, so honest play should not reach the all-muck state at all:
-both reveals go in one multicall with their aggregates built concurrently, the
-table polls at 1.5 s while the clock runs, and garaga's wasm is warmed when
-the deck opens rather than inside the deadline — a tab's first reveal used to
-be its slowest, which is exactly the one that gets mucked.
+### 9.8.2 The clock was not tight, it was unmeetable — measured, FIXED
 
-Worth stating plainly: the ten-second clock is short enough that its edge
-cases are reachable. It was chosen deliberately, and the cost is that any
-client slower than one round-trip per card loses hands it should have won.
+The fix above kept the pot recoverable. It did not make the hand *finishable*,
+and the next hand on Sepolia failed the same way.
 
-Covered by `test_every_seat_mucking_voids_the_hand_instead_of_stranding_it`
-and `test_a_voided_all_muck_hand_refunds_without_waiting`.
+`SHOWDOWN_SECS` was **10 seconds, per seat**, on the argument that showing
+needs no proving work the player has not already done. That argument is true
+and beside the point: it accounts for the player and not for the chain. A
+reveal is a transaction, and on a public chain a transaction is the whole cost.
+
+Measured over one three-handed hand on Sepolia (46 transactions, 35.8 min):
+
+| | gap to previous transaction |
+|---|---|
+| tightest gap of the entire hand | **11 s** |
+| community reveals | 11–32 s |
+| shuffle proofs | 40–143 s |
+| deck opening | 292 s |
+
+So a seat could not show inside its deadline even with a client that did
+everything right and did it instantly. Every seat forfeited, every hand reached
+`settle_from_reveals` with no contenders, and the pot could only be recovered
+by voiding. That is not a clock with reachable edge cases — it is a clock no
+honest player can beat.
+
+Fixed by §9.8: 600 s (matching `ACTION_SECS`, which waits on the same two
+things — a person and a transaction), one deadline for the table rather than
+one per seat, and no turn order forcing reveals to run in series.
+
+The general lesson is the one §9.1.1 and the devnet-masking bugs keep
+repeating: **a devnet measures the player, a public chain measures the chain.**
+Ten seconds was chosen against instant blocks, where it was generous.
 
 ---
 
-### 9.9 Blinds and the button — the button is dealt, not appointed
+### 9.9 Blinds and the button
 
 Texas hold'em needs a button. The button decides who posts the small blind and
 the big blind, who acts first pre-flop and who acts last afterwards, and
@@ -1261,44 +1483,38 @@ Every obvious cheap answer hands it to somebody:
 | a keeper/script picks | the keeper operator |
 | hash of the block | the sequencer, at the margin |
 
-So the button is **drawn from the deck**. The deck carries one extra position
-per seat:
+The first answer built here was to **draw it from the deck**: one extra deck
+position per seat, revealed publicly like a community card, highest card takes
+the button. It worked, it was genuinely trustless, and it was removed on
+2026-09-06 because it was the most expensive way to answer the question. See
+§9.9.1.
+
+The button is now **the lowest occupied seat**, fixed in `begin_shuffle` — the
+same call that freezes the participant list — and rotated one occupied seat
+left by `start_next_hand`. The deck layout is back to:
 
 ```
 hole cards        0 .. 2·max_seats-1        seat s at 2s, 2s+1
 community    2·max_seats .. 2·max_seats+4
-button draws 2·max_seats+5 .. 3·max_seats+4  seat s at 2·max_seats+5+s
 ```
 
-Those positions are ordinary deck positions in every sense that matters:
+Read the trust table above honestly and this is the first row: it trusts join
+order. What that actually buys anyone is a **first-come advantage** — the
+player who takes the lowest free seat has position on the table's first hand,
+and only that hand, because the button rotates from there. That is public
+before a single card exists, knowable in advance by everyone, and steerable by
+nobody: it is not a trust assumption, it is a visible rule with a small
+first-mover edge.
 
-* they are inside the deck each player re-randomises and proves with the
-  shuffle SNARK, so nobody can plant a card there;
-* `open_deck` covers them, so each one's ciphertext is bound to the Poseidon2
-  commitment by the opening proof;
-* reading one needs a Chaum–Pedersen decryption share from **every** player,
-  aggregated, verified by the same `verify_reveal_at` that community and hole
-  cards go through. A wrong claim gets `CARD_REVEAL_REJECTED`;
-* a withheld share on a draw position is accusable via `accuse_share` and
-  punishable by `claim_share_timeout`, like any other position.
+The alternative that looks better and is worse: deriving the button from the
+deck commitment. The last shuffler sees the chain before it commits and can
+re-randomise until the hash names the seat it wants. That *is* a trust
+assumption, and a hidden one.
 
-`reveal_draw_card` is permissionless and one-shot per seat. When the last
-seated player's draw lands, the contract picks the highest and writes `button`.
-
-**Rank first, suit as the tie-break.** Rank alone is not a total order — a deck
-holds four of every rank, so two players drawing a king is the common case at a
-full table, not an edge case. A tie there has no good answer: the contract
-would have to pick arbitrarily (which is the thing being avoided) or demand a
-re-draw (which costs a full extra n-of-n reveal round per seat). Card rooms
-break exactly this tie by suit for exactly this reason. Cards are distinct, so
-`(rank, suit)` is total and one pass always decides. `card = suit*13 + rank`,
-so comparing the raw index after rank is comparing suit.
-
-**Then it cycles.** The draw picks the *first* button only. `start_next_hand`
-— permissionless, callable once the previous hand has settled — moves the
-button one occupied seat left, bumps `hand_number` and resets the hand.
-Re-drawing every hand would cost an extra reveal round per seat per hand and
-is not how poker works anyway.
+**Fixed before any card exists.** `begin_shuffle` runs before `submit_shuffle`
+and long before `open_deck`, so the button is decided before there is a card to
+decide it against. The ordering is the whole safety argument: if the button
+could be set after the deck opened, whoever opened it would be choosing.
 
 **Posting.** `post_blinds` is permissionless and takes no argument but the
 table, so it confers nothing: the seats are computed from the button, and the
@@ -1313,11 +1529,12 @@ stakes are fixed before a single card exists and cannot be tuned to a deal.
 `big_blind > small_blind` or both zero; zero means a table with no structure,
 which is every table that predates this and still plays.
 
-**Two knock-on effects worth recording.**
+**One knock-on effect worth recording.**
 
-*The seat ceiling dropped.* `MAX_TABLE_SEATS` was 23, chosen so
-`2·max+5 ≤ 52`. With a draw per seat the bound is `3·max+5 ≤ 52`, so it is now
-**15**. A 16-seat table could not deal itself a button.
+*The seat ceiling.* `MAX_TABLE_SEATS` is **15**. The deck layout allows 23
+(`2·max+5 ≤ 52`) and did before the draw was added; the cap stays at 15 because
+`k = n` means every extra seat is another ~587M-gas shuffle proof, so past this
+point the binding limit is cost, not deck space.
 
 *The contract crossed Starknet's CASM ceiling.* Adding the blind machinery took
 `PokerGame` to 88,165 felts against a limit of 81,920 — it compiled and could
@@ -1339,12 +1556,85 @@ Two defects were found while building it, both fixed:
   `hand_number`. Clearing it by loop was not an option: 15 seats × 50
   positions is more storage writes than the hand itself.
 
-Covered by `cairo/tests/test_blinds.cairo` (25 tests): the draw and its
-tie-break in both reveal orders, rank beating suit, an empty seat refused, a
-bad proof refused, heads-up versus three-handed blind seats, the big blind's
-option surviving a call round, betting refused before the blinds are up, an
-unstructured table still playing, the button rotating, and the next hand
-actually dealing from a clean slate.
+Covered by `cairo/tests/test_blinds.cairo`: the button starting on the lowest
+occupied seat, skipping an empty low seat, being set before any card opens,
+heads-up versus three-handed blind seats, the big blind's option surviving a
+call round, betting refused before the blinds are up, an unstructured table
+still playing, the button rotating, and the next hand actually dealing from a
+clean slate — plus the ladder tests in §9.9.2.
+
+### 9.9.1 Why the dealt button was removed — measured
+
+The draw was correct and it was not cheap. Per table it cost:
+
+* **one extra deck position per seat**, so the in-play block was
+  `3·max_seats + 5` rather than `2·max_seats + 5`;
+* **one aggregate DLEQ verification per seat** on chain — 65.9M L2 gas each,
+  **5.64 STRK of a measured 114.37 STRK three-handed hand** (4.9%);
+* **a full n-of-n decryption round per seat** off chain, before the first blind
+  could be posted, on the critical path of every table.
+
+The third cost is the one that hurt. `DECK_OPEN_K` positions fit in one
+deck-opening proof, and proof cost is ~587M gas FIXED plus ~13M per sumcheck
+round — so what costs money is the NUMBER of proofs (§6.3). At the K=16 this
+was measured against, with the draw:
+
+| seats | `3·max+5` | opening proofs | without the draw (`2·max+5`) | proofs |
+|---:|---:|---:|---:|---:|
+| 3 | 14 | 1 | 11 | 1 |
+| 4 | 17 | **2** | 13 | **1** |
+| 5 | 20 | **2** | 15 | **1** |
+| 6 | 23 | 2 | 17 | 2 |
+
+A four-seat table was paying for a second ~587M-gas proof — **23.65 STRK** —
+to work out who was the dealer. That is the cost of the button exceeding the
+cost of the cards.
+
+What the draw bought over the seat-order rule was a first hand whose button
+nobody could steer by choosing a seat. Priced at 5.64 STRK on a three-handed
+table and 31 STRK on a four-handed one, that is not worth it.
+
+Note what this did NOT change: no trust was added anywhere else, and every
+other card still comes out of the same committed, shuffle-proven deck behind
+the same n-of-n decryption.
+
+### 9.9.2 Rising blinds
+
+`set_blind_schedule(table_id, hands_per_level)` switches a table from a fixed
+pair to a ladder:
+
+```
+10/20 · 20/40 · 30/60 · 50/100 · 100/200 · 200/400 · 300/600
+```
+
+one rung every `hands_per_level` hands, **clamped** at the top rung. Clamping,
+not wrapping: a ladder that wrapped would take a table from 300/600 back to
+10/20 and quietly undo every stack it had just decided.
+
+**The rungs are fixed in the contract, not passed in.** The dealer chooses the
+pace, not the price. A dealer-chosen ladder is a lever over other players'
+stacks, and `set_blinds` already covers a table that wants to name its own
+numbers.
+
+**Stricter than `set_blinds`.** `set_blinds` is refused once the current hand's
+shuffle has started; the schedule is refused once the table's FIRST hand has
+played (`hand_number == 0` is required). A ladder is a whole-table structure
+that every stack is played against, so re-timing it mid-session would let a
+dealer watch a hand, see who is winning, and move the levels against them.
+
+**Derived, not stored per hand.** `current_blinds` computes the pair from
+`hand_number`, which only moves in `start_next_hand` — so the amounts are
+constant for the whole of a hand by construction. There is no window where
+`post_blinds` and a later read could disagree, and nothing for `reset_hand` to
+keep in sync.
+
+One defect found while building it, worth recording because it is the kind that
+does not announce itself: three call sites (`bet`, `fold`, `check`) asked *does
+this table have a blind structure?* by reading `big_blind` from storage. A
+ladder table never writes that storage — its amounts are derived — so all three
+reported "no blinds" and let a seat act before `post_blinds` had run. The seat
+left of the big blind could have called a bet nobody had posted. Routed through
+`has_blinds`, which goes via `current_blinds`.
 
 ---
 

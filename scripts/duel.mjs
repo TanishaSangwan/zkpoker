@@ -56,14 +56,15 @@ export * as schnorr from ${JSON.stringify(join(root, 'src/lib/schnorr.ts'))};
 export * as deck from ${JSON.stringify(join(root, 'src/lib/deck.ts'))};
 export * as felt from ${JSON.stringify(join(root, 'src/lib/felt.ts'))};
 export * as deckOpen from ${JSON.stringify(join(root, 'src/lib/deckOpen.ts'))};
-export { proveShuffle } from ${JSON.stringify(join(root, 'src/lib/shuffle.ts'))};
+export { proveShuffle, proveShuffleAndOpen, submitFinalShuffleArgs } from ${JSON.stringify(join(root, 'src/lib/shuffle.ts'))};
 export * as dealing from ${JSON.stringify(join(root, 'src/lib/dealing.ts'))};
 export * as reveal from ${JSON.stringify(join(root, 'src/lib/reveal.ts'))};
 export * as shares from ${JSON.stringify(join(root, 'src/lib/shares.ts'))};
 export { RelayTransport } from ${JSON.stringify(join(root, 'src/lib/relayTransport.ts'))};
 export { initProver as dleqInit } from ${JSON.stringify(join(root, 'src/lib/dleq.ts'))};
 `);
-const { grumpkin, schnorr, deck, felt, deckOpen, proveShuffle, dealing, reveal, shares, RelayTransport, dleqInit } = lib;
+const { grumpkin, schnorr, deck, felt, deckOpen, proveShuffle, proveShuffleAndOpen,
+        submitFinalShuffleArgs, dealing, reveal, shares, RelayTransport, dleqInit } = lib;
 
 const env = readFileSync(join(root, '.env.local'), 'utf8');
 const GAME = (env.match(/^NEXT_PUBLIC_POKERGAME_DEVNET=(.*)$/m) ?? [])[1]?.trim();
@@ -156,18 +157,10 @@ async function status() {
   if (bb !== 0n) {
     const buttonSet = await view.get_button_set(TABLE);
     const posted = await view.get_blinds_posted(TABLE);
-    let draws = '';
-    if (!buttonSet) {
-      const bits = [];
-      for (let s2 = 0; s2 < maxSeats; s2++) {
-        if (BigInt(await view.get_seat_owner(TABLE, String(s2))) === 0n) continue;
-        bits.push(`${s2}:${await view.get_draw_revealed(TABLE, String(s2))
-          ? Number(await view.get_draw_card(TABLE, String(s2))) : '--'}`);
-      }
-      draws = `  draws ${bits.join(' ')}`;
-    }
-    console.log(`  blinds        ${sb}/${bb} button=${buttonSet ? Number(await view.get_button(TABLE)) : 'undrawn'}` +
-                ` posted=${posted} hand=${Number(await view.get_hand_number(TABLE)) + 1}${draws}`);
+    const level = Number(await view.get_blind_level_hands(TABLE)) > 0
+      ? `  level ${Number(await view.get_blind_level(TABLE)) + 1}/7` : '';
+    console.log(`  blinds        ${sb}/${bb} button=${buttonSet ? Number(await view.get_button(TABLE)) : 'unset'}` +
+                ` posted=${posted} hand=${Number(await view.get_hand_number(TABLE)) + 1}${level}`);
   }
   console.log(`  betting       street=${Number(street)} turn=seat ${Number(actionTurn)} roundComplete=${roundDone}`);
   if (voided) console.log('  VOIDED');
@@ -280,10 +273,30 @@ switch (cmd) {
     const Y = grumpkin.fromWire(jx, jy);
     const head = big(await view.get_shuffle_commitment(TABLE));
     const deckIn = turn === 0 ? deck.initialDeck() : await finalDeck();
+    const orderLen = Number(await view.get_shuffle_order_len(TABLE));
+    const t0 = Date.now();
+
+    // The LAST link proves its shuffle and chunk 0 of the opening together --
+    // one statement, one verification, ~587M gas saved. The contract enforces
+    // the split, so this is not a choice the seat makes.
+    if (turn === orderLen - 1) {
+      const maxSeats = Number(await view.get_table_max_seats(TABLE));
+      const circuitJson = JSON.parse(readFileSync(
+        join(root, 'circuits/shuffle_open_verifier/example_proof/beta16_build/target/shuffle_open.json'), 'utf8'));
+      console.log(`proving my shuffle AND the deck opening (position ${turn}, last)…`);
+      const r = await proveShuffleAndOpen({
+        deckIn, jointKey: Y, commitmentIn: head, maxSeats, circuitJson, wasmPath: null });
+      console.log(`  proved in ${Date.now() - t0} ms, ${r.calldata.length} felts`);
+      const args = submitFinalShuffleArgs(TABLE, r);
+      await send('submit_final_shuffle', { ...args, proof: r.calldata.map(hex) });
+      console.log(`\nmy shuffle is on-chain and it opened ${r.positions.length} deck positions ` +
+                  `with it. The permutation never left this machine.`);
+      break;
+    }
+
     const circuitJson = JSON.parse(readFileSync(
       join(root, 'circuits/shuffle_verifier/example_proof/beta16_build/target/shuffle.json'), 'utf8'));
     console.log(`proving my shuffle (position ${turn})…`);
-    const t0 = Date.now();
     const r = await proveShuffle({ deckIn, jointKey: Y, commitmentIn: head, circuitJson, wasmPath: null });
     console.log(`  proved in ${Date.now() - t0} ms, ${r.calldata.length} felts`);
     await send('submit_shuffle', {
@@ -297,6 +310,10 @@ switch (cmd) {
     const maxSeats = Number(await view.get_table_max_seats(TABLE));
     const d = await finalDeck();
     const chunk = Number(await view.get_deck_open_chunk(TABLE));
+    if (await view.get_deck_opened(TABLE)) {
+      console.log('deck already open -- the final shuffle proof carried it. Nothing to do.');
+      break;
+    }
     const circuitJson = JSON.parse(readFileSync(
       join(root, 'circuits/deck_open_verifier/example_proof/beta16_build/target/deck_open.json'), 'utf8'));
     console.log(`proving deck-open chunk ${chunk}…`);
@@ -657,21 +674,8 @@ switch (cmd) {
         transport: liveOnly, tableId: TABLE, position: pos, h: c1, jointKey: Y, keys, shares,
         mySeat: MY_SEAT, mySecret: secret,
       });
-      const drawBase = 2 * maxSeats + 5;
       const card = reveal.cardFromShare({ c1, c2 }, agg.share);
       if (card === null) throw new Error('no card in the encoding');
-
-      if (pos >= drawBase) {
-        const seat = pos - drawBase;
-        if (await view.get_button_set(TABLE)) return;
-        try {
-          await send('reveal_draw_card', reveal.revealDrawArgs({
-            tableId: TABLE, seat, share: agg.share, card, proof: agg.proof,
-          }));
-          console.log(`  seat ${seat} drew ${grumpkin.cardToName(card)}`);
-        } catch { /* the other side submitted first */ }
-        return;
-      }
 
       if (pos < 2 * maxSeats) return; // a hole card: participation only
       const index = pos - 2 * maxSeats;
@@ -712,35 +716,6 @@ switch (cmd) {
               });
               served.add(pos);
               console.log(`  served hole share for seat ${seat} position ${pos}`);
-            }
-          }
-          // The button draw, before anything else happens. Every seat's draw
-          // is public -- the table has to agree on who drew highest -- so this
-          // serves its OWN draw share too, which is the one position where
-          // that is right. Hole shares stay private for exactly the opposite
-          // reason.
-          if (!(await view.get_button_set(TABLE))) {
-            for (let seat = 0; seat < maxSeats; seat++) {
-              if (BigInt(await view.get_seat_owner(TABLE, String(seat))) === 0n) continue;
-              if (await view.get_draw_revealed(TABLE, String(seat))) continue;
-              const pos = 2 * maxSeats + 5 + seat;
-              if (!served.has(pos)) {
-                const { c1 } = await openedAt(pos);
-                const m = dealing.shareFor(secret, c1);
-                await transport.publish({
-                  tableId: TABLE, position: pos, from: MY_SEAT, kind: 'share', to: null,
-                  body: { d: { x: m.d.x.toString(), y: m.d.y.toString() }, s: m.s.toString(), e: m.e.toString() },
-                });
-                served.add(pos);
-                console.log(`  served draw share for seat ${seat} (position ${pos})`);
-              }
-              if (!busy.has(pos)) {
-                busy.add(pos);
-                runFor(pos).catch((err) => {
-                  busy.delete(pos);
-                  console.log(`  draw for seat ${seat} did not finish: ${String(err.message ?? err).slice(0, 70)}`);
-                });
-              }
             }
           }
           for (let i = 0; i < 5; i++) {

@@ -22,10 +22,12 @@
 
 import type { Point } from './grumpkin';
 import { Ciphertext, commitment, deckToFields, shuffle as shuffleDeck, shuffleCircuitInputs } from './deck';
+import { chunkPositions, inPlayCount } from './deckOpen';
 import { u256Parts } from './felt';
 
 /** Where the beta.16 artifacts are served from. See scripts/build_client_circuits.mjs. */
 const CIRCUIT_URL = '/circuits/shuffle.json';
+const SHUFFLE_OPEN_CIRCUIT_URL = '/circuits/shuffle_open.json';
 const WASM_PATH = '/circuits/wasm/barretenberg.wasm.gz';
 
 export type ProvingEnvironment = {
@@ -68,6 +70,13 @@ export type ShuffleResult = {
   /** Garaga calldata: the whole `proof` argument, hints included. */
   calldata: bigint[];
   timings: { witnessMs: number; proveMs: number; calldataMs: number };
+};
+
+export type ShuffleOpenResult = ShuffleResult & {
+  /** The deck positions chunk 0 binds, padded the way the contract pads. */
+  positions: number[];
+  /** Flat u256 list, 4 per position: c1.x, c1.y, c2.x, c2.y. */
+  ciphertexts: bigint[];
 };
 
 export type ShuffleProgress = (stage: 'permuting' | 'witness' | 'proving' | 'calldata' | 'done') => void;
@@ -264,17 +273,32 @@ function flattenPublicInputs(publicInputs: string[]): Uint8Array {
   return out;
 }
 
+/**
+ * Check the shuffle statement's four public inputs.
+ *
+ * `exact` is false for the FUSED circuit, whose first four inputs are these
+ * same four in the same order, followed by the opening's chunk, k_total and
+ * cards. Those are checked on-chain against contract storage -- the adapter
+ * compares every returned input against what PokerGame built -- so this only
+ * has to confirm the shuffle half locally, and asserting an exact length here
+ * would reject a perfectly good fused proof.
+ */
 function assertPublicInputs(
   publicInputs: string[],
   expected: { jointKey: Point; commitmentIn: bigint; commitmentOut: bigint },
+  exact = true,
 ) {
   const want = [expected.jointKey!.x, expected.jointKey!.y, expected.commitmentIn, expected.commitmentOut];
-  if (publicInputs.length !== want.length) {
-    throw new Error(`shuffle: circuit returned ${publicInputs.length} public inputs, expected ${want.length}`);
+  const bad = exact ? publicInputs.length !== want.length : publicInputs.length < want.length;
+  if (bad) {
+    throw new Error(
+      `shuffle: circuit returned ${publicInputs.length} public inputs, expected ` +
+        `${exact ? '' : 'at least '}${want.length}`,
+    );
   }
-  publicInputs.forEach((hex, i) => {
-    if (BigInt(hex) !== want[i]) {
-      throw new Error(`shuffle: public input ${i} is 0x${BigInt(hex).toString(16)}, expected 0x${want[i].toString(16)}`);
+  want.forEach((w, i) => {
+    if (BigInt(publicInputs[i]) !== w) {
+      throw new Error(`shuffle: public input ${i} is 0x${BigInt(publicInputs[i]).toString(16)}, expected 0x${w.toString(16)}`);
     }
   });
 }
@@ -305,4 +329,154 @@ export function deckToU256(deck: Ciphertext[]): { low: bigint; high: bigint }[] 
     const [low, high] = u256Parts(f);
     return { low, high };
   });
+}
+
+// ── the last link of the chain ──────────────────────────────────────────
+
+let shuffleOpenPromise: Promise<any> | null = null;
+function shuffleOpenCircuit(): Promise<any> {
+  shuffleOpenPromise ??= fetch(SHUFFLE_OPEN_CIRCUIT_URL).then((r) => {
+    if (!r.ok) {
+      throw new Error(
+        `shuffleOpen: ${SHUFFLE_OPEN_CIRCUIT_URL} missing (${r.status}) -- run ` +
+          `scripts/build_client_circuits.mjs`,
+      );
+    }
+    return r.json();
+  });
+  return shuffleOpenPromise;
+}
+
+/**
+ * Prove the LAST shuffle and chunk 0 of the deck opening as one statement.
+ *
+ * The chain's final seat calls this instead of `proveShuffle`, and the
+ * contract enforces that split: `submit_shuffle` refuses the last turn and
+ * `submit_final_shuffle` refuses every other one.
+ *
+ * Why (docs/PROTOCOL.md §6.4): on-chain Honk verification is ~587M gas FIXED
+ * per proof plus ~13.2M per sumcheck round, so a hand's cost tracks the NUMBER
+ * of proofs, not their size. This prover already holds the final deck and
+ * already pays to hash it -- `hash_out` IS the opening's `deck_hash` -- so the
+ * opening constraints ride along inside the same 2^17 circuit and an entire
+ * verification disappears. Measured on-chain at 269.7M -> 277.7M, i.e. +3.0%
+ * to absorb a proof that cost 261.8M on its own.
+ *
+ * Proving cost here is the shuffle's, not the shuffle's plus the opening's:
+ * the sumcheck is the same size, so expect the same wall-clock as proveShuffle.
+ */
+export async function proveShuffleAndOpen(args: {
+  deckIn: Ciphertext[];
+  jointKey: Point;
+  commitmentIn: bigint;
+  /** Drives k_total = 2*maxSeats + 5, exactly as the contract derives it. */
+  maxSeats: number;
+  onProgress?: ShuffleProgress;
+  circuitJson?: any;
+  wasmPath?: string | null;
+}): Promise<ShuffleOpenResult> {
+  const { deckIn, jointKey, commitmentIn, maxSeats, onProgress } = args;
+  const say = onProgress ?? (() => {});
+
+  say('permuting');
+  const witness = shuffleDeck(deckIn, jointKey);
+
+  const recomputedIn = await commitment(deckIn);
+  if (recomputedIn !== commitmentIn) {
+    throw new Error(
+      `shuffle: the deck given does not hash to the chain head. ` +
+        `Expected 0x${commitmentIn.toString(16)}, got 0x${recomputedIn.toString(16)}. ` +
+        `Re-fetch the previous player's deck before shuffling.`,
+    );
+  }
+  const commitmentOut = await commitment(witness.deckOut);
+
+  // The opening is over the deck this call is about to produce, so the cards
+  // are read from deckOut -- never from deckIn, which is a different deck and
+  // would fail the circuit's equality checks rather than prove anything.
+  const positions = chunkPositions(maxSeats, 0);
+  const outFields = deckToFields(witness.deckOut);
+  const cards = positions.flatMap((p) => outFields.slice(4 * p, 4 * p + 4));
+  const hex = (v: bigint) => '0x' + v.toString(16);
+
+  const inputs = {
+    ...shuffleCircuitInputs({ jointKey, deckIn, witness, hashIn: commitmentIn, hashOut: commitmentOut }),
+    chunk: '0',
+    k_total: inPlayCount(maxSeats).toString(),
+    cards: cards.map(hex),
+  };
+
+  const [{ Noir }, { UltraHonkBackend }, garaga, circuitJson] = await Promise.all([
+    import('@noir-lang/noir_js'),
+    import('@aztec/bb.js'),
+    import('garaga').then(async (m) => { await m.init(); return m; }),
+    args.circuitJson ?? shuffleOpenCircuit(),
+  ]);
+
+  say('witness');
+  const t0 = performance.now();
+  const noir = new Noir(circuitJson);
+  let solved: Uint8Array;
+  try {
+    ({ witness: solved } = await noir.execute(inputs as any));
+  } catch (e) {
+    throw explainWitnessFailure(e, commitmentIn);
+  }
+  const witnessMs = Math.round(performance.now() - t0);
+
+  say('proving');
+  const env = provingEnvironment();
+  const wasmPath = args.wasmPath === undefined ? WASM_PATH : args.wasmPath;
+  const backend = new UltraHonkBackend(
+    circuitJson.bytecode,
+    wasmPath === null ? { threads: env.threads } : { threads: env.threads, wasmPath },
+  );
+  const opts = { keccakZK: true };
+
+  const t1 = performance.now();
+  const proof = await backend.generateProof(solved, opts);
+  const proveMs = Math.round(performance.now() - t1);
+
+  say('calldata');
+  const t2 = performance.now();
+  const vk = await backend.getVerificationKey(opts);
+  const calldata = stripSpanLength(
+    (garaga.getZKHonkCallData(proof.proof, flattenPublicInputs(proof.publicInputs), vk) as bigint[])
+      .map((v) => BigInt(v as any)),
+  );
+  const calldataMs = Math.round(performance.now() - t2);
+  await backend.destroy();
+
+  // The first four public inputs are the plain shuffle's, in the same order,
+  // so the same check applies to them -- the opening's follow, and the chain
+  // checks those against its own storage.
+  assertPublicInputs(proof.publicInputs, { jointKey, commitmentIn, commitmentOut }, false);
+
+  say('done');
+  return {
+    deckOut: witness.deckOut,
+    commitmentOut,
+    positions,
+    ciphertexts: cards,
+    calldata,
+    timings: { witnessMs, proveMs, calldataMs },
+  };
+}
+
+/**
+ * Arguments for
+ * `submit_final_shuffle(table_id, new_commitment, deck, ciphertexts, proof)`.
+ */
+export function submitFinalShuffleArgs(tableId: string, result: ShuffleOpenResult) {
+  const [low, high] = u256Parts(result.commitmentOut);
+  return {
+    table_id: tableId,
+    new_commitment: { low, high },
+    deck: deckToU256(result.deckOut),
+    ciphertexts: result.ciphertexts.map((v) => {
+      const [l, h] = u256Parts(v);
+      return { low: l, high: h };
+    }),
+    proof: result.calldata,
+  };
 }

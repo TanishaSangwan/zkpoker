@@ -39,6 +39,13 @@ pub trait IShuffleVerifier<TState> {
     fn verify_deck_opening(
         self: @TState, proof: Span<felt252>, public_inputs: Span<felt252>,
     ) -> bool;
+    // The LAST shuffle and the first chunk of the opening, proved together
+    // by one circuit. See circuits/shuffle_open/src/main.nr: `hash_out` is
+    // both the shuffle's output commitment and the opening's deck hash, so a
+    // single proof binds the shuffled deck to the cards drawn from it.
+    fn verify_shuffle_and_open(
+        self: @TState, proof: Span<felt252>, public_inputs: Span<felt252>,
+    ) -> bool;
     fn verify_card_reveal(
         self: @TState,
         proof: Span<felt252>,
@@ -107,11 +114,12 @@ pub mod VerifierAdapter {
     struct Storage {
         shuffle: ContractAddress,
         deck_open: ContractAddress,
+        shuffle_open: ContractAddress,
         schnorr: ContractAddress,
         dleq: ContractAddress,
     }
 
-    // All four pinned at construction, for the same reason PokerGame pins
+    // All five pinned at construction, for the same reason PokerGame pins
     // `pool` and `shuffle_verifier` (security review round 1, finding 1):
     // a caller-supplied verifier address is a contract that returns true
     // for everything.
@@ -120,11 +128,13 @@ pub mod VerifierAdapter {
         ref self: ContractState,
         shuffle: ContractAddress,
         deck_open: ContractAddress,
+        shuffle_open: ContractAddress,
         schnorr: ContractAddress,
         dleq: ContractAddress,
     ) {
         self.shuffle.write(shuffle);
         self.deck_open.write(deck_open);
+        self.shuffle_open.write(shuffle_open);
         self.schnorr.write(schnorr);
         self.dleq.write(dleq);
     }
@@ -243,11 +253,31 @@ pub mod VerifierAdapter {
                 .verify_key_ownership(proof, public_inputs)
         }
 
-        // public_inputs = [deck_hash, positions.., ciphertexts..]
+        // public_inputs = [deck_hash, chunk, k_total, ciphertexts..]
+        //
+        // Positions used to be public inputs of their own. They are derived
+        // inside the circuit from `chunk` and `k_total` now, which is what
+        // freed the budget to fuse the opening into the last shuffle. The
+        // contract still derives both from its own storage, so the caller
+        // chooses no more than it ever did.
         fn verify_deck_opening(
             self: @ContractState, proof: Span<felt252>, public_inputs: Span<felt252>,
         ) -> bool {
             check_honk(self.deck_open.read(), proof, public_inputs)
+        }
+
+        // public_inputs = [joint_pk_x, joint_pk_y, commitment_in,
+        //                  commitment_out, chunk, k_total, ciphertexts..]
+        //
+        // A DIFFERENT verifier class from `shuffle`, not the same one with
+        // more inputs: the two circuits prove different statements, and the
+        // public-input comparison below is only meaningful against the class
+        // whose VK matches the circuit that produced the proof. Wiring this
+        // to `shuffle` would accept a plain shuffle proof as an opening.
+        fn verify_shuffle_and_open(
+            self: @ContractState, proof: Span<felt252>, public_inputs: Span<felt252>,
+        ) -> bool {
+            check_honk(self.shuffle_open.read(), proof, public_inputs)
         }
 
         // Also already the right shape. The DLEQ verifier does its own

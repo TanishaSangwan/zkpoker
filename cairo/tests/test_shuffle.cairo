@@ -51,6 +51,23 @@ fn proof() -> Span<felt252> {
     array!['PROOF'].span()
 }
 
+// MUST equal DECK_OPEN_K in src/lib.cairo and K in circuits/deck_open.
+const DECK_OPEN_K: u32 = 19;
+
+// The chunk-0 opening the LAST shuffler now carries, fused into its proof.
+// The contents are opaque to the contract -- it never does curve arithmetic,
+// and the mock verifier accepts any proof -- so this only has to be the right
+// LENGTH. What each position means is covered in test_dealing.
+fn opening() -> Span<u256> {
+    let mut out: Array<u256> = array![];
+    let mut i: u32 = 0;
+    while i != DECK_OPEN_K * 4 {
+        out.append(u256 { low: i.into(), high: 7 });
+        i += 1;
+    }
+    out.span()
+}
+
 // A well-formed 208-entry deck for submit_shuffle's calldata.
 //
 // The mock verifier does not look at it, and the real one cannot -- checking a
@@ -313,7 +330,7 @@ fn test_full_shuffle_chain_completes() {
     assert(!game.get_shuffle_complete(TABLE_1), 'not complete after 1 of 2');
 
     start_cheat_caller_address(game.contract_address, BOB());
-    game.submit_shuffle(TABLE_1, DECK_2, deck_of(1), proof());
+    game.submit_final_shuffle(TABLE_1, DECK_2, deck_of(1), opening(), proof());
     stop_cheat_caller_address(game.contract_address);
 
     assert(game.get_shuffle_commitment(TABLE_1) == DECK_2, 'head should be final deck');
@@ -418,7 +435,7 @@ fn test_shuffle_after_complete_rejected() {
     game.submit_shuffle(TABLE_1, DECK_1, deck_of(1), proof());
     stop_cheat_caller_address(game.contract_address);
     start_cheat_caller_address(game.contract_address, BOB());
-    game.submit_shuffle(TABLE_1, DECK_2, deck_of(1), proof());
+    game.submit_final_shuffle(TABLE_1, DECK_2, deck_of(1), opening(), proof());
     // chain is complete; a third submission must not reopen it
     game.submit_shuffle(TABLE_1, u256 { low: 'DECK3', high: 10 }, deck_of(1), proof());
 }
@@ -490,7 +507,7 @@ fn test_deadline_resets_each_turn() {
     // BOB still gets a full turn even though ALICE used nearly all of hers.
     start_cheat_block_timestamp_global(SHUFFLE_TURN_SECS + 100);
     start_cheat_caller_address(game.contract_address, BOB());
-    game.submit_shuffle(TABLE_1, DECK_2, deck_of(1), proof());
+    game.submit_final_shuffle(TABLE_1, DECK_2, deck_of(1), opening(), proof());
     stop_cheat_caller_address(game.contract_address);
     assert(game.get_shuffle_complete(TABLE_1), 'BOB should still fit in turn');
 }

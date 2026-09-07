@@ -12,7 +12,7 @@
 use snforge_std::{
     EventSpyAssertionsTrait, spy_events, start_cheat_block_timestamp,
     start_cheat_block_timestamp_global, start_cheat_caller_address, stop_cheat_block_timestamp,
-    stop_cheat_caller_address,
+    stop_cheat_block_timestamp_global, stop_cheat_caller_address,
 };
 use zkpoker::mocks::IMockVerifierAdminTraitDispatcherTrait;
 use zkpoker::{IErc20DispatcherTrait, IPokerGameDispatcherTrait, IPokerGameSafeDispatcherTrait, PokerGame};
@@ -89,7 +89,7 @@ fn all_positions() -> Span<u32> {
 }
 
 // MUST equal DECK_OPEN_K in src/lib.cairo and K in circuits/deck_open.
-const DECK_OPEN_K: u32 = 16;
+const DECK_OPEN_K: u32 = 19;
 
 // One DECK_OPEN_K-sized chunk of ciphertexts, starting at `first`, padded
 // the way the contract pads a final partial chunk: by repeating the last
@@ -115,13 +115,10 @@ fn chunk_cts(first: u32, k_total: u32) -> Span<u256> {
     out.span()
 }
 
-// A two-seat table has 3*2 + 5 = 11 in-play positions -- four hole slots,
-// five community cards and one high-card draw per seat -- which now fits in a
-// SINGLE chunk of 16. It took three at K=5.
-const TWO_SEAT_POSITIONS: u32 = 11;
-fn open_all(game: zkpoker::IPokerGameDispatcher) {
-    game.open_deck(TABLE_1, 0, chunk_cts(0, TWO_SEAT_POSITIONS), proof());
-}
+// A two-seat table has 2*2 + 5 = 9 in-play positions -- four hole slots and
+// five community cards -- which fits in a SINGLE chunk of 19. It took three at
+// K=5, and eleven positions while every seat also drew for the button.
+const TWO_SEAT_POSITIONS: u32 = 9;
 
 
 // Table with both keys registered, shuffle run to completion.
@@ -153,30 +150,42 @@ fn setup_shuffled() -> (
     game.submit_shuffle(TABLE_1, DECK_1, deck_of(1), proof());
     stop_cheat_caller_address(game.contract_address);
 
+    // The last link opens the deck with the same proof, so a two-seat table
+    // is fully dealt the moment the chain closes -- there is no open_deck
+    // transaction at all below eight seats.
     start_cheat_caller_address(game.contract_address, BOB());
-    game.submit_shuffle(TABLE_1, DECK_2, deck_of(1), proof());
+    game
+        .submit_final_shuffle(
+            TABLE_1, DECK_2, deck_of(1), chunk_cts(0, TWO_SEAT_POSITIONS), proof(),
+        );
     stop_cheat_caller_address(game.contract_address);
 
     assert(game.get_shuffle_complete(TABLE_1), 'setup: shuffle incomplete');
+    assert(game.get_deck_opened(TABLE_1), 'setup: deck not opened');
     (game, verifier)
 }
 
 // A table WIDE enough that its deck still needs more than one chunk.
 //
-// At K=16 a two-seat table's 11 in-play positions open atomically, which is
-// the point of raising K -- but it also means the two-seat fixtures can no
-// longer exercise chunk ordering or the "not opened until the last chunk"
-// rule. `max_seats` drives the position count (3*max_seats + 5), NOT how many
-// seats are filled, so four seats gives 17 positions and two chunks with the
-// same two players.
-const FOUR_SEATS: u32 = 4;
-const WIDE_POSITIONS: u32 = 17;
+// At K=19 a two-seat table's 9 in-play positions open atomically, which is the
+// point of raising K -- but it also means the two-seat fixtures can no longer
+// exercise chunk ordering or the "not opened until the last chunk" rule.
+// `max_seats` drives the position count (2*max_seats + 5), NOT how many seats
+// are filled, so eight seats gives 21 positions and two chunks with the same
+// two players.
+//
+// This used to be SIX seats, and FOUR before that. Both stopped spanning two
+// chunks: dropping the per-seat button draw cut a slot per seat, and fusing
+// the opening into the last shuffle raised K from 16 to 19. Seven seats is
+// now the largest table that opens in a single proof.
+const WIDE_SEATS: u32 = 8;
+const WIDE_POSITIONS: u32 = 21;
 fn setup_shuffled_wide() -> zkpoker::IPokerGameDispatcher {
     let (game, _verifier) = deploy_pokergame_with_verifier(POOL());
     let (token_addr, _token, _admin) = deploy_mock_token();
 
     start_cheat_caller_address(game.contract_address, DEALER());
-    game.create_table(TABLE_1, token_addr, 0, FOUR_SEATS);
+    game.create_table(TABLE_1, token_addr, 0, WIDE_SEATS);
     stop_cheat_caller_address(game.contract_address);
 
     start_cheat_caller_address(game.contract_address, ALICE());
@@ -197,7 +206,10 @@ fn setup_shuffled_wide() -> zkpoker::IPokerGameDispatcher {
     game.submit_shuffle(TABLE_1, DECK_1, deck_of(1), proof());
     stop_cheat_caller_address(game.contract_address);
     start_cheat_caller_address(game.contract_address, BOB());
-    game.submit_shuffle(TABLE_1, DECK_2, deck_of(1), proof());
+    game
+        .submit_final_shuffle(
+            TABLE_1, DECK_2, deck_of(1), chunk_cts(0, WIDE_POSITIONS), proof(),
+        );
     stop_cheat_caller_address(game.contract_address);
     game
 }
@@ -207,32 +219,81 @@ fn test_open_deck_is_not_complete_until_every_chunk_lands() {
     // The partial-open rule, on a table that still spans two chunks. A deck
     // marked open before every in-play position is bound is exactly what
     // round 8's finding I was about.
+    //
+    // Chunk 0 arrived with the final shuffle proof, so the fixture starts
+    // half-open -- which is the state this rule has to survive.
     let game = setup_shuffled_wide();
-    game.open_deck(TABLE_1, 0, chunk_cts(0, WIDE_POSITIONS), proof());
     assert(!game.get_deck_opened(TABLE_1), 'not opened until complete');
     game.open_deck(TABLE_1, 1, chunk_cts(DECK_OPEN_K, WIDE_POSITIONS), proof());
     assert(game.get_deck_opened(TABLE_1), 'deck not marked opened');
 }
 
+// Chunk 0 is proved by submit_final_shuffle and can never be replayed here:
+// deck_open_chunk is already 1 when the chain closes. Without this the fused
+// proof would be re-openable by anyone with a stale chunk-0 opening proof.
+#[test]
+#[feature("safe_dispatcher")]
+fn test_open_deck_cannot_redo_the_fused_chunk() {
+    let game = setup_shuffled_wide();
+    let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
+    let outcome = safe.open_deck(TABLE_1, 0, chunk_cts(0, WIDE_POSITIONS), proof());
+    match outcome {
+        Result::Ok(_) => panic!("reopened the chunk the shuffle proof already bound"),
+        Result::Err(panic_data) => assert(
+            *panic_data.at(0) == 'BAD_OPENING_CHUNK', 'wrong error',
+        ),
+    }
+}
+
 fn setup_opened() -> (
     zkpoker::IPokerGameDispatcher, zkpoker::mocks::IMockVerifierAdminTraitDispatcher,
 ) {
-    let (game, verifier) = setup_shuffled();
-    open_all(game);
-    (game, verifier)
+    // Nothing to add any more: two seats need 9 positions, one chunk of 19,
+    // and the final shuffle proved it.
+    setup_shuffled()
 }
 
-// ─── open_deck ──────────────────────────────────────────────────────────
+// ─── opening the deck ───────────────────────────────────────────────────
 
+// The two-seat deck opens as part of the last shuffle, so DeckOpened is
+// emitted by submit_final_shuffle rather than by a transaction of its own.
+// That saving -- one ~587M-gas verification per hand -- is the whole point of
+// the fused circuit, so the event is pinned to the call that now carries it.
 #[test]
-fn test_open_deck_success_and_event() {
-    let (game, _v) = setup_shuffled();
+fn test_final_shuffle_opens_the_deck_and_emits() {
+    let (game, _verifier) = deploy_pokergame_with_verifier(POOL());
+    let (token_addr, _token, _admin) = deploy_mock_token();
+
+    start_cheat_caller_address(game.contract_address, DEALER());
+    game.create_table(TABLE_1, token_addr, 0, TWO_SEATS);
+    stop_cheat_caller_address(game.contract_address);
+
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.join_table(TABLE_1, SEAT_0, NOTE_A);
+    game.register_shuffle_key(TABLE_1, SEAT_0, PK_A_X, PK_A_Y, key_proof());
+    stop_cheat_caller_address(game.contract_address);
+
+    start_cheat_caller_address(game.contract_address, BOB());
+    game.join_table(TABLE_1, SEAT_1, NOTE_B);
+    game.register_shuffle_key(TABLE_1, SEAT_1, PK_B_X, PK_B_Y, key_proof());
+    stop_cheat_caller_address(game.contract_address);
+
+    start_cheat_caller_address(game.contract_address, DEALER());
+    game.begin_shuffle(TABLE_1, JOINT_X, JOINT_Y);
+    stop_cheat_caller_address(game.contract_address);
+
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.submit_shuffle(TABLE_1, DECK_1, deck_of(1), proof());
+    stop_cheat_caller_address(game.contract_address);
+
     let mut spy = spy_events();
-    // A two-seat table's 11 positions fit one chunk at K=16, so opening is
-    // atomic here and the "not opened until every chunk lands" rule is
-    // exercised by test_open_deck_is_not_complete_until_every_chunk_lands,
-    // which uses a table big enough to still need two.
-    game.open_deck(TABLE_1, 0, chunk_cts(0, TWO_SEAT_POSITIONS), proof());
+    start_cheat_caller_address(game.contract_address, BOB());
+    game
+        .submit_final_shuffle(
+            TABLE_1, DECK_2, deck_of(1), chunk_cts(0, TWO_SEAT_POSITIONS), proof(),
+        );
+    stop_cheat_caller_address(game.contract_address);
+
     assert(game.get_deck_opened(TABLE_1), 'deck not marked opened');
     spy
         .assert_emitted(
@@ -240,20 +301,157 @@ fn test_open_deck_success_and_event() {
                 (
                     game.contract_address,
                     PokerGame::Event::DeckOpened(
-                        PokerGame::DeckOpened { table_id: TABLE_1, positions: 11, deck_hash: DECK_2 },
+                        PokerGame::DeckOpened { table_id: TABLE_1, positions: 9, deck_hash: DECK_2 },
                     ),
                 ),
             ],
         );
 }
 
+// submit_shuffle refuses the chain's last turn. Without this the chain could
+// be closed by a plain shuffle proof, leaving a complete shuffle over an
+// unopened deck that open_deck can no longer open -- it starts at chunk 1.
+#[test]
+#[feature("safe_dispatcher")]
+fn test_plain_shuffle_rejected_on_the_last_turn() {
+    let (game, _verifier) = deploy_pokergame_with_verifier(POOL());
+    let (token_addr, _token, _admin) = deploy_mock_token();
+
+    start_cheat_caller_address(game.contract_address, DEALER());
+    game.create_table(TABLE_1, token_addr, 0, TWO_SEATS);
+    stop_cheat_caller_address(game.contract_address);
+
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.join_table(TABLE_1, SEAT_0, NOTE_A);
+    game.register_shuffle_key(TABLE_1, SEAT_0, PK_A_X, PK_A_Y, key_proof());
+    stop_cheat_caller_address(game.contract_address);
+
+    start_cheat_caller_address(game.contract_address, BOB());
+    game.join_table(TABLE_1, SEAT_1, NOTE_B);
+    game.register_shuffle_key(TABLE_1, SEAT_1, PK_B_X, PK_B_Y, key_proof());
+    stop_cheat_caller_address(game.contract_address);
+
+    start_cheat_caller_address(game.contract_address, DEALER());
+    game.begin_shuffle(TABLE_1, JOINT_X, JOINT_Y);
+    stop_cheat_caller_address(game.contract_address);
+
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.submit_shuffle(TABLE_1, DECK_1, deck_of(1), proof());
+    stop_cheat_caller_address(game.contract_address);
+
+    let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
+    start_cheat_caller_address(game.contract_address, BOB());
+    let outcome = safe.submit_shuffle(TABLE_1, DECK_2, deck_of(1), proof());
+    stop_cheat_caller_address(game.contract_address);
+    match outcome {
+        Result::Ok(_) => panic!("closed the chain without opening the deck"),
+        Result::Err(panic_data) => assert(
+            *panic_data.at(0) == 'USE_FINAL_SHUFFLE', 'wrong error',
+        ),
+    }
+}
+
+// ..and the mirror: the fused proof is only accepted on the last turn. A
+// mid-chain seat opening the deck would bind cards from a deck the remaining
+// shufflers have not touched yet.
+#[test]
+#[feature("safe_dispatcher")]
+fn test_final_shuffle_rejected_before_the_last_turn() {
+    let (game, _verifier) = deploy_pokergame_with_verifier(POOL());
+    let (token_addr, _token, _admin) = deploy_mock_token();
+
+    start_cheat_caller_address(game.contract_address, DEALER());
+    game.create_table(TABLE_1, token_addr, 0, TWO_SEATS);
+    stop_cheat_caller_address(game.contract_address);
+
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.join_table(TABLE_1, SEAT_0, NOTE_A);
+    game.register_shuffle_key(TABLE_1, SEAT_0, PK_A_X, PK_A_Y, key_proof());
+    stop_cheat_caller_address(game.contract_address);
+
+    start_cheat_caller_address(game.contract_address, BOB());
+    game.join_table(TABLE_1, SEAT_1, NOTE_B);
+    game.register_shuffle_key(TABLE_1, SEAT_1, PK_B_X, PK_B_Y, key_proof());
+    stop_cheat_caller_address(game.contract_address);
+
+    start_cheat_caller_address(game.contract_address, DEALER());
+    game.begin_shuffle(TABLE_1, JOINT_X, JOINT_Y);
+    stop_cheat_caller_address(game.contract_address);
+
+    let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
+    start_cheat_caller_address(game.contract_address, ALICE());
+    let outcome = safe
+        .submit_final_shuffle(
+            TABLE_1, DECK_1, deck_of(1), chunk_cts(0, TWO_SEAT_POSITIONS), proof(),
+        );
+    stop_cheat_caller_address(game.contract_address);
+    match outcome {
+        Result::Ok(_) => panic!("opened the deck mid-chain"),
+        Result::Err(panic_data) => assert(
+            *panic_data.at(0) == 'NOT_FINAL_SHUFFLE', 'wrong error',
+        ),
+    }
+}
+
+// A rejected fused proof must not advance the chain OR open anything.
+#[test]
+#[feature("safe_dispatcher")]
+fn test_final_shuffle_rejected_proof() {
+    let (game, verifier) = deploy_pokergame_with_verifier(POOL());
+    let (token_addr, _token, _admin) = deploy_mock_token();
+
+    start_cheat_caller_address(game.contract_address, DEALER());
+    game.create_table(TABLE_1, token_addr, 0, TWO_SEATS);
+    stop_cheat_caller_address(game.contract_address);
+
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.join_table(TABLE_1, SEAT_0, NOTE_A);
+    game.register_shuffle_key(TABLE_1, SEAT_0, PK_A_X, PK_A_Y, key_proof());
+    stop_cheat_caller_address(game.contract_address);
+
+    start_cheat_caller_address(game.contract_address, BOB());
+    game.join_table(TABLE_1, SEAT_1, NOTE_B);
+    game.register_shuffle_key(TABLE_1, SEAT_1, PK_B_X, PK_B_Y, key_proof());
+    stop_cheat_caller_address(game.contract_address);
+
+    start_cheat_caller_address(game.contract_address, DEALER());
+    game.begin_shuffle(TABLE_1, JOINT_X, JOINT_Y);
+    stop_cheat_caller_address(game.contract_address);
+
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.submit_shuffle(TABLE_1, DECK_1, deck_of(1), proof());
+    stop_cheat_caller_address(game.contract_address);
+
+    verifier.set_reject_shuffle_open(true);
+    let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
+    start_cheat_caller_address(game.contract_address, BOB());
+    let outcome = safe
+        .submit_final_shuffle(
+            TABLE_1, DECK_2, deck_of(1), chunk_cts(0, TWO_SEAT_POSITIONS), proof(),
+        );
+    stop_cheat_caller_address(game.contract_address);
+    match outcome {
+        Result::Ok(_) => panic!("accepted a rejected fused proof"),
+        Result::Err(panic_data) => assert(
+            *panic_data.at(0) == 'SHUFFLE_PROOF_REJECTED', 'wrong error',
+        ),
+    }
+    assert(!game.get_shuffle_complete(TABLE_1), 'chain advanced anyway');
+    assert(!game.get_deck_opened(TABLE_1), 'deck opened anyway');
+}
+
+// ─── open_deck ──────────────────────────────────────────────────────────
+//
+// Only reachable on a table of EIGHT seats or more now: below that, the whole
+// deck fits the one chunk the final shuffle proof already carried.
+
 // Anyone may submit it: the proof is self-authenticating, so who relays it
 // cannot change what it proves.
 #[test]
 fn test_open_deck_callable_by_non_participant() {
-    let (game, _v) = setup_shuffled();
+    let game = setup_shuffled_wide();
     start_cheat_caller_address(game.contract_address, MALLORY());
-    open_all(game);
+    game.open_deck(TABLE_1, 1, chunk_cts(DECK_OPEN_K, WIDE_POSITIONS), proof());
     stop_cheat_caller_address(game.contract_address);
     assert(game.get_deck_opened(TABLE_1), 'deck not opened');
 }
@@ -280,9 +478,10 @@ fn test_open_deck_before_shuffle_complete_rejected() {
 #[test]
 #[feature("safe_dispatcher")]
 fn test_open_deck_twice_rejected() {
-    let (game, _v) = setup_opened();
+    let game = setup_shuffled_wide();
+    game.open_deck(TABLE_1, 1, chunk_cts(DECK_OPEN_K, WIDE_POSITIONS), proof());
     let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
-    let outcome = safe.open_deck(TABLE_1, 0, chunk_cts(0, TWO_SEAT_POSITIONS), proof());
+    let outcome = safe.open_deck(TABLE_1, 2, chunk_cts(2 * DECK_OPEN_K, WIDE_POSITIONS), proof());
     match outcome {
         Result::Ok(_) => panic!("reopened the deck"),
         Result::Err(panic_data) => assert(
@@ -296,9 +495,50 @@ fn test_open_deck_twice_rejected() {
 #[test]
 #[feature("safe_dispatcher")]
 fn test_open_deck_mismatched_lengths_rejected() {
-    let (game, _v) = setup_shuffled();
+    let game = setup_shuffled_wide();
     let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
-    let outcome = safe.open_deck(TABLE_1, 0, ct('X').span(), proof());
+    let outcome = safe.open_deck(TABLE_1, 1, ct('X').span(), proof());
+    match outcome {
+        Result::Ok(_) => panic!("accepted a short ciphertext array"),
+        Result::Err(panic_data) => assert(
+            *panic_data.at(0) == 'BAD_OPENING_LENGTH', 'wrong error',
+        ),
+    }
+}
+
+// ..and the same rule on the fused path, which takes the identical array.
+#[test]
+#[feature("safe_dispatcher")]
+fn test_final_shuffle_mismatched_lengths_rejected() {
+    let (game, _verifier) = deploy_pokergame_with_verifier(POOL());
+    let (token_addr, _token, _admin) = deploy_mock_token();
+
+    start_cheat_caller_address(game.contract_address, DEALER());
+    game.create_table(TABLE_1, token_addr, 0, TWO_SEATS);
+    stop_cheat_caller_address(game.contract_address);
+
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.join_table(TABLE_1, SEAT_0, NOTE_A);
+    game.register_shuffle_key(TABLE_1, SEAT_0, PK_A_X, PK_A_Y, key_proof());
+    stop_cheat_caller_address(game.contract_address);
+
+    start_cheat_caller_address(game.contract_address, BOB());
+    game.join_table(TABLE_1, SEAT_1, NOTE_B);
+    game.register_shuffle_key(TABLE_1, SEAT_1, PK_B_X, PK_B_Y, key_proof());
+    stop_cheat_caller_address(game.contract_address);
+
+    start_cheat_caller_address(game.contract_address, DEALER());
+    game.begin_shuffle(TABLE_1, JOINT_X, JOINT_Y);
+    stop_cheat_caller_address(game.contract_address);
+
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.submit_shuffle(TABLE_1, DECK_1, deck_of(1), proof());
+    stop_cheat_caller_address(game.contract_address);
+
+    let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
+    start_cheat_caller_address(game.contract_address, BOB());
+    let outcome = safe.submit_final_shuffle(TABLE_1, DECK_2, deck_of(1), ct('X').span(), proof());
+    stop_cheat_caller_address(game.contract_address);
     match outcome {
         Result::Ok(_) => panic!("accepted a short ciphertext array"),
         Result::Err(panic_data) => assert(
@@ -310,10 +550,13 @@ fn test_open_deck_mismatched_lengths_rejected() {
 #[test]
 #[feature("safe_dispatcher")]
 fn test_open_deck_rejected_proof() {
-    let (game, verifier) = setup_shuffled();
+    let game = setup_shuffled_wide();
+    let verifier = zkpoker::mocks::IMockVerifierAdminTraitDispatcher {
+        contract_address: game.get_shuffle_verifier(),
+    };
     verifier.set_reject_opening(true);
     let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
-    let outcome = safe.open_deck(TABLE_1, 0, chunk_cts(0, TWO_SEAT_POSITIONS), proof());
+    let outcome = safe.open_deck(TABLE_1, 1, chunk_cts(DECK_OPEN_K, WIDE_POSITIONS), proof());
     match outcome {
         Result::Ok(_) => panic!("accepted a rejected opening proof"),
         Result::Err(panic_data) => assert(
@@ -400,7 +643,9 @@ fn test_reveal_community_card_success_and_event() {
 #[test]
 #[feature("safe_dispatcher")]
 fn test_reveal_community_before_open_rejected() {
-    let (game, _v) = setup_shuffled();
+    // The wide fixture, because a table of seven seats or fewer has its deck
+    // opened by the final shuffle proof and is never in this state.
+    let game = setup_shuffled_wide();
     let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
     let outcome = safe.reveal_community_card(TABLE_1, 0, SHARE_X, SHARE_Y, 7, proof());
     match outcome {
@@ -701,10 +946,11 @@ fn setup_preflop_done() -> zkpoker::IPokerGameDispatcher {
     game.submit_shuffle(TABLE_1, DECK_1, deck_of(1), proof());
     stop_cheat_caller_address(game.contract_address);
     start_cheat_caller_address(game.contract_address, BOB());
-    game.submit_shuffle(TABLE_1, DECK_2, deck_of(1), proof());
+    game
+        .submit_final_shuffle(
+            TABLE_1, DECK_2, deck_of(1), chunk_cts(0, TWO_SEAT_POSITIONS), proof(),
+        );
     stop_cheat_caller_address(game.contract_address);
-
-    open_all(game);
 
     game
 }
@@ -852,11 +1098,11 @@ fn test_settle_from_reveals_incomplete_board_rejected() {
     }
 }
 
-// A contender who never opened cannot be scored. They have effectively
-// mucked -- but the hand cannot be settled while they are still in it.
+// A contender who never opened cannot be scored. They forfeit -- but they
+// cannot veto the hand for everyone else either.
 #[test]
 #[feature("safe_dispatcher")]
-fn test_settle_from_reveals_mucking_forfeits_it_does_not_veto() {
+fn test_settle_from_reveals_not_showing_forfeits_it_does_not_veto() {
     // AUDIT FINDING B, fixed. settle_from_reveals used to assert that every
     // contender had revealed both hole cards, so a seat that simply never
     // revealed -- mucking, or going offline -- reverted settlement for
@@ -867,27 +1113,52 @@ fn test_settle_from_reveals_mucking_forfeits_it_does_not_veto() {
     let game = setup_showdown();
     reveal_board(game);
     reveal_hole(game, ALICE(), SEAT_0, card(12, 0), card(12, 1));
-    // BOB never reveals.
+    // BOB never reveals, so the hand waits for his clock rather than for him.
+    start_cheat_block_timestamp_global(game.get_showdown_deadline(TABLE_1) + 1);
 
     game.settle_from_reveals(TABLE_1);
     assert(game.get_pending_payout(NOTE_A) == 2_000, 'shower takes the whole pot');
-    assert(game.get_pending_payout(NOTE_B) == 0, 'mucker forfeits');
+    assert(game.get_pending_payout(NOTE_B) == 0, 'non-shower forfeits');
+    stop_cheat_block_timestamp_global();
 }
 
 #[test]
 #[feature("safe_dispatcher")]
-fn test_settle_from_reveals_all_muck_rejected() {
-    // The one case that must still revert: nobody showed, so there is no
-    // hand to score. Falling through would award the pot to seat 0 on a
-    // score of zero.
+fn test_settle_from_reveals_before_the_showdown_is_over_rejected() {
+    // The hole this closes: settlement scores an unshown contender as nothing,
+    // which is right once the showdown has run and wrong before it has. Called
+    // early, every contender scores zero and the pot voids -- a free undo of a
+    // losing hand, available to anyone, for the price of one transaction.
     let game = setup_showdown();
     reveal_board(game);
+    reveal_hole(game, ALICE(), SEAT_0, card(12, 0), card(12, 1));
+    // BOB still has time on the clock and is still entitled to show.
 
     let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
     match safe.settle_from_reveals(TABLE_1) {
-        Result::Ok(_) => panic!("settled with no hands shown"),
-        Result::Err(panic_data) => assert(*panic_data.at(0) == 'HOLE_NOT_REVEALED', 'wrong error'),
+        Result::Ok(_) => panic!("settled while a seat could still show"),
+        Result::Err(p) => assert(*p.at(0) == 'SHOWDOWN_DEADLINE_LIVE', 'wrong error'),
     }
+    assert(!game.get_table_settled(TABLE_1), 'must not be settled');
+    assert(!game.get_table_voided(TABLE_1), 'must not be voided');
+}
+
+#[test]
+#[feature("safe_dispatcher")]
+fn test_settle_from_reveals_nobody_showed_voids() {
+    // Nobody tabled a hand, so there is nothing to score. This must not award
+    // the pot to seat 0 on a score of zero, and it must not revert either --
+    // reverting strands the pot until the 24-hour reclaim. It voids, which
+    // refunds every seat what it put in, immediately.
+    let game = setup_showdown();
+    reveal_board(game);
+    start_cheat_block_timestamp_global(game.get_showdown_deadline(TABLE_1) + 1);
+
+    game.settle_from_reveals(TABLE_1);
+    assert(game.get_table_voided(TABLE_1), 'hand not voided');
+    assert(!game.get_table_settled(TABLE_1), 'must not be marked settled');
+    assert(game.get_pending_payout(NOTE_A) == 0, 'nobody should be paid');
+    stop_cheat_block_timestamp_global();
 }
 
 #[test]
@@ -930,14 +1201,15 @@ fn test_settle_from_reveals_before_showdown_rejected() {
 #[test]
 #[feature("safe_dispatcher")]
 fn test_open_deck_partial_open_is_unexpressible() {
-    // On the wide fixture, because a two-seat table now opens atomically and
-    // a griefer needs more than one chunk to leave one half-done.
+    // On the wide fixture, because a table of seven seats or fewer now opens
+    // atomically inside the final shuffle proof and a griefer needs more than
+    // one chunk to leave one half-done.
     let game = setup_shuffled_wide();
     let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
 
     // A short ciphertext array is rejected outright.
     start_cheat_caller_address(game.contract_address, MALLORY());
-    let outcome = safe.open_deck(TABLE_1, 0, ct('X').span(), proof());
+    let outcome = safe.open_deck(TABLE_1, 1, ct('X').span(), proof());
     stop_cheat_caller_address(game.contract_address);
     match outcome {
         Result::Ok(_) => panic!("griefer opened a partial deck"),
@@ -945,20 +1217,23 @@ fn test_open_deck_partial_open_is_unexpressible() {
     }
     assert(!game.get_deck_opened(TABLE_1), 'deck must stay unopened');
 
-    // Skipping ahead to the last chunk, so the earlier slots are never
-    // opened, is refused too -- chunks are consumed strictly in order.
+    // Going BACKWARDS to the chunk the shuffle proof already bound is refused
+    // too -- chunks are consumed strictly in order, and chunk 0 is spent
+    // before open_deck is ever reachable.
+    //
+    // Skipping FORWARDS past a chunk is no longer expressible at all: K = 19
+    // and MAX_TABLE_SEATS = 15 cap a deck at 2*15 + 5 = 35 in-play positions,
+    // which is two chunks, and the fused proof always takes the first. There
+    // is never a third chunk to jump to. The ordering check below still holds
+    // the line if either bound moves.
     start_cheat_caller_address(game.contract_address, MALLORY());
-    let jumped = safe.open_deck(TABLE_1, 1, chunk_cts(DECK_OPEN_K, WIDE_POSITIONS), proof());
+    let jumped = safe.open_deck(TABLE_1, 0, chunk_cts(0, WIDE_POSITIONS), proof());
     stop_cheat_caller_address(game.contract_address);
     match jumped {
-        Result::Ok(_) => panic!("griefer skipped a chunk"),
+        Result::Ok(_) => panic!("griefer replayed a spent chunk"),
         Result::Err(p) => assert(*p.at(0) == 'BAD_OPENING_CHUNK', 'chunks are ordered'),
     }
-
-    // Stopping after the first chunk leaves the deck unopened, and the
-    // hand recoverable: anyone can submit the rest.
-    game.open_deck(TABLE_1, 0, chunk_cts(0, WIDE_POSITIONS), proof());
-    assert(!game.get_deck_opened(TABLE_1), 'half-open is not open');
+    assert(!game.get_deck_opened(TABLE_1), 'deck must stay unopened');
     game.open_deck(TABLE_1, 1, chunk_cts(DECK_OPEN_K, WIDE_POSITIONS), proof());
 
     // The point of this test is that a half-opened deck leaves the hand
@@ -1285,13 +1560,12 @@ fn test_conviction_forfeits_the_defaulters_stake() {
     start_cheat_caller_address(game.contract_address, BOB());
     game.submit_shuffle(TABLE_1, DECK_2, deck_of(1), proof());
     stop_cheat_caller_address(game.contract_address);
+    // 3 seats: 6 hole slots and 5 community, 11 positions -- one chunk at
+    // K=19, where it took three at K=5. CAROL closes the chain, so her proof
+    // carries the opening and there is no open_deck transaction at all.
     start_cheat_caller_address(game.contract_address, CAROL());
-    game.submit_shuffle(TABLE_1, DECK_0, deck_of(1), proof());
+    game.submit_final_shuffle(TABLE_1, DECK_0, deck_of(1), chunk_cts(0, 11), proof());
     stop_cheat_caller_address(game.contract_address);
-
-    // 3 seats: 6 hole slots, 5 community, 3 draws. 14 positions -- one chunk
-    // at K=16, where it took three at K=5.
-    game.open_deck(TABLE_1, 0, chunk_cts(0, 14), proof());
 
     // BOB stalls on the flop.
     let flop = 2 * 3;
@@ -1422,82 +1696,73 @@ fn test_each_community_card_opens_on_its_own_street() {
 
 // ── showdown order and the muck clock ──────────────────────────────────
 //
-// Hold'em's rule: the last player to bet or raise on the river shows first;
-// if everyone checked, the first seat still in the hand does; then clockwise.
-// A player may muck instead of showing, and running out of time IS mucking.
+// Every contender shows. There is no muck, so there is no decision for a show
+// ORDER to protect -- the Hold'em rule (last river aggressor first, then
+// clockwise) existed only because a player who had seen a better hand could
+// decline to expose their own, and that choice is gone.
 //
-// This is enforced on-chain rather than by clients because showing is
-// INFORMATION -- a player who has seen a better hand may decline to expose
-// their own -- so who reveals first is worth something, and a rule only
-// clients follow is advisory.
+// What the ordering cost was real: it serialised n reveals behind a per-seat
+// clock, on a chain where one transaction takes tens of seconds. One clock for
+// the whole table now, and contenders reveal concurrently in any order.
 
 #[test]
-fn test_showdown_starts_with_the_first_active_seat_when_all_checked() {
+fn test_showdown_opens_one_clock_for_the_table() {
     let (game, _v) = setup_opened_at_showdown();
     assert(game.get_showdown_started(TABLE_1), 'showdown not started');
-    assert(game.get_showdown_turn(TABLE_1) == SEAT_0, 'seat 0 shows first');
     assert(game.get_showdown_deadline(TABLE_1) != 0, 'clock should run');
 }
 
 #[test]
-#[feature("safe_dispatcher")]
-fn test_cannot_show_out_of_turn() {
+fn test_any_contender_may_show_first() {
+    // The seat that used to be second in line shows first, with no complaint.
+    // Under the old rule this exact call reverted NOT_YOUR_SHOWDOWN_TURN.
     let (game, _v) = setup_opened_at_showdown();
     let c = commitment_for(SHARE_X, SHARE_Y, 'RHO');
     start_cheat_caller_address(game.contract_address, BOB());
     game.commit_hole_shares(TABLE_1, SEAT_1, 0, c);
     stop_cheat_caller_address(game.contract_address);
 
-    // SEAT_0 is on turn, so SEAT_1 showing now would leak nothing to itself
-    // but would give SEAT_0 a free look before deciding.
-    let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
-    let outcome = safe.reveal_hole_card(TABLE_1, SEAT_1, 0, SHARE_X, SHARE_Y, 'RHO', 42, proof());
-    match outcome {
-        Result::Ok(_) => panic!("showed out of turn"),
-        Result::Err(p) => assert(*p.at(0) == 'NOT_YOUR_SHOWDOWN_TURN', 'wrong error'),
-    }
+    game.reveal_hole_card(TABLE_1, SEAT_1, 0, SHARE_X, SHARE_Y, 'RHO', 42, proof());
+    assert(game.get_hole_revealed(TABLE_1, SEAT_1, 0), 'seat 1 could not show');
+    assert(game.get_hole_card(TABLE_1, SEAT_1, 0) == 42, 'wrong card recorded');
 }
 
 #[test]
-fn test_mucking_passes_the_turn_and_forfeits() {
+fn test_forfeiting_takes_nothing_out_of_the_pot() {
+    // Forfeiting gives up the claim, it does not withdraw the stake: the
+    // seat's contribution stays exactly where it was, in the pot, for whoever
+    // does show. Compared before and after rather than asserted non-zero --
+    // this fixture checks its way to showdown with a buy-in of 0, so a
+    // non-zero assertion would have passed for the wrong reason.
     let (game, _v) = setup_opened_at_showdown();
-    assert(game.get_showdown_turn(TABLE_1) == SEAT_0, 'seat 0 first');
-
-    // Mucking forfeits rather than blocking, so nothing moves: the seat's
-    // contribution stays exactly where it was and remains in the pot for
-    // whoever does show. Compared before and after rather than asserted
-    // non-zero -- this fixture checks its way to showdown with a buy-in of 0,
-    // so a non-zero assertion would have passed for the wrong reason or, as it
-    // did, failed for one.
     let before = game.get_seat_contributed(TABLE_1, SEAT_0);
     let pot_before = game.get_pot(TABLE_1);
 
-    start_cheat_caller_address(game.contract_address, ALICE());
-    game.muck(TABLE_1, SEAT_0);
-    stop_cheat_caller_address(game.contract_address);
+    start_cheat_block_timestamp_global(game.get_showdown_deadline(TABLE_1) + 1);
+    game.claim_showdown_timeout(TABLE_1);
+    stop_cheat_block_timestamp_global();
 
-    assert(game.get_seat_mucked(TABLE_1, SEAT_0), 'seat 0 mucked');
-    assert(game.get_showdown_turn(TABLE_1) == SEAT_1, 'turn passes on');
+    assert(game.get_seat_forfeited(TABLE_1, SEAT_0), 'seat 0 not forfeited');
     assert(game.get_seat_contributed(TABLE_1, SEAT_0) == before, 'contribution unchanged');
     assert(game.get_pot(TABLE_1) == pot_before, 'pot unchanged');
 }
 
 #[test]
-fn test_every_seat_mucking_voids_the_hand_instead_of_stranding_it() {
+fn test_every_seat_forfeiting_voids_the_hand_instead_of_stranding_it() {
     // Found by play, 2026-09-06: at a three-handed table every seat showed one
     // hole card and was mucked by the ten-second clock before the second. All
     // three had forfeited, so there was no contender -- and settlement used to
     // revert NO_CONTENDERS, which left table_settled false and the pot sitting
     // in this contract until the 24-hour reclaim timeout. A whole day of
     // nothing, for a state the timeouts reach on their own.
+    //
+    // The ten-second clock is gone too (see SHOWDOWN_SECS), so this state is
+    // now reached only by seats that really did go away -- but it is still
+    // reachable, so it still has to resolve.
     let game = setup_showdown();
 
-    start_cheat_caller_address(game.contract_address, ALICE());
-    game.muck(TABLE_1, SEAT_0);
-    stop_cheat_caller_address(game.contract_address);
-    start_cheat_caller_address(game.contract_address, BOB());
-    game.muck(TABLE_1, SEAT_1);
-    stop_cheat_caller_address(game.contract_address);
+    start_cheat_block_timestamp_global(game.get_showdown_deadline(TABLE_1) + 1);
+    game.claim_showdown_timeout(TABLE_1);
 
     let mut spy = spy_events();
     game.settle_from_reveals(TABLE_1);
@@ -1521,20 +1786,17 @@ fn test_every_seat_mucking_voids_the_hand_instead_of_stranding_it() {
 }
 
 #[test]
-fn test_a_voided_all_muck_hand_refunds_without_waiting() {
+fn test_a_voided_all_forfeit_hand_refunds_without_waiting() {
     // The point of voiding rather than reverting: no 24-hour wait. This
     // asserts the money is actually reachable, not merely that a flag got set.
     let game = setup_showdown();
     let staked = game.get_seat_contributed(TABLE_1, SEAT_0);
     assert(staked != 0, 'fixture must have money in');
 
-    start_cheat_caller_address(game.contract_address, ALICE());
-    game.muck(TABLE_1, SEAT_0);
-    stop_cheat_caller_address(game.contract_address);
-    start_cheat_caller_address(game.contract_address, BOB());
-    game.muck(TABLE_1, SEAT_1);
-    stop_cheat_caller_address(game.contract_address);
+    start_cheat_block_timestamp_global(game.get_showdown_deadline(TABLE_1) + 1);
+    game.claim_showdown_timeout(TABLE_1);
     game.settle_from_reveals(TABLE_1);
+    stop_cheat_block_timestamp_global();
 
     // No time is cheated forward. Before this change the same call reverted
     // TOO_EARLY until created_at + SETTLE_TIMEOUT_SECS.
@@ -1551,16 +1813,17 @@ fn test_a_voided_all_muck_hand_refunds_without_waiting() {
     assert(game.get_pot(TABLE_1) == 0, 'pot not emptied');
 }
 
-// The premature case stays a REVERT, and that asymmetry is the whole rule:
-// voiding is gated on there being no contender left, not on nobody having
-// shown yet. A seat that has not mucked is still entitled to show, so
-// settlement then is early rather than terminal -- and if it voided instead,
-// anyone could cancel a hand the instant the showdown opened by calling
-// settlement before the first reveal. See
-// test_settle_from_reveals_all_muck_rejected, which covers exactly that.
+// Calling settlement EARLY stays a revert, and that asymmetry is the whole
+// rule: a seat that still has time is still entitled to show, so settling then
+// is premature rather than terminal. If it voided instead, anyone could cancel
+// a hand the instant the showdown opened. See
+// test_settle_from_reveals_before_the_showdown_is_over_rejected.
 
 #[test]
-fn test_running_out_of_time_is_mucking() {
+fn test_running_out_of_time_forfeits_every_unshown_seat() {
+    // One deadline for the table means one call closes it. Every seat that
+    // missed the clock missed the SAME clock, so charging a caller for n
+    // transactions to say so would only be a worse route to identical state.
     let (game, _v) = setup_opened_at_showdown();
     let deadline = game.get_showdown_deadline(TABLE_1);
 
@@ -1570,9 +1833,37 @@ fn test_running_out_of_time_is_mucking() {
     start_cheat_caller_address(game.contract_address, MALLORY());
     game.claim_showdown_timeout(TABLE_1);
     stop_cheat_caller_address(game.contract_address);
+    stop_cheat_block_timestamp_global();
 
-    assert(game.get_seat_mucked(TABLE_1, SEAT_0), 'timed-out seat mucked');
-    assert(game.get_showdown_turn(TABLE_1) == SEAT_1, 'turn passes on');
+    assert(game.get_seat_forfeited(TABLE_1, SEAT_0), 'seat 0 not forfeited');
+    assert(game.get_seat_forfeited(TABLE_1, SEAT_1), 'seat 1 not forfeited');
+    assert(game.get_showdown_deadline(TABLE_1) == 0, 'clock not cleared');
+}
+
+#[test]
+fn test_the_clock_cannot_forfeit_an_uncontested_winner() {
+    // Everyone else folded, so the last seat in has already won and owes
+    // nobody a card. Forfeiting it on the clock would void the pot and refund
+    // the folded seats their bets -- a griefer undoing every fold at the table
+    // for the price of one transaction.
+    let (game, _admin, _token) = setup_opened_funded();
+    to_street(game, 3);
+    start_cheat_caller_address(game.contract_address, ALICE());
+    game.fold(TABLE_1, SEAT_0);
+    stop_cheat_caller_address(game.contract_address);
+    game.advance_street(TABLE_1);
+    assert(game.get_showdown_started(TABLE_1), 'showdown not started');
+
+    start_cheat_block_timestamp_global(game.get_showdown_deadline(TABLE_1) + 1);
+    start_cheat_caller_address(game.contract_address, MALLORY());
+    game.claim_showdown_timeout(TABLE_1);
+    stop_cheat_caller_address(game.contract_address);
+
+    assert(!game.get_seat_forfeited(TABLE_1, SEAT_1), 'winner was forfeited');
+    game.settle_from_reveals(TABLE_1);
+    stop_cheat_block_timestamp_global();
+    assert(game.get_table_settled(TABLE_1), 'uncontested pot not settled');
+    assert(!game.get_table_voided(TABLE_1), 'uncontested pot voided');
 }
 
 #[test]
@@ -1582,10 +1873,10 @@ fn test_cannot_claim_the_showdown_clock_early() {
     let safe = zkpoker::IPokerGameSafeDispatcher { contract_address: game.contract_address };
     let outcome = safe.claim_showdown_timeout(TABLE_1);
     match outcome {
-        Result::Ok(_) => panic!("mucked a seat that still had time"),
+        Result::Ok(_) => panic!("forfeited a seat that still had time"),
         Result::Err(p) => assert(*p.at(0) == 'SHOWDOWN_DEADLINE_LIVE', 'wrong error'),
     }
-    assert(!game.get_seat_mucked(TABLE_1, SEAT_0), 'must not be mucked');
+    assert(!game.get_seat_forfeited(TABLE_1, SEAT_0), 'must not be forfeited');
 }
 
 // Same as setup_opened, but with funded seats so bets are possible.
@@ -1617,9 +1908,11 @@ fn setup_opened_funded() -> (
     game.submit_shuffle(TABLE_1, DECK_1, deck_of(1), proof());
     stop_cheat_caller_address(game.contract_address);
     start_cheat_caller_address(game.contract_address, BOB());
-    game.submit_shuffle(TABLE_1, DECK_2, deck_of(1), proof());
+    game
+        .submit_final_shuffle(
+            TABLE_1, DECK_2, deck_of(1), chunk_cts(0, TWO_SEAT_POSITIONS), proof(),
+        );
     stop_cheat_caller_address(game.contract_address);
-    open_all(game);
 
     fund_and_approve(token, admin, ALICE(), game.contract_address, 10_000);
     fund_and_approve(token, admin, BOB(), game.contract_address, 10_000);
@@ -1627,10 +1920,11 @@ fn setup_opened_funded() -> (
 }
 
 #[test]
-fn test_the_river_aggressor_shows_first() {
-    // Someone bets the river, so order starts with THEM rather than with the
-    // lowest seat -- the case a "first active seat" rule alone gets wrong, and
-    // the reason the aggressor is tracked at all.
+fn test_a_river_bet_still_reaches_a_showdown_with_one_clock() {
+    // The old version of this asserted the river aggressor showed FIRST. There
+    // is no first any more; what still has to hold is that a street with real
+    // betting closes into a showdown with a running clock, rather than into a
+    // turn order that no longer exists.
     let (game, _admin, _token) = setup_opened_funded();
     to_street(game, 3);
 
@@ -1646,6 +1940,7 @@ fn test_the_river_aggressor_shows_first() {
     game.advance_street(TABLE_1);
 
     assert(game.get_table_street(TABLE_1) == 4, 'expected showdown');
-    assert(game.get_showdown_turn(TABLE_1) == SEAT_1, 'river bettor shows first');
+    assert(game.get_showdown_started(TABLE_1), 'showdown not started');
+    assert(game.get_showdown_deadline(TABLE_1) != 0, 'clock should run');
 }
 

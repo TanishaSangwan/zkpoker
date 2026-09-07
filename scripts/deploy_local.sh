@@ -188,6 +188,8 @@ SHUFFLE_CLASS="$(declare_contract circuits/shuffle_verifier UltraKeccakZKHonkVer
 echo "  shuffle verifier   $SHUFFLE_CLASS"
 DECKOPEN_CLASS="$(declare_contract circuits/deck_open_verifier UltraKeccakZKHonkVerifier)"
 echo "  deck-open verifier $DECKOPEN_CLASS"
+SHUFFLEOPEN_CLASS="$(declare_contract circuits/shuffle_open_verifier UltraKeccakZKHonkVerifier)"
+echo "  shuffle+open       $SHUFFLEOPEN_CLASS"
 SCHNORR_CLASS="$(declare_contract cairo-verifier SchnorrKeyVerifier)"
 echo "  schnorr            $SCHNORR_CLASS"
 DLEQ_CLASS="$(declare_contract cairo-verifier DleqVerifier)"
@@ -196,19 +198,24 @@ ADAPTER_CLASS="$(declare_contract cairo-verifier VerifierAdapter)"
 echo "  adapter            $ADAPTER_CLASS"
 GAME_CLASS="$(declare_contract cairo PokerGame)"
 echo "  pokergame          $GAME_CLASS"
-if [ "$SHUFFLE_CLASS" = "$DECKOPEN_CLASS" ]; then
-  echo "the two Honk verifiers declared to the SAME class hash -- they should differ" >&2
-  echo "only in their VK constants, so this means one package was built stale." >&2
+if [ "$SHUFFLE_CLASS" = "$DECKOPEN_CLASS" ] \
+  || [ "$SHUFFLE_CLASS" = "$SHUFFLEOPEN_CLASS" ] \
+  || [ "$DECKOPEN_CLASS" = "$SHUFFLEOPEN_CLASS" ]; then
+  echo "two of the Honk verifiers declared to the SAME class hash -- they should" >&2
+  echo "differ only in their VK constants, so this means one package was built" >&2
+  echo "stale. shuffle+open in particular is easy to miss: it is a THIRD circuit," >&2
+  echo "not the shuffle verifier with extra public inputs." >&2
   exit 1
 fi
 
 say "deploying"
 SHUFFLE_ADDR="$(deploy_contract "$SHUFFLE_CLASS")";     echo "  shuffle verifier   $SHUFFLE_ADDR"
 DECKOPEN_ADDR="$(deploy_contract "$DECKOPEN_CLASS")";   echo "  deck-open verifier $DECKOPEN_ADDR"
+SHUFFLEOPEN_ADDR="$(deploy_contract "$SHUFFLEOPEN_CLASS")"; echo "  shuffle+open       $SHUFFLEOPEN_ADDR"
 SCHNORR_ADDR="$(deploy_contract "$SCHNORR_CLASS")";     echo "  schnorr            $SCHNORR_ADDR"
 DLEQ_ADDR="$(deploy_contract "$DLEQ_CLASS")";           echo "  dleq               $DLEQ_ADDR"
 
-ADAPTER_ADDR="$(deploy_contract "$ADAPTER_CLASS" --arguments "$SHUFFLE_ADDR,$DECKOPEN_ADDR,$SCHNORR_ADDR,$DLEQ_ADDR")"
+ADAPTER_ADDR="$(deploy_contract "$ADAPTER_CLASS" --arguments "$SHUFFLE_ADDR,$DECKOPEN_ADDR,$SHUFFLEOPEN_ADDR,$SCHNORR_ADDR,$DLEQ_ADDR")"
 echo "  adapter            $ADAPTER_ADDR"
 
 # `pool` is the STRK20 privacy pool. There is none on devnet, so it is set to
@@ -255,6 +262,7 @@ values.
 
   shuffle verifier    $SHUFFLE_ADDR
   deck-open verifier  $DECKOPEN_ADDR
+  shuffle+open        $SHUFFLEOPEN_ADDR
   schnorr verifier    $SCHNORR_ADDR
   dleq verifier       $DLEQ_ADDR
   verifier adapter    $ADAPTER_ADDR

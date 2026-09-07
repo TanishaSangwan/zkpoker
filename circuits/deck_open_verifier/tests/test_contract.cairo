@@ -100,12 +100,18 @@ fn test_verify_ultra_keccak_zk_honk_proof() {
 // scripts/prove_deck_open.mjs.
 
 // The public inputs, in the exact order PokerGame::open_deck rebuilds them:
-// deck_hash, then K positions, then 4K ciphertext coordinates. Round 8's
+// deck_hash, chunk, k_total, then 4K ciphertext coordinates. Round 8's
 // finding I was precisely this going wrong -- the deck could not be opened at
 // all against the real verifier while a mock hid it -- so it is pinned here
 // against the deployed contract rather than assumed.
+//
+// Positions used to be public inputs of their own, one per opened slot. They
+// are DERIVED from chunk and k_total now (see circuits/deck_open/src/main.nr):
+// that is what bought K = 16 -> 19, and what let the opening fold into the
+// last shuffle proof at all. Nothing about who controls them changed -- the
+// contract still derives every one of them from its own storage.
 #[test]
-fn test_public_inputs_are_hash_then_positions_then_cards() {
+fn test_public_inputs_are_hash_chunk_ktotal_then_cards() {
     let class_hash = declare_contract("UltraKeccakZKHonkVerifier");
     let dispatcher = IUltraKeccakZKHonkVerifierLibraryDispatcher { class_hash };
     let file = FileTrait::new("tests/proof_calldata.txt");
@@ -113,24 +119,38 @@ fn test_public_inputs_are_hash_then_positions_then_cards() {
 
     let public_inputs = dispatcher.verify_ultra_keccak_zk_honk_proof(calldata).unwrap();
 
-    // 1 deck_hash + 5 positions + 20 card coordinates. The adapter compares
-    // these against 52 felts of low/high pairs, so this length is what makes
-    // `expected.len() == actual.len() * 2` hold on the other side.
-    assert(public_inputs.len() == 26, 'expected 26 public inputs');
+    // 1 deck_hash + 1 chunk + 1 k_total + 76 card coordinates. The adapter
+    // compares these against felts of low/high pairs, so this length is what
+    // makes `expected.len() == actual.len() * 2` hold on the other side.
+    assert(public_inputs.len() == 79, 'expected 79 public inputs');
 
-    // deck_hash is the shuffle chain's hash_out for the a_0 shuffle.
+    // deck_hash is the shuffle chain's hash_out for the a_0 shuffle -- the
+    // same value circuits/shuffle_verifier/example_proof proves. The two
+    // circuits joining up is the whole point; a layout or encoding skew
+    // between them would otherwise only surface as an unopenable live deck.
     let deck_hash = *public_inputs.at(0);
-    assert(deck_hash.low == 0x278a7a93481827387028a145d9d06fb2, 'deck_hash.low');
-    assert(deck_hash.high == 0xae3743d9d68c4badd62e5685ceaed13, 'deck_hash.high');
+    assert(deck_hash.low == 0xa85df438603c5f8f125591cd11c3924c, 'deck_hash.low');
+    assert(deck_hash.high == 0x2d798b5c7a8e54145afc8db09e99c48f, 'deck_hash.high');
 
-    // Chunk 0 of the canonical order. open_deck derives these itself and does
-    // not take them from the caller, so a proof naming any other positions is
-    // rejected by the adapter's comparison rather than silently accepted.
-    let mut i: u32 = 0;
-    while i != 5 {
-        let pos = *public_inputs.at(1 + i);
-        assert(pos.high == 0, 'position fits a u128');
-        assert(pos.low == i.into(), 'positions are 0..4');
+    // The fixture is chunk 1 of an eight-seat table: k_total = 2*8 + 5 = 21.
+    assert(*public_inputs.at(1) == 1_u256, 'chunk is 1');
+    assert(*public_inputs.at(2) == 21_u256, 'k_total is 21');
+
+    // Chunk 1 covers raw slots 19..37, but only 19 and 20 are in play, so
+    // every slot from the third onwards repeats position 20. Pinning that
+    // here is what keeps the circuit's padding and open_deck's padding the
+    // same convention -- they derive it independently, and a disagreement
+    // would write the wrong ciphertext to the wrong deck position.
+    let mut i: u32 = 2;
+    while i != 19 {
+        let mut f: u32 = 0;
+        while f != 4 {
+            assert(
+                *public_inputs.at(3 + 4 * i + f) == *public_inputs.at(3 + 4 + f),
+                'padding repeats slot 20',
+            );
+            f += 1;
+        }
         i += 1;
     }
 }

@@ -36,33 +36,54 @@ global DECK_FIELDS: u32 = 208; // 4 * N
 // circuit is 8x larger than this one and verifies for only 5% more.
 //
 // So the constraint to optimise against is not gates, it is PUBLIC INPUTS,
-// which garaga caps at 99 (see the note above). This circuit publishes
-// 1 + 5K of them -- the deck hash, plus a position and four ciphertext fields
-// per slot. But garaga counts SIXTEEN more than the circuit declares -- the
-// pairing-point accumulator Honk carries -- so the real budget is 99 - 16 = 83,
-// and 1 + 5K <= 83 gives K = 16. (Trying 19 produced 96 + 16 = 112 and garaga
-// refused outright: "Name 'zk_honk_sumcheck_size_14_pub_112' is too long to fit
-// in a felt252".)
+// which garaga caps at 99: it names its verifier
+// "zk_honk_sumcheck_size_<log_n>_pub_<num_public_inputs>" and asserts that
+// fits a felt252 short string (31 chars). It counts SIXTEEN more than the
+// circuit declares -- the pairing-point accumulator Honk carries -- so the
+// real budget is 99 - 16 = 83.
 //
-// K = 16 still opens a three-seat table (14 slots) in ONE proof instead of
-// three, and a full fifteen-seat table in four instead of ten, for identical
-// checks.
-global K: u32 = 16;
+// Publishing K explicit positions costs 1 + 5K, which caps K at 16. DERIVING
+// them from `chunk` and `k_total` costs 3 + 4K instead, which allows 20; K is
+// 19 because `circuits/shuffle_open` -- which must agree with this circuit on
+// chunk arithmetic, since it proves chunk 0 and this one proves the rest --
+// also carries the shuffle's 4 public inputs, and 6 + 4K caps IT at 19.
+//
+// Deriving is sound because the in-play slots are CONTIGUOUS by construction:
+// 2 hole cards per seat followed by 5 community cards, so opening slot i of
+// chunk c is deck position K*c + i. The contract derives `k_total` from its
+// own storage and never takes it from the caller, exactly as it did when it
+// passed the positions themselves.
+//
+// K = 19 opens every table up to SEVEN seats in a single proof -- and since
+// `circuits/shuffle_open` folds chunk 0 into the last shuffle, such a table
+// needs no `open_deck` transaction at all.
+global K: u32 = 19;
+global CARD_FIELDS: u32 = 76; // 4 * K
 
 fn main(
     // -- public --
     deck_hash: pub Field, // must equal the shuffle chain's final hash_out
-    positions: pub [u32; K], // which deck slots are being opened
-    cards: pub [Field; 64], // 4 * K -- the ciphertexts claimed at those slots
+    chunk: pub u32, // which block of K in-play slots this opens
+    k_total: pub u32, // 2*max_seats + 5, derived on-chain from storage
+    cards: pub [Field; CARD_FIELDS], // the ciphertexts claimed at those slots
     // -- private --
     deck: [Field; DECK_FIELDS],
 ) {
     // Bind the private deck to the commitment the contract already holds.
     assert(Poseidon2::hash(deck, DECK_FIELDS) == deck_hash);
 
+    // Bounds first, so the derived index cannot leave the array and the u32
+    // arithmetic below cannot overflow.
+    assert(k_total != 0);
+    assert(k_total <= N);
+    assert(chunk < N);
+
     for i in 0..K {
-        let pos = positions[i];
-        assert(pos < N);
+        // A final partial chunk repeats the last in-play position rather than
+        // running past it -- the contract pads the same way, and proving the
+        // repeat is exactly as sound as proving any other slot.
+        let raw = K * chunk + i;
+        let pos = if raw < k_total { raw } else { k_total - 1 };
         let base = 4 * pos;
         assert(deck[base] == cards[4 * i]);
         assert(deck[base + 1] == cards[4 * i + 1]);

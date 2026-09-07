@@ -1,8 +1,58 @@
 # Deployments
 
-## Starknet Sepolia — 2026-09-06 (K=16 redeploy)
+## Starknet Sepolia — 2026-09-07 (fused shuffle+open redeploy)
 
-The real deployment. Public, permanent, and readable by anyone at
+The current deployment. Public, permanent, and readable by anyone at
+`sepolia.voyager.online`.
+
+| | class hash | address |
+|---|---|---|
+| `UltraKeccakZKHonkVerifier` (shuffle) | `0x052273e9c0b297c2aabe7f97fa2d10727a6ba113c44c69d9123eda277a3ea8c1` | `0x00657cdc419389c4232279fca6720d57322e624aa5e871c83f1f643e6cbc93a3` |
+| `UltraKeccakZKHonkVerifier` (**shuffle+open**, fused) | `0x02c3c713738112c195b07aabdab09499e3ee01083ee7ab87b943a3040928ccb8` | `0x0744674dec326575b224d6cdc02f422ee15a1b924d417468c408d6312e3c3d53` |
+| `UltraKeccakZKHonkVerifier` (deck open, **K=19**) | `0x022c7ee726115333ef86c172dea4d794aaa5eef01ed7922d83a40811b28e28e6` | `0x0348e33de66877c22a738d311e3b1236b2b445ae85f14be77a66e18d0c326272` |
+| `SchnorrKeyVerifier` | `0x05c89ad6970fcccd1ae338de0509b189f9a37004470898d451ebb4be92f8537e` | `0x02dc098996d82bc29a0a19977bb2f48cf5c154c4ddd0faef4baf9d7508300fca` |
+| `DleqVerifier` | `0x07258c8fea11a1b883e1bf8ec83d7d60898d33d09f6e7fd6e5e2efe06b793329` | `0x06c2ea05ca678a2a08cc4dac8738fe52245a9d3d72f2f445440e82d27e7f366c` |
+| `VerifierAdapter` | `0x0005ea1a1e9d87b175564e871c7c6570b8aab28f47066f74b812d6235a9c50be` | `0x0715e1e7ad8b01cf09a67e3b937fc44d435ee8ef37debc8289226a638bdf592b` |
+| `PokerGame` | `0x0116a6dac4c4f08b1c856d21a845f90d077089dce03e3aa945bfd7da69c71630` | `0x04d6ff62b16b206990c4b724dd491b0ca0e9ace785a00ba891f6c3c17ccae961` |
+
+**What is new here (docs/PROTOCOL.md §6.5).** The deck opening is folded into
+the LAST shuffler's proof: one circuit proves the final shuffle AND chunk 0 of
+the opening, joined by `hash_out` serving as both the shuffle's output
+commitment and the opening's `deck_hash`. It stays at log_n 17 — the same size
+as the plain shuffle — so it costs +4.4% and removes an entire ~587M-gas
+verification. Also here: `muck` and the dealt button removed, `SHOWDOWN_SECS`
+10 → 600, rising blinds, and `DECK_OPEN_K` 16 → 19 with positions derived
+in-circuit from `chunk` + `k_total` rather than published one by one.
+
+Three classes were re-used unchanged — the shuffle verifier, `SchnorrKeyVerifier`
+and `DleqVerifier` — which is why their class hashes match the 2026-09-06 row
+below and only their addresses moved. Four were new: the fused verifier, the
+K=19 deck-open verifier, `VerifierAdapter` (it takes five verifier addresses
+now) and `PokerGame`.
+
+Verified live after deploying: **94 entrypoints**, `submit_final_shuffle`
+present, `muck` and `reveal_draw_card` gone, and `get_shuffle_verifier()`
+returns the adapter above.
+
+### What it cost
+
+**391.39 STRK** (880.67 → 489.28 on the deploying account), against an
+estimate of 450–480. Four declares plus seven deploys.
+
+Deployed with
+`NETWORK=sepolia RPC=https://api.zan.top/public/starknet-sepolia/rpc/v0_10 ./scripts/deploy_local.sh`
+from the sncast account `sepolia`
+(`0x719eb8a2f1673e9afc94de57c69b69c6c0cfe555711f219c62ddcf953c78cac`).
+
+**The RPC override is not optional.** The script's default,
+`https://starknet-sepolia.drpc.org`, answers `starknet_chainId` but times out
+on `starknet_getClassHashAt` with *"Request timeout on the free plan"* — so
+the account preflight decides the deploying account "is not deployed" and
+refuses to start. The account is fine; the endpoint is not.
+
+## Starknet Sepolia — 2026-09-06 (K=16 redeploy) — SUPERSEDED
+
+The previous deployment. Public, permanent, and readable by anyone at
 `sepolia.voyager.online`. Unlike the devnet record below, these addresses do
 not come back if something is wiped — a redeploy produces new ones.
 

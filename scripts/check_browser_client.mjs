@@ -50,7 +50,7 @@ else ok('COOP: same-origin');
 if (coep !== 'require-corp') fail(`Cross-Origin-Embedder-Policy is ${coep}, expected require-corp`);
 else ok('COEP: require-corp');
 
-for (const name of ['shuffle.json', 'deck_open.json']) {
+for (const name of ['shuffle.json', 'deck_open.json', 'shuffle_open.json']) {
   const r = await fetch(`${base}/circuits/${name}`);
   if (!r.ok) fail(`/circuits/${name} -> ${r.status}; run scripts/build_client_circuits.mjs`);
   else ok(`/circuits/${name} is served`);

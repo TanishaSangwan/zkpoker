@@ -19,7 +19,8 @@ import { useStoreWallet } from '../components/Wallet/walletContext';
 import { useFrontendProvider } from '../components/client/provider/providerContext';
 import SelectWallet from '../components/client/WalletHandle/SelectWallet';
 import ConnectDevnet from '../components/client/WalletHandle/ConnectDevnet';
-import { useDevnetAccount } from '../components/client/provider/devnetAccountContext';
+import ConnectLocalKey from '../components/client/WalletHandle/ConnectLocalKey';
+import { useLocalAccount } from '../components/client/provider/localAccountContext';
 import { useTableState } from './useTableState';
 import { asU256, decodeError, erc20ApproveCall, executeAndWait, pgCall, pokerGameReader, shortHex, toFelt } from './contract';
 import Felt from './components/Felt';
@@ -34,23 +35,30 @@ export default function PokerPanel() {
   // Two possible signers, and PokerPanel is where they are reconciled.
   //
   // A real wallet gives a WalletAccountV6 through walletContext; a local
-  // devnet gives a plain starknet.js Account built from one of devnet's
-  // predeployed private keys (ConnectDevnet -> devnetAccountContext). Neither
+  // a local signer gives a plain starknet.js Account built from a raw private
+  // key -- one of devnet's predeployed accounts (ConnectDevnet) or a pasted
+  // testnet key (ConnectLocalKey), both via localAccountContext. Neither
   // store knows about the other, so if this component only read one of them --
   // as an earlier version of this rewrite did -- connecting to devnet appeared
   // to work and then every action said "connect a wallet first".
   //
-  // Devnet wins when both are present: if you have deliberately connected a
-  // local sandbox account, that is the one you meant to act as.
+  // The local account wins when both are present: if you have deliberately
+  // connected one, that is the one you meant to act as.
   const walletAccount = useStoreWallet((s) => s.account);
   const walletAddress = useStoreWallet((s) => s.address);
-  const devnetAccount = useDevnetAccount((s) => s.account);
-  const devnetAddress = useDevnetAccount((s) => s.address);
-  const devnetConnected = useDevnetAccount((s) => s.connected);
-  const account = (devnetConnected ? devnetAccount : walletAccount) as typeof walletAccount;
-  const address = devnetConnected ? devnetAddress : walletAddress;
+  const localAccount = useLocalAccount((s) => s.account);
+  const localAddress = useLocalAccount((s) => s.address);
+  const localConnected = useLocalAccount((s) => s.connected);
+  const localProviderIndex = useLocalAccount((s) => s.providerIndex);
   const providerIndex = useFrontendProvider((s) => s.currentFrontendProviderIndex);
   const setProviderIndex = useFrontendProvider((s) => s.setCurrentFrontendProviderIndex);
+  // A locally-signed Account is bound to the RpcProvider it was built against,
+  // and nothing about it says so. Switching the network selector must therefore
+  // drop it rather than sign the next call against the wrong chain -- which is
+  // not a hypothetical, because devnet reports the same chain id as Sepolia.
+  const localUsable = localConnected && localProviderIndex === providerIndex;
+  const account = (localUsable ? localAccount : walletAccount) as typeof walletAccount;
+  const address = localUsable ? localAddress : walletAddress;
   const provider = constants.myFrontendProviders[providerIndex];
   const contract = constants.pokerGameAddressForIndex(providerIndex);
   const deployed = !!contract && BigInt(contract) !== 0n;
@@ -96,20 +104,38 @@ export default function PokerPanel() {
 
   // Polls faster once the showdown clock is running.
   //
-  // Six seconds is fine for a hand that is waiting on people, and far too slow
-  // for a ten-second deadline: a seat could learn it was on turn with four
-  // seconds left, and its co-signers -- who only join a reveal once it IS that
-  // seat's turn -- would learn even later. Every seat at the table then showed
-  // one card and was mucked before the second.
-  const [pollMs, setPollMs] = useState(6000);
+  // Six seconds is fine for a hand that is waiting on people, and it used to be
+  // far too slow for the showdown: the deadline was ten seconds PER SEAT, so a
+  // seat could learn it was on turn with four left, and its co-signers -- who
+  // only joined a reveal once it was that seat's turn -- learned even later.
+  // Every seat at the table showed one card and was mucked before the second.
+  // The clock is 600s for the whole table now and there is no turn order, so
+  // this is far less load-bearing than it was; it still helps a showdown feel
+  // live rather than polled.
+  //
+  // ── and slower on a public chain ──────────────────────────────────────
+  // One "refresh" is not one request: useTableState reads the table, every
+  // seat, every community card and the shuffle chain, which is ~60
+  // starknet_calls for a two-seat table. Two tabs at 1.5s is therefore ~80
+  // requests a second, which a free public endpoint answers with
+  //
+  //   15: You reached Public endpoint rate limit
+  //
+  // and the page reports as a failed read. The devnet numbers are kept for
+  // devnet, where blocks are instant and the node is on localhost; against a
+  // real chain, polling faster than blocks arrive buys nothing anyway.
+  const localChain = providerIndex === constants.DEVNET_PROVIDER_INDEX;
+  const idleMs = localChain ? 6000 : 12000;
+  const liveMs = localChain ? 1500 : 3000;
+  const [pollMs, setPollMs] = useState(idleMs);
   const { state: table, refresh, loading, error: readError } = useTableState({
     address: contract, provider, tableId, intervalMs: pollMs,
   });
 
   useEffect(() => {
     const live = !!table?.showdownStarted && !table?.settled;
-    setPollMs(live ? 1500 : 6000);
-  }, [table?.showdownStarted, table?.settled]);
+    setPollMs(live ? liveMs : idleMs);
+  }, [table?.showdownStarted, table?.settled, liveMs, idleMs]);
 
   const yourSeat = useMemo(() => {
     if (!table || !address) return null;
@@ -269,7 +295,7 @@ export default function PokerPanel() {
                 : 'single-threaded proving (no cross-origin isolation)'}
           </div>
         </div>
-        <ConnectDevnet />
+        {providerIndex === constants.DEVNET_PROVIDER_INDEX ? <ConnectDevnet /> : <ConnectLocalKey />}
         <div className={styles.tableIdRow}>
           <input className={styles.input} value={tableIdInput}
             onChange={(e) => setTableIdInput(e.target.value)} placeholder="table id" />
@@ -429,6 +455,10 @@ function CreateTable(p: any) {
   // Editable, because the right stakes for a table are the table's business.
   const [smallBlind, setSmallBlind] = useState('10');
   const [bigBlind, setBigBlind] = useState('20');
+  // Hands per rung of the rising ladder. Empty or 0 means fixed blinds, which
+  // is what the two fields above are for -- the two structures are exclusive,
+  // and the contract refuses a schedule of 0.
+  const [levelHands, setLevelHands] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -444,7 +474,15 @@ function CreateTable(p: any) {
           table_id: tableId, token, buy_in: buyIn, max_seats: maxSeats,
         }),
       ];
-      if (BigInt(bigBlind || '0') > 0n) {
+      // A ladder replaces the fixed pair rather than adding to it: with a
+      // schedule set the stored small/big are never read, so writing them
+      // would only leave two numbers on chain that describe nothing.
+      const ladder = Number(levelHands || '0');
+      if (ladder > 0) {
+        calls.push(pgCall(contract, 'set_blind_schedule', {
+          table_id: tableId, hands_per_level: String(ladder),
+        }));
+      } else if (BigInt(bigBlind || '0') > 0n) {
         calls.push(pgCall(contract, 'set_blinds', {
           table_id: tableId, small_blind: smallBlind, big_blind: bigBlind,
         }));
@@ -458,7 +496,7 @@ function CreateTable(p: any) {
     <div className={styles.section}>
       <div className={styles.sectionHead}>
         <div className={styles.sectionTitle}>No table {shortHex(tableId)} yet</div>
-        <div className={styles.sectionHint}>Create it. You become the host — which opens the shuffle and sets the stakes, and nothing else. The button is drawn from the deck, not handed out.</div>
+        <div className={styles.sectionHint}>Create it. You become the host — which opens the shuffle and sets the stakes, and nothing else. The button is a rule, not a gift: lowest occupied seat, then one to the left every hand.</div>
       </div>
       <div className={styles.grid3}>
         <Field label="buy-in token" value={token} onChange={setToken} />
@@ -466,6 +504,7 @@ function CreateTable(p: any) {
         <Field label="max seats" value={maxSeats} onChange={setMaxSeats} />
         <Field label="small blind" value={smallBlind} onChange={setSmallBlind} />
         <Field label="big blind" value={bigBlind} onChange={setBigBlind} />
+        <Field label="rising blinds: hands per level" value={levelHands} onChange={setLevelHands} />
       </div>
       <div className={styles.actionsRow}>
         <button className={uni.btn} disabled={busy || !account} onClick={create}>
@@ -473,9 +512,12 @@ function CreateTable(p: any) {
         </button>
         <span className={styles.fieldHint}>
           Every seat shuffles, so a bigger table means a longer chain: k = n proofs before the
-          first card, roughly {5} s each in this browser. The button is not appointed: once the
-          deck opens every seat draws one card from it and the highest takes it, then it moves
-          one seat each hand. Set both blinds to 0 for a table without a structure.
+          first card, roughly {5} s each in this browser. The button starts on the lowest occupied
+          seat and moves one seat each hand — no card is drawn for it, which saves a decryption
+          round and an on-chain proof per seat. Set both blinds to 0 for a table without a
+          structure. Fill in <b>hands per level</b> instead to climb the ladder — 10/20, 20/40,
+          30/60, 50/100, 100/200, 200/400, 300/600, holding at the top — which overrides the two
+          fixed amounts and can only be set before the table&apos;s first hand.
         </span>
       </div>
       {err ? <pre className={uni.receiptNote}>{err}</pre> : null}
@@ -533,7 +575,7 @@ function YourHand({ table, yourSeat, cards }: any) {
         <div className={styles.caution}>
           This seat committed to a hand but this browser holds no opening for it — dealt in a
           different browser, or storage was cleared. Without the opening you cannot show at
-          showdown, and mucking forfeits.
+          showdown, and a seat that does not show before the clock runs out forfeits.
         </div>
       ) : null}
     </div>

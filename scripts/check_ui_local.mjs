@@ -51,11 +51,15 @@ await new Promise((r) => setTimeout(r, 1500));
 
 // React tracks input value on the DOM node, so assigning .value directly is
 // ignored -- the native setter has to be used for onChange to see it.
-await p.evaluate(() => {
+// TABLE is passed in, not closed over: the callback is serialised and run in
+// the PAGE, which has no access to this module's scope. Without the parameter
+// it throws ReferenceError inside the browser and the check dies before it
+// reads a single signal.
+await p.evaluate((table) => {
   const i = document.querySelector('input');
   if (i) {
     const set = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-    set.call(i, TABLE);
+    set.call(i, table);
     i.dispatchEvent(new Event('input', { bubbles: true }));
   }
   [...document.querySelectorAll('button')].find((x) => x.textContent.trim() === 'Open')?.click();

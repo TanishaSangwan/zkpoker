@@ -201,22 +201,20 @@ export function communityPosition(k: number, maxSeats: number): number {
 }
 
 /**
- * Where seat `s` draws for the button.
+ * Every position a hand actually uses: two hole cards per seat, then the five
+ * community cards. Nothing sits past them.
  *
- * It is an ordinary deck position on purpose. The draw that decides who
- * posts which blind comes out of the same committed, shuffle-proven deck as
- * every other card and needs the same n-of-n decryption -- so the button is
- * decided by a card nobody could choose, see early, or fake.
+ * There used to be one more slot per seat, holding a card each player drew to
+ * decide the first button. It cost a decryption round and an on-chain DLEQ per
+ * seat, and it pushed the total past the sixteen slots one deck-opening proof
+ * covers -- so a four- or five-seat table paid for a whole second ~587M-gas
+ * proof to work out who was the dealer. The button is a rule now: lowest
+ * occupied seat, rotating from there.
  */
-export function drawPosition(seat: number, maxSeats: number): number {
-  return 2 * maxSeats + 5 + seat;
-}
-
 export function inPlayPositions(maxSeats: number): number[] {
   const holes = Array.from({ length: 2 * maxSeats }, (_, i) => i);
   const community = Array.from({ length: 5 }, (_, k) => 2 * maxSeats + k);
-  const draws = Array.from({ length: maxSeats }, (_, s) => 2 * maxSeats + 5 + s);
-  return [...holes, ...community, ...draws];
+  return [...holes, ...community];
 }
 
 export { DECK_SIZE, G, N };

@@ -62,6 +62,11 @@ pub trait IShuffleVerifier<TState> {
     //
     // public_inputs = [deck_hash, positions.., ciphertexts..]
     fn verify_deck_opening(self: @TState, proof: Span<felt252>, public_inputs: Span<felt252>) -> bool;
+    // The last shuffle and the first chunk of the opening in ONE proof.
+    // See circuits/shuffle_open/src/main.nr.
+    fn verify_shuffle_and_open(
+        self: @TState, proof: Span<felt252>, public_inputs: Span<felt252>,
+    ) -> bool;
 
     // Verifies a decryption share against the joint key AND that removing
     // it from the ciphertext yields `claimed_card`. The card index is
@@ -636,6 +641,33 @@ pub trait IPokerGame<TState> {
         proof: Span<felt252>,
     );
 
+    // The LAST link of the chain, which also opens chunk 0 of the deck.
+    //
+    // submit_shuffle refuses the final turn and this refuses every other
+    // one, so the two are not interchangeable and the chain has exactly one
+    // shape. That is what makes "shuffle_complete implies chunk 0 is proved"
+    // an invariant rather than a hope -- and it holds even under timeout,
+    // because claim_shuffle_timeout voids the table rather than completing
+    // the chain short.
+    //
+    // Why fuse them (docs/PROTOCOL.md §6.4): on-chain Honk verification is
+    // ~587M gas FIXED per proof plus ~13.2M per sumcheck round, so a hand's
+    // cost tracks the NUMBER of proofs. The last shuffler already holds the
+    // final deck privately and already pays to hash it -- its `hash_out` IS
+    // the opening's `deck_hash` -- so the opening constraints ride along for
+    // ~3% more gas instead of a second ~587M verification. Measured at
+    // 269.7M -> 277.7M in the verifiers' own tests.
+    //
+    // `ciphertexts` is 4*DECK_OPEN_K u256, exactly as open_deck takes.
+    fn submit_final_shuffle(
+        ref self: TState,
+        table_id: felt252,
+        new_commitment: u256,
+        deck: Span<u256>,
+        ciphertexts: Span<u256>,
+        proof: Span<felt252>,
+    );
+
     // Ends the hand when the published deck does not match the commitment it
     // was supposed to open. Callable only by the seat whose turn it is, only
     // once the chain has a real publisher (position 0 consumes the canonical
@@ -783,16 +815,18 @@ pub trait IPokerGame<TState> {
     // what it proves.
     //
     // Opened in CHUNKS of DECK_OPEN_K positions, `chunk` counting from 0,
-    // strictly in order. Round 8 finding I: circuits/deck_open fixes K = 16
-    // at compile time, so its verifier exposes exactly 1 + K + 4K = 26
-    // public inputs. Deriving the position set from max_seats (the fix
-    // above) made the contract's input vector 1 + k + 4k long for
-    // k = 2*max_seats + 5 -- 46 values on a two-seat table -- which the
-    // pinned verifier can never match, so open_deck failed on every real
-    // table while the mock verifier in tests waved it through. Raising K
-    // is not an option either: garaga 1.1.0 caps a verifier at 99 public
-    // inputs, so 1 + 5k <= 99 allows only k <= 19, i.e. seven seats.
+    // strictly in order. Round 8 finding I: circuits/deck_open fixes K at
+    // compile time, so its verifier exposes a fixed number of public inputs.
+    // Deriving the position set from max_seats (the fix above) made the
+    // contract's input vector 1 + k + 4k long for k = 2*max_seats + 5 --
+    // which the pinned verifier can never match, so open_deck failed on
+    // every real table while the mock verifier in tests waved it through.
     // Chunking keeps one circuit for every table size.
+    //
+    // CHUNK 0 IS NOT OPENED HERE. It is proved by the last shuffler as part
+    // of submit_final_shuffle, which fuses it into the shuffle proof and
+    // saves an entire ~587M-gas verification. So this starts at chunk 1, and
+    // a table of seven seats or fewer (k_total <= 19) never calls it at all.
     //
     // `ciphertexts` is 4*DECK_OPEN_K u256 for this chunk's positions. A
     // final partial chunk is padded by repeating the last in-play
@@ -862,18 +896,15 @@ pub trait IPokerGame<TState> {
     // call this rather than only the dealer.
     //
     // Contenders are the non-folded seats. If exactly one remains everyone
-    // else folded and it wins uncontested with no cards shown. Otherwise
-    // every contender must have revealed both hole cards; a player who
-    // declines has mucked and simply cannot win, which is how mucking stays
-    // legal without a separate entrypoint.
+    // else folded and it wins uncontested with no cards shown. Otherwise every
+    // contender shows both hole cards and the best hand takes the pot.
+    //
+    // Refuses until the showdown is actually over -- every contender shown, or
+    // the deadline past. Without that check anyone could call this in the same
+    // block the river closed, before a single reveal had landed, and every
+    // contender would score as unshown: the pot would void and the caller
+    // could do it to any hand they were losing.
     fn settle_from_reveals(ref self: TState, table_id: felt252);
-
-    // Decline to show, at your own turn. Legal and sometimes correct: a player
-    // facing a hand that already beats them gains nothing by exposing their
-    // own. A mucked seat cannot win, and its chips stay in the pot -- so
-    // mucking forfeits rather than blocking, and the hand still resolves for
-    // everyone else.
-    fn muck(ref self: TState, table_id: felt252, seat: felt252);
 
     // ── Blinds and the button ───────────────────────────────────────────
     //
@@ -883,22 +914,16 @@ pub trait IPokerGame<TState> {
     // create_table.
     fn set_blinds(ref self: TState, table_id: felt252, small_blind: u128, big_blind: u128);
 
-    // Reveals a seat's high-card draw. The draw picks the FIRST button: each
-    // seat gets one extra deck position, they are shown publicly like
-    // community cards, and the highest card takes the button. Cards in a deck
-    // are distinct, so there is never a tie to break.
+    // Switch the table to the rising ladder: 10/20, 20/40, 30/60, 50/100,
+    // 100/200, 200/400, 300/600, one rung every `hands_per_level` hands,
+    // clamped at the top rung. Overrides set_blinds while it is set.
     //
-    // Callable by anyone: these shares are public by design, exactly like a
-    // community card's, and the proof is what makes the value binding.
-    fn reveal_draw_card(
-        ref self: TState,
-        table_id: felt252,
-        seat: felt252,
-        share_x: u256,
-        share_y: u256,
-        claimed_card: u8,
-        proof: Span<felt252>,
-    );
+    // Dealer-only and only before the table's first hand deals, for the same
+    // reason set_blinds is: a blind structure that can move after cards exist
+    // is a lever on a hand in progress. The rungs themselves are fixed in the
+    // contract rather than passed in, so the dealer chooses the pace and not
+    // the price.
+    fn set_blind_schedule(ref self: TState, table_id: felt252, hands_per_level: u32);
 
     // Posts the small and big blinds once the button is known. Permissionless:
     // it takes no input beyond the table, the amounts and the seats are fixed
@@ -911,11 +936,10 @@ pub trait IPokerGame<TState> {
     // decision, and making it the dealer's job would hand the dealer a
     // stall.
     //
-    // THIS is the cycle. The high-card draw picks the button once, for the
-    // first hand; from then on it simply moves one occupied seat to the
-    // left, which is what rotates the blinds. Re-drawing every hand would
-    // be both wrong (a draw is a one-off, not a per-hand ritual) and
-    // expensive (a full extra reveal round per seat per hand).
+    // THIS is the cycle. begin_shuffle puts the button on the lowest occupied
+    // seat for the table's first hand; from then on it simply moves one
+    // occupied seat to the left, which is what rotates the blinds -- and, with
+    // a schedule set, what climbs the blind ladder.
     fn start_next_hand(ref self: TState, table_id: felt252);
 
     // Blind and button views.
@@ -923,20 +947,27 @@ pub trait IPokerGame<TState> {
     fn get_big_blind(self: @TState, table_id: felt252) -> u128;
     fn get_button(self: @TState, table_id: felt252) -> felt252;
     fn get_button_set(self: @TState, table_id: felt252) -> bool;
-    fn get_draw_card(self: @TState, table_id: felt252, seat: felt252) -> u8;
-    fn get_draw_revealed(self: @TState, table_id: felt252, seat: felt252) -> bool;
     fn get_blinds_posted(self: @TState, table_id: felt252) -> bool;
     fn get_hand_number(self: @TState, table_id: felt252) -> u32;
+    // 0 when the table plays fixed blinds; otherwise hands per rung.
+    fn get_blind_level_hands(self: @TState, table_id: felt252) -> u32;
+    // Which rung this hand is playing. Always 0 on a fixed-blind table.
+    fn get_blind_level(self: @TState, table_id: felt252) -> u32;
 
-    // Muck the seat that is out of time. Callable by anyone, like every other
-    // timeout here: the seat holding everyone up will not report itself.
+    // Close the showdown once its deadline has passed: every contender that
+    // has not shown both cards forfeits. Callable by anyone, like every other
+    // timeout here -- the seat holding everyone up will not report itself.
+    //
+    // This is the ONLY way a seat stops being a contender without showing.
+    // There is no voluntary muck: a player who would rather not expose a
+    // loser can still simply not reveal, but they pay for it in wall-clock
+    // time instead of getting a button that ends the hand early for everyone.
     fn claim_showdown_timeout(ref self: TState, table_id: felt252);
 
-    // Showdown views: whose turn it is to show, by when, and who has mucked.
-    fn get_showdown_turn(self: @TState, table_id: felt252) -> felt252;
+    // Showdown views: by when, and who forfeited.
     fn get_showdown_deadline(self: @TState, table_id: felt252) -> u64;
     fn get_showdown_started(self: @TState, table_id: felt252) -> bool;
-    fn get_seat_mucked(self: @TState, table_id: felt252, seat: felt252) -> bool;
+    fn get_seat_forfeited(self: @TState, table_id: felt252, seat: felt252) -> bool;
 
     // Act without putting anything in. Legal only when there is nothing to
     // call -- facing a bet you must call, raise or fold. A street with no
@@ -1074,6 +1105,11 @@ pub mod PokerGame {
         pub const BAD_CARDS: felt252 = 'BAD_CARDS';
         // Round 8: create_table's max_seats is 0, or exceeds MAX_TABLE_SEATS.
         pub const BAD_MAX_SEATS: felt252 = 'BAD_MAX_SEATS';
+        // submit_shuffle was handed the chain's LAST turn, which must go
+        // through submit_final_shuffle so chunk 0 of the opening is proved
+        // with it; and the mirror case, submit_final_shuffle on any other.
+        pub const USE_FINAL_SHUFFLE: felt252 = 'USE_FINAL_SHUFFLE';
+        pub const NOT_FINAL_SHUFFLE: felt252 = 'NOT_FINAL_SHUFFLE';
         // Round 8: join_table's seat doesn't parse as a u32, or is >=
         // the table's max_seats.
         pub const BAD_SEAT: felt252 = 'BAD_SEAT';
@@ -1127,6 +1163,7 @@ pub mod PokerGame {
         pub const ALREADY_MUCKED: felt252 = 'SEAT_ALREADY_MUCKED';
         pub const NO_BUTTON: felt252 = 'BUTTON_NOT_DRAWN_YET';
         pub const BUTTON_ALREADY: felt252 = 'BUTTON_ALREADY_SET';
+        pub const BLINDS_LOCKED: felt252 = 'BLIND_SCHEDULE_LOCKED';
         pub const DRAW_INCOMPLETE: felt252 = 'DRAW_NOT_COMPLETE';
         pub const BLINDS_POSTED: felt252 = 'BLINDS_ALREADY_POSTED';
         pub const NEED_BLINDS: felt252 = 'BLINDS_NOT_POSTED';
@@ -1171,9 +1208,13 @@ pub mod PokerGame {
     // shuffled_deck positions 2N/2N+1, community cards after all seats'
     // slots) always has room for all 5 community cards in a 52-card deck:
     // 2*MAX_TABLE_SEATS + 5 <= 52.
-    // 3*max_seats + 5 <= 52: two hole cards and one high-card draw per
-    // seat, plus the five community cards. The draw is what lowered this
-    // from 23 -- a 16-seat table could not deal itself a button.
+    // 2*max_seats + 5 <= 52: two hole cards per seat plus the five community
+    // cards. This was 3*max_seats + 5 while every seat drew a card to pick the
+    // first button; that draw is gone (the button starts at the lowest
+    // occupied seat and rotates), which frees one deck position per seat.
+    // 15 is kept as the cap even though the layout now allows 23: k=n means
+    // every seat added is another ~587M-gas shuffle proof, so the binding
+    // limit past this point is cost, not deck space.
     const MAX_TABLE_SEATS: u32 = 15;
 
     // Poseidon2(a_0), the commitment to the protocol's one and only
@@ -1220,7 +1261,7 @@ pub mod PokerGame {
     // inputs than the circuit declares (the pairing-point accumulator) against
     // a hard cap of 99, and this circuit publishes 1 + 5K, so 1 + 5K + 16 <= 99
     // gives K <= 16.4.
-    const DECK_OPEN_K: u32 = 16;
+    const DECK_OPEN_K: u32 = 19;
 
     // V2: how long one player has to publish their shuffle before the
     // table can be voided (docs/V2-MENTAL-POKER.md §6). Much shorter than
@@ -1253,14 +1294,54 @@ pub mod PokerGame {
     // is folded and play continues.
     const ACTION_SECS: u64 = 600;
 
-    // How long a seat has to show its hand once it is that seat's turn at
-    // showdown. Short on purpose: showing needs no proving work the player has
-    // not already done -- the shares were exchanged at dealing time and the
-    // aggregate is assembled from them -- so the only thing this waits for is
-    // a person deciding whether to expose a loser. A hand that stalls here
-    // stalls everyone, and the cost of running out is exactly what a player
-    // choosing to muck would have picked anyway.
-    const SHOWDOWN_SECS: u64 = 10;
+    // How long the WHOLE showdown has to finish, from the moment the river
+    // betting round closes. One clock for the table, not one per seat.
+    //
+    // Was 10 seconds per seat, on the argument that showing needs no proving
+    // work the player has not already done. That argument is true and still
+    // beside the point: it accounts for the player and not for the chain. A
+    // reveal is a transaction, and on a public chain a transaction is the
+    // whole cost. Measured over a three-handed hand on Sepolia, the TIGHTEST
+    // gap between any two consecutive transactions was 11s and reveals ran
+    // 11-32s, so a seat could not show inside the deadline even with a client
+    // that did everything right and did it instantly. Every seat forfeited,
+    // settle_from_reveals found no contenders, and the only way to get the pot
+    // back was to void the table. The clock was not tight, it was unmeetable.
+    //
+    // 600s, the same as ACTION_SECS, which waits on the same two things: a
+    // person, and a transaction.
+    const SHOWDOWN_SECS: u64 = 600;
+
+    // Rungs on the blind ladder (blind_level_amounts).
+    const BLIND_LEVELS: u32 = 7;
+
+    // The blind ladder, in the table token's base units.
+    //
+    // A table that calls set_blind_schedule climbs one rung every N hands and
+    // stops climbing at the top rung -- it does not wrap, because wrapping
+    // would take a tournament from 300/600 back to 10/20 and quietly undo
+    // every stack it had just decided.
+    //
+    // Fixed rather than caller-supplied: a dealer-chosen ladder is a dealer
+    // lever over other players' stacks, and set_blinds already covers the case
+    // where a table wants to name its own numbers.
+    fn blind_level_amounts(level: u32) -> (u128, u128) {
+        if level == 0 {
+            (10, 20)
+        } else if level == 1 {
+            (20, 40)
+        } else if level == 2 {
+            (30, 60)
+        } else if level == 3 {
+            (50, 100)
+        } else if level == 4 {
+            (100, 200)
+        } else if level == 5 {
+            (200, 400)
+        } else {
+            (300, 600)
+        }
+    }
 
     #[storage]
     struct Storage {
@@ -1406,6 +1487,10 @@ pub mod PokerGame {
         // Blind structure. Amounts are per table and fixed for its life.
         small_blind: Map<felt252, u128>,
         big_blind: Map<felt252, u128>,
+        // Hands per rung of the blind ladder; 0 means the table plays the
+        // fixed pair set_blinds stored. Table state, not hand state -- so it
+        // is deliberately absent from reset_hand.
+        blind_level_hands: Map<felt252, u32>,
         // The dealer button. Position, not authority -- it decides who posts
         // which blind and who acts first, and nothing else. The seat holding
         // it has no more power than any other.
@@ -1413,18 +1498,15 @@ pub mod PokerGame {
         button_set: Map<felt252, bool>,
         // The high-card draw that picks the first button. One extra deck
         // position per seat, revealed publicly like a community card.
-        draw_card: Map<(felt252, felt252), u8>,
-        draw_revealed: Map<(felt252, felt252), bool>,
         blinds_posted: Map<felt252, bool>,
         hand_number: Map<felt252, u32>,
         // Showdown: whose turn it is to show, and by when.
         showdown_started: Map<felt252, bool>,
-        showdown_turn: Map<felt252, felt252>,
         showdown_deadline: Map<felt252, u64>,
         // A seat that declined to show, or ran out of time. Distinct from
         // folded: its chips are in the pot and stay there, it simply cannot
         // win. Cards speak, and a hand nobody showed says nothing.
-        seat_mucked: Map<(felt252, felt252), bool>,
+        seat_forfeited: Map<(felt252, felt252), bool>,
         // Seat index whose turn it is to act.
         action_turn: Map<felt252, u32>,
         // .. and when that action is due. Rewritten every time the turn
@@ -1498,9 +1580,9 @@ pub mod PokerGame {
         Shuffled: Shuffled,
         DeckPublished: DeckPublished,
         DeckDisputed: DeckDisputed,
-        ShowdownTurn: ShowdownTurn,
+        ShowdownStarted: ShowdownStarted,
         ShowdownComplete: ShowdownComplete,
-        Mucked: Mucked,
+        SeatForfeited: SeatForfeited,
         ShuffleComplete: ShuffleComplete,
         TableVoided: TableVoided,
         Checked: Checked,
@@ -1514,7 +1596,7 @@ pub mod PokerGame {
         StakeForfeited: StakeForfeited,
         ActionTimedOut: ActionTimedOut,
         BlindsSet: BlindsSet,
-        DrawCardRevealed: DrawCardRevealed,
+        BlindScheduleSet: BlindScheduleSet,
         ButtonSet: ButtonSet,
         BlindsPosted: BlindsPosted,
         BlindPosted: BlindPosted,
@@ -1663,10 +1745,11 @@ pub mod PokerGame {
     // commitment it is chained to. Names both sides; convicts neither, because
     // the contract cannot check the claim (§7).
     #[derive(Drop, starknet::Event)]
-    pub struct ShowdownTurn {
+    pub struct ShowdownStarted {
         #[key]
         pub table_id: felt252,
-        pub seat: felt252,
+        // Every contender must have shown both hole cards by this timestamp.
+        pub deadline: u64,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -1676,12 +1759,10 @@ pub mod PokerGame {
     }
 
     #[derive(Drop, starknet::Event)]
-    pub struct Mucked {
+    pub struct SeatForfeited {
         #[key]
         pub table_id: felt252,
         pub seat: felt252,
-        // True when the seat ran out of time rather than choosing to muck.
-        pub by_timeout: bool,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -1810,11 +1891,10 @@ pub mod PokerGame {
     }
 
     #[derive(Drop, starknet::Event)]
-    pub struct DrawCardRevealed {
+    pub struct BlindScheduleSet {
         #[key]
         pub table_id: felt252,
-        pub seat: felt252,
-        pub card: u8,
+        pub hands_per_level: u32,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -1822,8 +1902,6 @@ pub mod PokerGame {
         #[key]
         pub table_id: felt252,
         pub seat: felt252,
-        // true when the high-card draw picked it, false when it rotated.
-        pub by_draw: bool,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -1861,6 +1939,180 @@ pub mod PokerGame {
     // Finding 1). Factored out in round 9 rather than duplicated.
     #[generate_trait]
     impl InternalImpl of InternalTrait {
+        // Everything submit_shuffle and submit_final_shuffle check before
+        // they diverge, plus the reentrancy lock they both hold. Returns the
+        // turn being played and the seat playing it.
+        //
+        // Factored out rather than duplicated deliberately: these guards are
+        // the shuffle chain's entire integrity story, and two copies drifting
+        // apart is exactly the kind of gap that only shows up once someone is
+        // exploiting the weaker one. The caller releases the lock.
+        fn open_shuffle_turn(
+            ref self: ContractState, table_id: felt252, deck: Span<u256>,
+        ) -> (u32, felt252) {
+            // 52 cards x 4 coordinates. Checked before anything else so a
+            // malformed deck costs the caller a revert, not a verification.
+            assert(deck.len() == DECK_FIELDS, errors::BAD_DECK_LEN);
+            assert(self.table_exists.entry(table_id).read(), errors::NO_TABLE);
+            assert(!self.table_voided.entry(table_id).read(), errors::TABLE_VOIDED);
+            assert(self.shuffle_started.entry(table_id).read(), errors::SHUFFLE_NOT_STARTED);
+            assert(!self.shuffle_complete.entry(table_id).read(), errors::SHUFFLE_DONE);
+            // Late submissions are refused even before anyone calls
+            // claim_shuffle_timeout, so the forfeit outcome can't be
+            // dodged by front-running it with the missing shuffle.
+            assert(
+                get_block_timestamp() <= self.shuffle_deadline.entry(table_id).read(),
+                errors::DEADLINE_PASSED,
+            );
+
+            // Strict turn order: the chain only means anything if each
+            // shuffle consumes the previous player's output.
+            let turn = self.shuffle_turn.entry(table_id).read();
+            let seat = self.shuffle_order.entry((table_id, turn)).read();
+            assert(
+                get_caller_address() == self.seat_owner.entry((table_id, seat)).read(),
+                errors::NOT_YOUR_TURN,
+            );
+
+            // Security: the caller makes an external call to the verifier.
+            // The verifier address is constructor-pinned so it is not
+            // caller-controlled the way bet()'s table_token is, but every
+            // other function that calls out here takes the lock (round 3
+            // finding 3, round 4 finding 2, round 8 finding H) and an
+            // inconsistent guard is the kind of gap a later change turns
+            // into a real one. This one guards the chain head itself:
+            // deck_commitment and shuffle_turn are written after the call
+            // returns.
+            assert(!self.reentrancy_lock.read(), errors::REENTRANCY);
+            self.reentrancy_lock.write(true);
+
+            (turn, seat)
+        }
+
+        // The shuffle statement's four public inputs, as u256 low/high pairs.
+        // The merged circuit exposes these same four first, then appends the
+        // opening's -- so both call sites build the head identically.
+        fn shuffle_public_inputs(
+            self: @ContractState, table_id: felt252, current: u256, new_commitment: u256,
+        ) -> Array<felt252> {
+            let jx = self.joint_pk_x.entry(table_id).read();
+            let jy = self.joint_pk_y.entry(table_id).read();
+            array![
+                jx.low.into(),
+                jx.high.into(),
+                jy.low.into(),
+                jy.high.into(),
+                current.low.into(),
+                current.high.into(),
+                new_commitment.low.into(),
+                new_commitment.high.into(),
+            ]
+        }
+
+        // Advance the chain: store the new head, record what was published,
+        // move the turn on, and close the chain if this was the last link.
+        fn record_shuffle(
+            ref self: ContractState,
+            table_id: felt252,
+            turn: u32,
+            seat: felt252,
+            new_commitment: u256,
+            deck: Span<u256>,
+        ) {
+            self.deck_commitment.entry(table_id).write(new_commitment);
+
+            // Record what was actually published. Starknet's own Poseidon over
+            // the calldata -- NOT the BN254 commitment above, which Cairo
+            // cannot recompute -- so a client can confirm it read the same
+            // bytes this transaction carried. Emitting the hash rather than
+            // the 416 felts keeps the event small; the deck itself is already
+            // public in the calldata.
+            let mut deck_felts: Array<felt252> = array![];
+            let mut d: u32 = 0;
+            while d != deck.len() {
+                let v = *deck.at(d);
+                deck_felts.append(v.low.into());
+                deck_felts.append(v.high.into());
+                d += 1;
+            }
+            let deck_hash = core::poseidon::poseidon_hash_span(deck_felts.span());
+            self.published_deck_hash.entry(table_id).write(deck_hash);
+            self.published_deck_seat.entry(table_id).write(seat);
+
+            let next = turn + 1;
+            self.shuffle_turn.entry(table_id).write(next);
+            self.emit(Shuffled { table_id, position: turn, seat, commitment: new_commitment });
+            self.emit(DeckPublished { table_id, position: turn, seat, deck_hash });
+
+            if next == self.shuffle_order_len.entry(table_id).read() {
+                self.shuffle_complete.entry(table_id).write(true);
+                self.emit(ShuffleComplete { table_id, final_commitment: new_commitment });
+            } else {
+                self
+                    .shuffle_deadline
+                    .entry(table_id)
+                    .write(get_block_timestamp() + SHUFFLE_TURN_SECS);
+            }
+        }
+
+        // Every in-play deck position: 2*max_seats hole slots followed by the
+        // 5 community slots. Derived from storage, never from a caller -- see
+        // open_deck's interface comment for the griefing hole that closed.
+        //
+        // This used to carry one more slot per seat for a high-card draw that
+        // picked the first button; the button is deterministic now (lowest
+        // occupied seat, rotating from there), which drops one deck position
+        // AND one aggregate-DLEQ verification per seat.
+        fn in_play_positions(self: @ContractState, table_id: felt252) -> u32 {
+            2 * self.table_max_seats.entry(table_id).read() + 5
+        }
+
+        // Write one opened chunk's ciphertexts to their deck positions, and
+        // flip deck_opened once the last chunk has landed.
+        //
+        // Shared by open_deck and submit_final_shuffle so that a chunk proved
+        // inside the fused shuffle proof is stored on exactly the same terms
+        // as one proved on its own -- including the padding convention, which
+        // the circuit derives independently and which would silently write
+        // the wrong ciphertext to the wrong position if the two disagreed.
+        fn store_open_chunk(
+            ref self: ContractState,
+            table_id: felt252,
+            chunk: u32,
+            k_total: u32,
+            ciphertexts: Span<u256>,
+        ) {
+            let mut n: u32 = 0;
+            while n != DECK_OPEN_K {
+                // A final partial chunk repeats the last in-play position
+                // rather than running past it. The circuit proves the repeat
+                // exactly as it proves any other slot, and storing it twice
+                // rewrites an identical value.
+                let raw = DECK_OPEN_K * chunk + n;
+                let pos = if raw < k_total {
+                    raw
+                } else {
+                    k_total - 1
+                };
+                let b = n * 4;
+                self.opened_c1_x.entry((table_id, pos)).write(*ciphertexts.at(b));
+                self.opened_c1_y.entry((table_id, pos)).write(*ciphertexts.at(b + 1));
+                self.opened_c2_x.entry((table_id, pos)).write(*ciphertexts.at(b + 2));
+                self.opened_c2_y.entry((table_id, pos)).write(*ciphertexts.at(b + 3));
+                self.position_opened.entry((table_id, pos)).write(true);
+                n += 1;
+            }
+
+            let chunks = (k_total + DECK_OPEN_K - 1) / DECK_OPEN_K;
+            let next = chunk + 1;
+            self.deck_open_chunk.entry(table_id).write(next);
+            if next == chunks {
+                self.deck_opened.entry(table_id).write(true);
+                let deck_hash = self.deck_commitment.entry(table_id).read();
+                self.emit(DeckOpened { table_id, positions: k_total, deck_hash });
+            }
+        }
+
         // Shared by reveal_community_card and reveal_hole_card. Builds the
         // DLEQ public inputs from STORED state -- joint key and the
         // ciphertext bound by the opening proof -- so the only thing the
@@ -1897,7 +2149,6 @@ pub mod PokerGame {
             self.published_deck_hash.entry(table_id).write(0);
             self.published_deck_seat.entry(table_id).write(0);
             self.showdown_started.entry(table_id).write(false);
-            self.showdown_turn.entry(table_id).write(0);
             self.showdown_deadline.entry(table_id).write(0);
             self.blinds_posted.entry(table_id).write(false);
             self.share_defaulter_plus_one.entry(table_id).write(0);
@@ -1945,14 +2196,12 @@ pub mod PokerGame {
             while s != max_seats {
                 let seat: felt252 = s.into();
                 self.seat_folded.entry((table_id, seat)).write(false);
-                self.seat_mucked.entry((table_id, seat)).write(false);
+                self.seat_forfeited.entry((table_id, seat)).write(false);
                 // Cleared because the money is gone: award() has already
                 // moved the pot into pending_payout, so leaving a stale
                 // contribution here would let reclaim_stalled_bet pay it a
                 // second time out of the next hand's pot.
                 self.seat_contributed.entry((table_id, seat)).write(0);
-                self.draw_revealed.entry((table_id, seat)).write(false);
-                self.draw_card.entry((table_id, seat)).write(0);
                 let mut slot: u32 = 0;
                 while slot != 2 {
                     self.hole_revealed.entry((table_id, seat, slot)).write(false);
@@ -2106,6 +2355,52 @@ pub mod PokerGame {
             self.emit(Settled { table_id, winner_count: winners.len() });
         }
 
+        // Does this table have a forced-bet structure at all?
+        //
+        // Must go through current_blinds, not through the stored pair. A table
+        // on the ladder never writes small_blind/big_blind -- its amounts are
+        // derived from the hand count -- so reading storage directly reports
+        // "no blinds" and lets bet, fold and check run before post_blinds. The
+        // seat left of the big blind could then call a bet nobody had posted.
+        fn has_blinds(self: @ContractState, table_id: felt252) -> bool {
+            let (_, big) = self.current_blinds(table_id);
+            big != 0
+        }
+
+        // Which rung of the ladder this hand plays. Always 0 on a table with
+        // no schedule, so a fixed-blind table reads as level 0 rather than as
+        // something undefined.
+        fn blind_level_of(self: @ContractState, table_id: felt252) -> u32 {
+            let per = self.blind_level_hands.entry(table_id).read();
+            if per == 0 {
+                return 0;
+            }
+            let level = self.hand_number.entry(table_id).read() / per;
+            if level >= BLIND_LEVELS {
+                BLIND_LEVELS - 1
+            } else {
+                level
+            }
+        }
+
+        // The blinds THIS hand plays: the fixed pair set_blinds stored, or the
+        // ladder rung the hand count has reached.
+        //
+        // Derived rather than written into storage at the start of each hand,
+        // and that is the point: hand_number only moves in start_next_hand, so
+        // the pair is constant for the whole of a hand by construction. There
+        // is no window in which post_blinds and a later read could disagree,
+        // and nothing to keep in sync in reset_hand.
+        fn current_blinds(self: @ContractState, table_id: felt252) -> (u128, u128) {
+            if self.blind_level_hands.entry(table_id).read() == 0 {
+                return (
+                    self.small_blind.entry(table_id).read(),
+                    self.big_blind.entry(table_id).read(),
+                );
+            }
+            blind_level_amounts(self.blind_level_of(table_id))
+        }
+
         // Stored 0 means the epoch has never been bumped; it reads as 1.
         // Keeping 0 as "unset" lets seat_acted_epoch default to 0 and
         // never collide with a live epoch.
@@ -2227,84 +2522,46 @@ pub mod PokerGame {
         // already seen a better hand may muck rather than expose their own, so
         // WHO reveals first is worth something. Enforcing it client-side only
         // would make it advisory, so it is enforced here.
+        // Opens the showdown: ONE deadline for the table, and no turn order.
+        //
+        // Show order used to matter, and the reason it did was mucking: a
+        // player who had already seen a better hand could decline to expose
+        // their own, so who had to speak first was worth something and the
+        // contract enforced the Hold'em rule. Mucking is gone -- every
+        // contender shows -- so ordering bought nothing and cost a great deal.
+        // It serialised n reveals behind a per-seat clock on a chain where a
+        // single transaction takes tens of seconds, which is what made the old
+        // ten-second deadline unmeetable in practice (see SHOWDOWN_SECS).
+        //
+        // Contenders now reveal concurrently, from their own accounts, in any
+        // order, against one clock that starts here.
         fn start_showdown(ref self: ContractState, table_id: felt252) {
             if self.showdown_started.entry(table_id).read() {
                 return;
             }
             self.showdown_started.entry(table_id).write(true);
-
-            // The river is the street just completed -- SHOWDOWN_STREET - 1.
-            let river = SHOWDOWN_STREET - 1;
-            let aggressor_plus_one = self.street_aggressor.entry((table_id, river)).read();
-            let max_seats = self.table_max_seats.entry(table_id).read();
-
-            let mut first: felt252 = 0;
-            let mut found = false;
-            if aggressor_plus_one != 0 {
-                let seat = aggressor_plus_one - 1;
-                if self.is_active(table_id, seat) {
-                    first = seat;
-                    found = true;
-                }
-            }
-            if !found {
-                let mut i: u32 = 0;
-                while i != max_seats {
-                    let seat: felt252 = i.into();
-                    if self.is_active(table_id, seat) {
-                        first = seat;
-                        found = true;
-                        break;
-                    }
-                    i += 1;
-                };
-            }
-            if found {
-                self.showdown_turn.entry(table_id).write(first);
-                self
-                    .showdown_deadline
-                    .entry(table_id)
-                    .write(get_block_timestamp() + SHOWDOWN_SECS);
-                self.emit(ShowdownTurn { table_id, seat: first });
-            }
+            let deadline = get_block_timestamp() + SHOWDOWN_SECS;
+            self.showdown_deadline.entry(table_id).write(deadline);
+            self.emit(ShowdownStarted { table_id, deadline });
         }
 
-        // Next seat still in the hand that has neither shown both cards nor
-        // mucked, walking clockwise from the current one.
-        fn advance_showdown_turn(ref self: ContractState, table_id: felt252) {
+        // Contenders that still owe a hand: still in, not forfeited, and not
+        // yet showing both hole cards. Zero means the showdown is finished.
+        fn showdown_outstanding(self: @ContractState, table_id: felt252) -> u32 {
             let max_seats = self.table_max_seats.entry(table_id).read();
-            let current = self.showdown_turn.entry(table_id).read();
-            let current_u32: u32 = current.try_into().expect(errors::BAD_SEAT);
-
-            let mut step: u32 = 1;
-            let mut next: felt252 = 0;
-            let mut found = false;
-            while step != max_seats + 1 {
-                let idx = (current_u32 + step) % max_seats;
-                let seat: felt252 = idx.into();
+            let mut n: u32 = 0;
+            let mut i: u32 = 0;
+            while i != max_seats {
+                let seat: felt252 = i.into();
                 if self.is_active(table_id, seat)
-                    && !self.seat_mucked.entry((table_id, seat)).read()
+                    && !self.seat_forfeited.entry((table_id, seat)).read()
                     && !(self.hole_revealed.entry((table_id, seat, 0)).read()
                         && self.hole_revealed.entry((table_id, seat, 1)).read()) {
-                    next = seat;
-                    found = true;
-                    break;
+                    n += 1;
                 }
-                step += 1;
+                i += 1;
             };
-
-            if found {
-                self.showdown_turn.entry(table_id).write(next);
-                self
-                    .showdown_deadline
-                    .entry(table_id)
-                    .write(get_block_timestamp() + SHOWDOWN_SECS);
-                self.emit(ShowdownTurn { table_id, seat: next });
-            } else {
-                // Everyone has shown or mucked. Nothing left to wait for.
-                self.showdown_deadline.entry(table_id).write(0);
-                self.emit(ShowdownComplete { table_id });
-            }
+            n
         }
 
         fn reset_turn(ref self: ContractState, table_id: felt252) {
@@ -2338,17 +2595,14 @@ pub mod PokerGame {
 
         // Has the card at this deck position already been opened? Maps a
         // flat position back to the two revealed-flags storage keeps:
-        // hole slots 0..2*max_seats-1, then the five community slots.
+        // hole slots 0..2*max_seats-1, then the five community slots. Nothing
+        // sits past those: the in-play block is exactly 2*max_seats + 5, and a
+        // position outside it is not one this table ever opened.
         fn position_revealed(self: @ContractState, table_id: felt252, pos: u32) -> bool {
             let max_seats = self.table_max_seats.entry(table_id).read();
             let community_base = 2 * max_seats;
-            let draw_base = community_base + 5;
-            if pos >= draw_base {
-                // The high-card draws sit past the community block. Without
-                // this branch they folded onto community indices 5.. , which
-                // are never set -- so a share withheld on a draw card could
-                // be accused forever, even after the card was revealed.
-                self.draw_revealed.entry((table_id, (pos - draw_base).into())).read()
+            if pos >= community_base + 5 {
+                false
             } else if pos >= community_base {
                 self.community_revealed.entry((table_id, pos - community_base)).read()
             } else {
@@ -2627,7 +2881,7 @@ pub mod PokerGame {
             // forced bets are in would let the seat left of the big blind
             // call a bet nobody has posted. Tables with no structure
             // (small = big = 0, which is every pre-blinds table) skip this.
-            if self.big_blind.entry(table_id).read() != 0 {
+            if self.has_blinds(table_id) {
                 assert(self.blinds_posted.entry(table_id).read(), errors::NEED_BLINDS);
             }
             // Turn order. Without this a player could act out of position
@@ -2784,7 +3038,7 @@ pub mod PokerGame {
             // pot is stranded until the reclaim timeout -- a way to burn a
             // pot nobody could then collect.
             assert(self.active_count(table_id) > 1, errors::LAST_PLAYER);
-            if self.big_blind.entry(table_id).read() != 0 {
+            if self.has_blinds(table_id) {
                 assert(self.blinds_posted.entry(table_id).read(), errors::NEED_BLINDS);
             }
             // Pass the turn BEFORE folding: advance_turn skips inactive
@@ -3299,6 +3553,35 @@ pub mod PokerGame {
             };
             assert(position != 0, errors::NO_PARTICIPANTS);
 
+            // THE FIRST BUTTON, fixed here, once per table.
+            //
+            // It used to be dealt: every seat drew an extra card from the deck
+            // and the high card took the button. That cost one deck position
+            // and one aggregate-DLEQ verification per seat -- 5.64 STRK of a
+            // measured 114 STRK three-handed hand -- and, worse, pushed
+            // k_total past the sixteen slots one deck-opening proof covers, so
+            // a four- or five-seat table paid for a SECOND ~587M-gas opening
+            // proof purely to decide who was the dealer.
+            //
+            // shuffle_order position 0 is the lowest occupied seat, which is
+            // what the walk above just computed. Nobody has to trust anyone
+            // for this: seat order is public before a single card exists, so
+            // the rule is knowable in advance by everyone and steerable by
+            // nobody. What it does hand out is a first-come advantage -- the
+            // player who takes the lowest seat gets position on the first hand
+            // -- which is visible, equal-opportunity, and gone by hand two,
+            // since start_next_hand rotates from here.
+            //
+            // Deriving it from the deck commitment instead would be worse, not
+            // better: the last shuffler sees the chain before it commits and
+            // could re-randomise until the hash named the seat it wanted.
+            if !self.button_set.entry(table_id).read() {
+                let first_seat = self.shuffle_order.entry((table_id, 0)).read();
+                self.button.entry(table_id).write(first_seat);
+                self.button_set.entry(table_id).write(true);
+                self.emit(ButtonSet { table_id, seat: first_seat });
+            }
+
             // THE JOINT KEY IS NOW CHECKED, NOT TRUSTED.
             //
             // joint_pk_x/y are dealer-supplied parameters. Nothing on-chain
@@ -3348,87 +3631,73 @@ pub mod PokerGame {
             deck: Span<u256>,
             proof: Span<felt252>,
         ) {
-            // 52 cards x 4 coordinates. Checked before anything else so a
-            // malformed deck costs the caller a revert, not a verification.
-            assert(deck.len() == DECK_FIELDS, errors::BAD_DECK_LEN);
-            assert(self.table_exists.entry(table_id).read(), errors::NO_TABLE);
-            assert(!self.table_voided.entry(table_id).read(), errors::TABLE_VOIDED);
-            assert(self.shuffle_started.entry(table_id).read(), errors::SHUFFLE_NOT_STARTED);
-            assert(!self.shuffle_complete.entry(table_id).read(), errors::SHUFFLE_DONE);
-            // Late submissions are refused even before anyone calls
-            // claim_shuffle_timeout, so the forfeit outcome can't be
-            // dodged by front-running it with the missing shuffle.
-            assert(get_block_timestamp() <= self.shuffle_deadline.entry(table_id).read(), errors::DEADLINE_PASSED);
+            let (turn, seat) = self.open_shuffle_turn(table_id, deck);
 
-            // Strict turn order: the chain only means anything if each
-            // shuffle consumes the previous player's output.
-            let turn = self.shuffle_turn.entry(table_id).read();
-            let seat = self.shuffle_order.entry((table_id, turn)).read();
-            assert(get_caller_address() == self.seat_owner.entry((table_id, seat)).read(), errors::NOT_YOUR_TURN);
+            // The last link opens the deck at the same time, so it proves a
+            // different statement against a different verifier class. Sending
+            // it here would verify the shuffle and silently skip chunk 0,
+            // leaving a complete chain with an unopened deck that open_deck
+            // can no longer produce (it starts at chunk 1). Refuse instead,
+            // so there is exactly one way to close the chain.
+            let last = self.shuffle_order_len.entry(table_id).read() - 1;
+            assert(turn != last, errors::USE_FINAL_SHUFFLE);
 
-            // Security: this makes an external call to the verifier. The
-            // verifier address is constructor-pinned so it is not
-            // caller-controlled the way bet()'s table_token is, but every
-            // other function that calls out here takes the lock (round 3
-            // finding 3, round 4 finding 2, round 8 finding H) and an
-            // inconsistent guard is the kind of gap a later change turns
-            // into a real one. This one guards the chain head itself:
-            // deck_commitment and shuffle_turn are written after the call
-            // returns.
-            assert(!self.reentrancy_lock.read(), errors::REENTRANCY);
-            self.reentrancy_lock.write(true);
-
-            let current = self.deck_commitment.entry(table_id).read();
             // The proof is checked against the CURRENT chain head, read
             // from storage — never against a commitment the caller
             // supplies — so a valid proof for some other starting deck is
             // useless here.
+            let current = self.deck_commitment.entry(table_id).read();
             let verifier = IShuffleVerifierDispatcher { contract_address: self.shuffle_verifier.read() };
-            let jx = self.joint_pk_x.entry(table_id).read();
-            let jy = self.joint_pk_y.entry(table_id).read();
-            let public_inputs = array![
-                jx.low.into(),
-                jx.high.into(),
-                jy.low.into(),
-                jy.high.into(),
-                current.low.into(),
-                current.high.into(),
-                new_commitment.low.into(),
-                new_commitment.high.into(),
-            ];
+            let mut public_inputs = self.shuffle_public_inputs(table_id, current, new_commitment);
             assert(verifier.verify_shuffle(proof, public_inputs.span()), errors::BAD_PROOF);
 
-            self.deck_commitment.entry(table_id).write(new_commitment);
+            self.record_shuffle(table_id, turn, seat, new_commitment, deck);
+            self.reentrancy_lock.write(false);
+        }
 
-            // Record what was actually published. Starknet's own Poseidon over
-            // the calldata -- NOT the BN254 commitment above, which Cairo
-            // cannot recompute -- so a client can confirm it read the same
-            // bytes this transaction carried. Emitting the hash rather than
-            // the 416 felts keeps the event small; the deck itself is already
-            // public in the calldata.
-            let mut deck_felts: Array<felt252> = array![];
-            let mut d: u32 = 0;
-            while d != deck.len() {
-                let v = *deck.at(d);
-                deck_felts.append(v.low.into());
-                deck_felts.append(v.high.into());
-                d += 1;
+        fn submit_final_shuffle(
+            ref self: ContractState,
+            table_id: felt252,
+            new_commitment: u256,
+            deck: Span<u256>,
+            ciphertexts: Span<u256>,
+            proof: Span<felt252>,
+        ) {
+            let (turn, seat) = self.open_shuffle_turn(table_id, deck);
+
+            let last = self.shuffle_order_len.entry(table_id).read() - 1;
+            assert(turn == last, errors::NOT_FINAL_SHUFFLE);
+            assert(ciphertexts.len() == DECK_OPEN_K * 4, errors::BAD_OPENING_LEN);
+
+            // Same four shuffle inputs as above, then the opening's two.
+            // `new_commitment` serves as BOTH the shuffle's hash_out and the
+            // opening's deck_hash -- the circuit exposes one field for both,
+            // which is exactly the binding that makes one proof enough.
+            let current = self.deck_commitment.entry(table_id).read();
+            let k_total = self.in_play_positions(table_id);
+            let mut inputs = self.shuffle_public_inputs(table_id, current, new_commitment);
+            let chunk0: u256 = 0;
+            inputs.append(chunk0.low.into());
+            inputs.append(chunk0.high.into());
+            let kt: u256 = k_total.into();
+            inputs.append(kt.low.into());
+            inputs.append(kt.high.into());
+            let mut j: u32 = 0;
+            while j != ciphertexts.len() {
+                let v = *ciphertexts.at(j);
+                inputs.append(v.low.into());
+                inputs.append(v.high.into());
+                j += 1;
             }
-            let deck_hash = core::poseidon::poseidon_hash_span(deck_felts.span());
-            self.published_deck_hash.entry(table_id).write(deck_hash);
-            self.published_deck_seat.entry(table_id).write(seat);
 
-            let next = turn + 1;
-            self.shuffle_turn.entry(table_id).write(next);
-            self.emit(Shuffled { table_id, position: turn, seat, commitment: new_commitment });
-            self.emit(DeckPublished { table_id, position: turn, seat, deck_hash });
+            let verifier = IShuffleVerifierDispatcher { contract_address: self.shuffle_verifier.read() };
+            assert(verifier.verify_shuffle_and_open(proof, inputs.span()), errors::BAD_PROOF);
 
-            if next == self.shuffle_order_len.entry(table_id).read() {
-                self.shuffle_complete.entry(table_id).write(true);
-                self.emit(ShuffleComplete { table_id, final_commitment: new_commitment });
-            } else {
-                self.shuffle_deadline.entry(table_id).write(get_block_timestamp() + SHUFFLE_TURN_SECS);
-            }
+            self.record_shuffle(table_id, turn, seat, new_commitment, deck);
+            // Chunk 0 is now proved against the commitment this very call
+            // just wrote, so it is stored on exactly the same terms open_deck
+            // stores its chunks on.
+            self.store_open_chunk(table_id, 0, k_total, ciphertexts);
             self.reentrancy_lock.write(false);
         }
 
@@ -3715,49 +3984,35 @@ pub mod PokerGame {
             assert(!self.reentrancy_lock.read(), errors::REENTRANCY);
             self.reentrancy_lock.write(true);
 
-            // Every in-play position, derived: 2*max_seats hole slots
-            // followed by 5 community slots. Not caller-supplied -- see the
-            // interface comment for the griefing hole that closed.
-            let max_seats = self.table_max_seats.entry(table_id).read();
-            // 2 hole cards per seat, 5 community, and ONE high-card draw per
-            // seat that picks the first button. The draw cards are ordinary
-            // deck positions so they inherit the same guarantee as every other
-            // card: bound to the committed deck by the opening proof, and only
-            // readable once every party has contributed a share.
-            let k_total = 3 * max_seats + 5;
-            let chunks = (k_total + DECK_OPEN_K - 1) / DECK_OPEN_K;
+            let k_total = self.in_play_positions(table_id);
 
             // Strictly in order, and `chunk` is checked rather than
             // trusted, so the caller still chooses nothing about which
             // positions get opened -- only whether to do the next honest
-            // piece of work.
+            // piece of work. deck_open_chunk is already 1 by the time the
+            // chain completes, because submit_final_shuffle proved chunk 0,
+            // so this can never be asked to redo it.
             assert(chunk == self.deck_open_chunk.entry(table_id).read(), errors::BAD_CHUNK);
             assert(ciphertexts.len() == DECK_OPEN_K * 4, errors::BAD_OPENING_LEN);
 
             // The deck hash comes from STORAGE, never from the caller. That
             // is the whole binding: a proof about any other deck cannot
             // verify against the commitment the shuffle chain left here.
+            //
+            // Positions are no longer named one by one: the circuit derives
+            // them from `chunk` and `k_total`, which is what shrank this
+            // vector enough for the opening to fuse into the shuffle proof.
+            // Both values still come from here, not the caller.
             let deck_hash = self.deck_commitment.entry(table_id).read();
             let mut inputs: Array<felt252> = array![];
             inputs.append(deck_hash.low.into());
             inputs.append(deck_hash.high.into());
-            let mut i: u32 = 0;
-            while i != DECK_OPEN_K {
-                // A final partial chunk repeats the last in-play position
-                // rather than running past it. The circuit proves the
-                // repeat exactly as it proves any other slot, and storing
-                // it twice rewrites an identical value.
-                let raw = DECK_OPEN_K * chunk + i;
-                let p = if raw < k_total {
-                    raw
-                } else {
-                    k_total - 1
-                };
-                let pos: u256 = p.into();
-                inputs.append(pos.low.into());
-                inputs.append(pos.high.into());
-                i += 1;
-            }
+            let c: u256 = chunk.into();
+            inputs.append(c.low.into());
+            inputs.append(c.high.into());
+            let kt: u256 = k_total.into();
+            inputs.append(kt.low.into());
+            inputs.append(kt.high.into());
             let mut j: u32 = 0;
             while j != ciphertexts.len() {
                 let v = *ciphertexts.at(j);
@@ -3771,29 +4026,7 @@ pub mod PokerGame {
             };
             assert(verifier.verify_deck_opening(proof, inputs.span()), errors::BAD_OPENING);
 
-            let mut n: u32 = 0;
-            while n != DECK_OPEN_K {
-                let raw = DECK_OPEN_K * chunk + n;
-                let pos = if raw < k_total {
-                    raw
-                } else {
-                    k_total - 1
-                };
-                let b = n * 4;
-                self.opened_c1_x.entry((table_id, pos)).write(*ciphertexts.at(b));
-                self.opened_c1_y.entry((table_id, pos)).write(*ciphertexts.at(b + 1));
-                self.opened_c2_x.entry((table_id, pos)).write(*ciphertexts.at(b + 2));
-                self.opened_c2_y.entry((table_id, pos)).write(*ciphertexts.at(b + 3));
-                self.position_opened.entry((table_id, pos)).write(true);
-                n += 1;
-            }
-
-            let next = chunk + 1;
-            self.deck_open_chunk.entry(table_id).write(next);
-            if next == chunks {
-                self.deck_opened.entry(table_id).write(true);
-                self.emit(DeckOpened { table_id, positions: k_total, deck_hash });
-            }
+            self.store_open_chunk(table_id, chunk, k_total, ciphertexts);
             self.reentrancy_lock.write(false);
         }
 
@@ -3915,17 +4148,13 @@ pub mod PokerGame {
             let committed = self.hole_commitment.entry((table_id, seat, slot)).read();
             assert(committed != 0, errors::NO_HOLE_COMMITMENT);
 
-            // Showdown only, and in order.
-            //
-            // Showing is information -- a player who has seen a better hand
-            // may muck rather than expose their own -- so who reveals first is
-            // worth something, and a rule enforced only by clients is a rule
-            // that does not exist. The order itself is the Hold'em one: last
-            // aggressor on the river, else the first seat still in the hand,
-            // then clockwise.
+            // Showdown only. Order is deliberately NOT enforced: with no muck
+            // there is no decision left for show order to protect, and every
+            // contender can reveal at once instead of queueing behind the
+            // slowest one. A seat that already forfeited on the clock is out
+            // for the hand and cannot show its way back in.
             assert(self.showdown_started.entry(table_id).read(), errors::NOT_SHOWDOWN);
-            assert(!self.seat_mucked.entry((table_id, seat)).read(), errors::ALREADY_MUCKED);
-            assert(self.showdown_turn.entry(table_id).read() == seat, errors::NOT_SHOWDOWN_TURN);
+            assert(!self.seat_forfeited.entry((table_id, seat)).read(), errors::ALREADY_MUCKED);
 
             // Reopen the dealing-time commitment. Without this the player
             // could substitute a different share set after seeing the
@@ -3962,18 +4191,13 @@ pub mod PokerGame {
             self.reentrancy_lock.write(false);
             self.emit(HoleCardRevealed { table_id, seat, slot, card });
 
-            // A hand is shown once BOTH cards are up. Until then the seat
-            // keeps the turn -- half a hand is not a showdown.
-            if self.hole_revealed.entry((table_id, seat, 0)).read()
-                && self.hole_revealed.entry((table_id, seat, 1)).read() {
-                self.advance_showdown_turn(table_id);
-            } else {
-                // Fresh clock for the second card, so a slow second reveal is
-                // not punished by the first one's remaining seconds.
-                self
-                    .showdown_deadline
-                    .entry(table_id)
-                    .write(get_block_timestamp() + SHOWDOWN_SECS);
+            // The showdown ends the moment the last contender's second card is
+            // up. Clearing the deadline is what tells settle_from_reveals it
+            // may run, and stops claim_showdown_timeout from firing on a table
+            // that has nothing left to wait for.
+            if self.showdown_outstanding(table_id) == 0 {
+                self.showdown_deadline.entry(table_id).write(0);
+                self.emit(ShowdownComplete { table_id });
             }
         }
 
@@ -4085,7 +4309,7 @@ pub mod PokerGame {
             let high = self.street_high.entry((table_id, street)).read();
             let put_in = self.street_contributed.entry((table_id, street, seat)).read();
             assert(put_in == high, errors::MUST_CALL);
-            if self.big_blind.entry(table_id).read() != 0 {
+            if self.has_blinds(table_id) {
                 assert(self.blinds_posted.entry(table_id).read(), errors::NEED_BLINDS);
             }
             self.mark_acted(table_id, seat);
@@ -4148,82 +4372,29 @@ pub mod PokerGame {
             self.emit(BlindsSet { table_id, small_blind, big_blind });
         }
 
-        fn reveal_draw_card(
-            ref self: ContractState,
-            table_id: felt252,
-            seat: felt252,
-            share_x: u256,
-            share_y: u256,
-            claimed_card: u8,
-            proof: Span<felt252>,
+        fn set_blind_schedule(
+            ref self: ContractState, table_id: felt252, hands_per_level: u32,
         ) {
             assert(self.table_exists.entry(table_id).read(), errors::NO_TABLE);
-            assert(!self.table_voided.entry(table_id).read(), errors::TABLE_VOIDED);
             assert(!self.table_settled.entry(table_id).read(), errors::ALREADY_SETTLED);
-            assert(self.deck_opened.entry(table_id).read(), errors::DECK_NOT_OPENED);
-            assert(!self.button_set.entry(table_id).read(), errors::BUTTON_ALREADY);
-            assert(!self.draw_revealed.entry((table_id, seat)).read(), errors::CARD_REVEALED);
+            assert(!self.table_voided.entry(table_id).read(), errors::TABLE_VOIDED);
             assert(
-                self.seat_owner.entry((table_id, seat)).read().is_non_zero(), errors::EMPTY_SEAT,
+                get_caller_address() == self.table_dealer.entry(table_id).read(),
+                errors::NOT_DEALER,
             );
-
-            let max_seats = self.table_max_seats.entry(table_id).read();
-            let seat_u32: u32 = seat.try_into().expect(errors::BAD_SEAT);
-            let pos = 2 * max_seats + 5 + seat_u32;
-            assert(self.position_opened.entry((table_id, pos)).read(), errors::POSITION_NOT_OPENED);
-
-            assert(!self.reentrancy_lock.read(), errors::REENTRANCY);
-            self.reentrancy_lock.write(true);
-            let card = self.verify_reveal_at(table_id, pos, share_x, share_y, claimed_card, proof);
-            self.draw_card.entry((table_id, seat)).write(card);
-            self.draw_revealed.entry((table_id, seat)).write(true);
-            self.reentrancy_lock.write(false);
-            self.emit(DrawCardRevealed { table_id, seat, card });
-
-            // Once every seated player has drawn, the highest card takes the
-            // button.
-            //
-            // Rank decides, and SUIT breaks a tie. Both halves are needed.
-            // Rank alone is not a total order -- the deck holds four cards of
-            // every rank, so two players drawing a king is not merely
-            // possible, it is the common case at a full table -- and a tie
-            // here has no answer: the contract would have to either pick
-            // arbitrarily or demand a re-draw, and a re-draw costs a full
-            // extra reveal round per seat. Real card rooms break exactly this
-            // tie by suit for exactly this reason. Cards are distinct, so
-            // (rank, suit) is total and the button is always decided in one
-            // pass. card = suit*13 + rank, so comparing the raw index after
-            // rank is comparing suit.
-            let mut all_in = true;
-            let mut best_seat: felt252 = 0;
-            let mut best_rank: u8 = 0;
-            let mut best_card: u8 = 0;
-            let mut found = false;
-            let mut i: u32 = 0;
-            while i != max_seats {
-                let s: felt252 = i.into();
-                if self.seat_owner.entry((table_id, s)).read().is_non_zero() {
-                    if !self.draw_revealed.entry((table_id, s)).read() {
-                        all_in = false;
-                        break;
-                    }
-                    let c = self.draw_card.entry((table_id, s)).read();
-                    let rank = c % 13;
-                    if !found || rank > best_rank || (rank == best_rank && c > best_card) {
-                        best_rank = rank;
-                        best_card = c;
-                        best_seat = s;
-                        found = true;
-                    }
-                }
-                i += 1;
-            };
-            if all_in && found {
-                self.button.entry(table_id).write(best_seat);
-                self.button_set.entry(table_id).write(true);
-                self.emit(ButtonSet { table_id, seat: best_seat, by_draw: true });
-            }
+            // Stricter than set_blinds, which only requires that the current
+            // hand has not started shuffling. A ladder is a whole-table
+            // structure that every stack at the table is played against, so it
+            // is fixed before the table's FIRST card, not merely before this
+            // hand's -- otherwise a dealer could watch two hands, decide who is
+            // winning, and re-time the levels against them.
+            assert(!self.shuffle_started.entry(table_id).read(), errors::SHUFFLE_STARTED);
+            assert(self.hand_number.entry(table_id).read() == 0, errors::BLINDS_LOCKED);
+            assert(hands_per_level != 0, errors::BAD_BLINDS);
+            self.blind_level_hands.entry(table_id).write(hands_per_level);
+            self.emit(BlindScheduleSet { table_id, hands_per_level });
         }
+
 
         fn post_blinds(ref self: ContractState, table_id: felt252) {
             assert(self.table_exists.entry(table_id).read(), errors::NO_TABLE);
@@ -4233,8 +4404,7 @@ pub mod PokerGame {
             assert(!self.blinds_posted.entry(table_id).read(), errors::BLINDS_POSTED);
             assert(self.table_street.entry(table_id).read() == 0, errors::BETTING_CLOSED);
 
-            let small = self.small_blind.entry(table_id).read();
-            let big = self.big_blind.entry(table_id).read();
+            let (small, big) = self.current_blinds(table_id);
             self.blinds_posted.entry(table_id).write(true);
             if small == 0 && big == 0 {
                 // A table with no blind structure still needs this called, so
@@ -4282,8 +4452,9 @@ pub mod PokerGame {
             assert(!self.table_voided.entry(table_id).read(), errors::TABLE_VOIDED);
             assert(self.table_settled.entry(table_id).read(), errors::NOT_SETTLED);
             assert(!self.reentrancy_lock.read(), errors::REENTRANCY);
-            // The button must exist before it can move. On a table that has
-            // never drawn, reveal_draw_card is still the way in.
+            // The button must exist before it can move. begin_shuffle puts it
+            // on the lowest occupied seat for the table's first hand, so this
+            // can only fail on a table that never dealt at all.
             assert(self.button_set.entry(table_id).read(), errors::NO_BUTTON);
 
             let button = self.next_occupied(table_id, self.button.entry(table_id).read());
@@ -4291,15 +4462,23 @@ pub mod PokerGame {
             let n = self.hand_number.entry(table_id).read() + 1;
             self.hand_number.entry(table_id).write(n);
             self.reset_hand(table_id);
-            self.emit(ButtonSet { table_id, seat: button, by_draw: false });
+            self.emit(ButtonSet { table_id, seat: button });
             self.emit(HandStarted { table_id, hand_number: n, button });
         }
 
         fn get_small_blind(self: @ContractState, table_id: felt252) -> u128 {
-            self.small_blind.entry(table_id).read()
+            let (small, _) = self.current_blinds(table_id);
+            small
         }
         fn get_big_blind(self: @ContractState, table_id: felt252) -> u128 {
-            self.big_blind.entry(table_id).read()
+            let (_, big) = self.current_blinds(table_id);
+            big
+        }
+        fn get_blind_level_hands(self: @ContractState, table_id: felt252) -> u32 {
+            self.blind_level_hands.entry(table_id).read()
+        }
+        fn get_blind_level(self: @ContractState, table_id: felt252) -> u32 {
+            self.blind_level_of(table_id)
         }
         fn get_button(self: @ContractState, table_id: felt252) -> felt252 {
             self.button.entry(table_id).read()
@@ -4307,34 +4486,11 @@ pub mod PokerGame {
         fn get_button_set(self: @ContractState, table_id: felt252) -> bool {
             self.button_set.entry(table_id).read()
         }
-        fn get_draw_card(self: @ContractState, table_id: felt252, seat: felt252) -> u8 {
-            self.draw_card.entry((table_id, seat)).read()
-        }
-        fn get_draw_revealed(self: @ContractState, table_id: felt252, seat: felt252) -> bool {
-            self.draw_revealed.entry((table_id, seat)).read()
-        }
         fn get_blinds_posted(self: @ContractState, table_id: felt252) -> bool {
             self.blinds_posted.entry(table_id).read()
         }
         fn get_hand_number(self: @ContractState, table_id: felt252) -> u32 {
             self.hand_number.entry(table_id).read()
-        }
-
-        fn muck(ref self: ContractState, table_id: felt252, seat: felt252) {
-            assert(self.table_exists.entry(table_id).read(), errors::NO_TABLE);
-            assert(!self.table_voided.entry(table_id).read(), errors::TABLE_VOIDED);
-            assert(!self.table_settled.entry(table_id).read(), errors::ALREADY_SETTLED);
-            assert(self.showdown_started.entry(table_id).read(), errors::NOT_SHOWDOWN);
-            assert(
-                get_caller_address() == self.seat_owner.entry((table_id, seat)).read(),
-                errors::NOT_SEAT_OWNER,
-            );
-            assert(self.showdown_turn.entry(table_id).read() == seat, errors::NOT_SHOWDOWN_TURN);
-            assert(!self.seat_mucked.entry((table_id, seat)).read(), errors::ALREADY_MUCKED);
-
-            self.seat_mucked.entry((table_id, seat)).write(true);
-            self.emit(Mucked { table_id, seat, by_timeout: false });
-            self.advance_showdown_turn(table_id);
         }
 
         fn claim_showdown_timeout(ref self: ContractState, table_id: felt252) {
@@ -4347,18 +4503,44 @@ pub mod PokerGame {
             assert(deadline != 0, errors::NOT_SHOWDOWN);
             assert(get_block_timestamp() > deadline, errors::SHOWDOWN_LIVE);
 
-            // Not showing in time IS mucking. There is nothing to reconstruct
-            // and nobody to punish beyond the pot the seat gives up -- unlike
-            // a withheld decryption share, which stops a card existing at all,
-            // a hand nobody shows simply does not win.
-            let seat = self.showdown_turn.entry(table_id).read();
-            self.seat_mucked.entry((table_id, seat)).write(true);
-            self.emit(Mucked { table_id, seat, by_timeout: true });
-            self.advance_showdown_turn(table_id);
-        }
+            // AN UNCONTESTED POT IS NOT A SHOWDOWN. Everyone else folded, so
+            // the last seat in the hand has already won it and owes nobody a
+            // card -- §9.8's "an uncontested pot needs no cards shown at all".
+            // Forfeiting it here would take a hand it had already won and void
+            // the pot instead, refunding the folded seats their bets: a griefer
+            // with one cheap transaction could undo every fold at the table.
+            // Nothing to time, so the clock just stops.
+            if self.active_count(table_id) <= 1 {
+                self.showdown_deadline.entry(table_id).write(0);
+                self.emit(ShowdownComplete { table_id });
+                return;
+            }
 
-        fn get_showdown_turn(self: @ContractState, table_id: felt252) -> felt252 {
-            self.showdown_turn.entry(table_id).read()
+            // Every seat that still owes a hand forfeits together, rather than
+            // one seat per call. The deadline belongs to the table, so every
+            // seat that missed it missed the same one, and charging a caller
+            // for n transactions to say so is a worse route to identical
+            // state.
+            //
+            // Not showing in time forfeits, and that is all it does. There is
+            // nothing to reconstruct and nobody to punish beyond the pot the
+            // seat gives up -- unlike a withheld decryption share, which stops
+            // a card existing at all, a hand nobody shows simply does not win.
+            let max_seats = self.table_max_seats.entry(table_id).read();
+            let mut i: u32 = 0;
+            while i != max_seats {
+                let seat: felt252 = i.into();
+                if self.is_active(table_id, seat)
+                    && !self.seat_forfeited.entry((table_id, seat)).read()
+                    && !(self.hole_revealed.entry((table_id, seat, 0)).read()
+                        && self.hole_revealed.entry((table_id, seat, 1)).read()) {
+                    self.seat_forfeited.entry((table_id, seat)).write(true);
+                    self.emit(SeatForfeited { table_id, seat });
+                }
+                i += 1;
+            };
+            self.showdown_deadline.entry(table_id).write(0);
+            self.emit(ShowdownComplete { table_id });
         }
 
         fn get_showdown_deadline(self: @ContractState, table_id: felt252) -> u64 {
@@ -4369,8 +4551,8 @@ pub mod PokerGame {
             self.showdown_started.entry(table_id).read()
         }
 
-        fn get_seat_mucked(self: @ContractState, table_id: felt252, seat: felt252) -> bool {
-            self.seat_mucked.entry((table_id, seat)).read()
+        fn get_seat_forfeited(self: @ContractState, table_id: felt252, seat: felt252) -> bool {
+            self.seat_forfeited.entry((table_id, seat)).read()
         }
 
         fn settle_from_reveals(ref self: ContractState, table_id: felt252) {
@@ -4394,13 +4576,13 @@ pub mod PokerGame {
                 }
                 let seat: felt252 = s.into();
                 let owner = self.seat_owner.entry((table_id, seat)).read();
-                // A mucked seat is not a contender. Its chips stay in the pot
-                // -- mucking forfeits rather than blocking -- but a hand
-                // nobody showed says nothing, and cards speak: only what was
-                // tabled and verified can win.
+                // A forfeited seat is not a contender. Its chips stay in the
+                // pot -- forfeiting gives up the claim, it does not block the
+                // hand -- but a hand nobody showed says nothing, and cards
+                // speak: only what was tabled and verified can win.
                 if owner.is_non_zero()
                     && !self.seat_folded.entry((table_id, seat)).read()
-                    && !self.seat_mucked.entry((table_id, seat)).read() {
+                    && !self.seat_forfeited.entry((table_id, seat)).read() {
                     contenders.append(seat);
                 }
                 s += 1;
@@ -4429,11 +4611,11 @@ pub mod PokerGame {
             // the same reasoning dispute_deck uses.
             //
             // Not forgeable into a way to cancel a losing hand: a seat becomes
-            // mucked only by its own `muck` or by claim_showdown_timeout after
-            // its deadline, both irreversible for the hand, and `fold` refuses
-            // to leave fewer than two active seats. So reaching zero
-            // contenders costs every player their claim on the pot -- there is
-            // nothing here to gain.
+            // forfeited only through claim_showdown_timeout, after the table's
+            // showdown deadline has passed, and `fold` refuses to leave fewer
+            // than two active seats. So reaching zero contenders means nobody
+            // showed anything before the clock ran out, and it costs every
+            // player their claim on the pot -- there is nothing here to gain.
             if cs.len() == 0 {
                 self.table_voided.entry(table_id).write(true);
                 self.emit(TableVoided { table_id, stalled_seat: 0 });
@@ -4447,6 +4629,28 @@ pub mod PokerGame {
                 self.award(table_id, array![*cs.at(0)].span());
                 return;
             }
+
+            // THE SHOWDOWN MUST BE OVER, not merely open.
+            //
+            // Everything below scores an unshown contender as nothing, which
+            // is right once the showdown has run its course and wrong before
+            // it has. Without this check any caller could invoke this in the
+            // same block the river closed -- before a single reveal had landed
+            // -- and every contender would score zero: the pot would void and
+            // every seat would get its stake back. That is a free undo for
+            // whoever is losing, available to anyone, at the cost of one cheap
+            // transaction.
+            //
+            // Two ways out, and the hand needs exactly one of them: every
+            // contender has shown (the deadline is cleared by the last reveal),
+            // or the deadline passed and claim_showdown_timeout has not been
+            // called yet -- in which case the seats that missed it are about to
+            // score as unshown anyway, which is the same answer that call would
+            // reach.
+            let outstanding = self.showdown_outstanding(table_id);
+            let deadline = self.showdown_deadline.entry(table_id).read();
+            let expired = deadline != 0 && get_block_timestamp() > deadline;
+            assert(outstanding == 0 || expired, errors::SHOWDOWN_LIVE);
 
             // Contested: the board must be complete before anything can be
             // scored against it.
@@ -4478,11 +4682,11 @@ pub mod PokerGame {
                 cc += 1;
             };
 
-            // A contender who did not reveal both hole cards has MUCKED.
-            // They forfeit and cannot win -- but they must not be able to
-            // block settlement either. Asserting here (as an earlier version
-            // did) inverted the payoff of the whole game: a beaten player
-            // simply never revealed, settlement reverted forever,
+            // A contender who did not reveal both hole cards FORFEITS. They
+            // cannot win -- but they must not be able to block settlement
+            // either. Asserting here (as an earlier version did) inverted the
+            // payoff of the whole game: a beaten player simply never revealed,
+            // settlement reverted forever,
             // table_settled was never set, and after SETTLE_TIMEOUT_SECS
             // every seat including the griefer reclaimed its full stake.
             // Withholding a reveal strictly dominated revealing whenever you
@@ -4521,9 +4725,23 @@ pub mod PokerGame {
                 }
                 i += 1;
             };
-            // Everyone mucked: no hand was proved, so there is nobody to pay.
-            // Deliberately NOT awarding to an arbitrary seat on a 0-0 tie.
-            assert(any_revealed, errors::HOLE_NOT_REVEALED);
+            // NOBODY SHOWED. The showdown is over -- checked above -- and not
+            // one contender tabled a hand, so there is nothing to score and
+            // nobody has proved entitlement to anything.
+            //
+            // Voided: not awarded, and no longer reverted. Awarding would hand
+            // the pot to seat 0 on a score of zero, paying out on something
+            // this contract never verified. Reverting (which is what this used
+            // to do) strands the pot until the 24-hour reclaim -- the exact
+            // dead end the all-forfeit branch above was written to escape.
+            // Reaching that state two different ways and answering it two
+            // different ways was the inconsistency, so both answer the same
+            // now: refund everyone what they put in.
+            if !any_revealed {
+                self.table_voided.entry(table_id).write(true);
+                self.emit(TableVoided { table_id, stalled_seat: 0 });
+                return;
+            }
 
             // Defence in depth. The shuffle proof already makes the deck a
             // genuine permutation and the reveal proofs tie each card to a

@@ -212,17 +212,19 @@ step('the shuffle chain -- real Honk proofs, one per seat');
 // an earlier version of this script imported a cached bundle and spent two
 // runs testing stale code.
 const e2 = join(outdir, 'shuffle-entry.ts');
-writeFileSync(e2, `export { proveShuffle } from ${JSON.stringify(join(root, 'src/lib/shuffle.ts'))};`);
+writeFileSync(e2, `export { proveShuffle, proveShuffleAndOpen, submitFinalShuffleArgs } from ${JSON.stringify(join(root, 'src/lib/shuffle.ts'))};`);
 await build({ entryPoints: [e2], bundle: true, format: 'esm', platform: 'node',
   outfile: join(outdir, 'shuffle.mjs'),
   external: ['garaga', '@aztec/bb.js', '@noir-lang/noir_js'], logLevel: 'warning' });
-const { proveShuffle } = await import(
+const { proveShuffle, proveShuffleAndOpen, submitFinalShuffleArgs } = await import(
   pathToFileURL(join(outdir, 'shuffle.mjs')).href + `?v=${Date.now()}`);
 
 const shuffleCircuit = JSON.parse(readFileSync(
   join(root, 'circuits/shuffle_verifier/example_proof/beta16_build/target/shuffle.json'), 'utf8'));
 const openCircuit = JSON.parse(readFileSync(
   join(root, 'circuits/deck_open_verifier/example_proof/beta16_build/target/deck_open.json'), 'utf8'));
+const shuffleOpenCircuit = JSON.parse(readFileSync(
+  join(root, 'circuits/shuffle_open_verifier/example_proof/beta16_build/target/shuffle_open.json'), 'utf8'));
 
 let current = deck.initialDeck();
 for (let turn = 0; turn < SEATS; turn++) {
@@ -230,16 +232,30 @@ for (let turn = 0; turn < SEATS; turn++) {
   const head = await view.get_shuffle_commitment(TABLE);
   const headBig = typeof head === 'bigint' ? head : (BigInt(head.high) << 128n) | BigInt(head.low);
   const t0 = Date.now();
-  const r = await proveShuffle({ deckIn: current, jointKey: Y, commitmentIn: headBig, circuitJson: shuffleCircuit, wasmPath: null });
-  await send(players[seat], 'submit_shuffle', {
-    table_id: TABLE,
-    new_commitment: u256(r.commitmentOut),
-    deck: deck.deckToFields(r.deckOut).map((f) => u256(f)),
-    proof: r.calldata.map(hex),
-  });
-  current = r.deckOut;
-  ok(`position ${turn} (seat ${seat}): proof accepted on-chain in ${Date.now() - t0} ms, ` +
-     `${r.calldata.length} felts`);
+  // The last link fuses chunk 0 of the opening into its shuffle proof; the
+  // contract refuses a plain shuffle there and the fused one anywhere else.
+  if (turn === SEATS - 1) {
+    const r = await proveShuffleAndOpen({
+      deckIn: current, jointKey: Y, commitmentIn: headBig, maxSeats: SEATS,
+      circuitJson: shuffleOpenCircuit, wasmPath: null,
+    });
+    const args = submitFinalShuffleArgs(TABLE, r);
+    await send(players[seat], 'submit_final_shuffle', { ...args, proof: r.calldata.map(hex) });
+    current = r.deckOut;
+    ok(`position ${turn} (seat ${seat}): FUSED shuffle+open accepted on-chain in ` +
+       `${Date.now() - t0} ms, ${r.positions.length} positions opened`);
+  } else {
+    const r = await proveShuffle({ deckIn: current, jointKey: Y, commitmentIn: headBig, circuitJson: shuffleCircuit, wasmPath: null });
+    await send(players[seat], 'submit_shuffle', {
+      table_id: TABLE,
+      new_commitment: u256(r.commitmentOut),
+      deck: deck.deckToFields(r.deckOut).map((f) => u256(f)),
+      proof: r.calldata.map(hex),
+    });
+    current = r.deckOut;
+    ok(`position ${turn} (seat ${seat}): proof accepted on-chain in ${Date.now() - t0} ms, ` +
+       `${r.calldata.length} felts`);
+  }
 }
 if (!(await view.get_shuffle_complete(TABLE))) fail('shuffle chain did not complete');
 ok('shuffle chain complete');
@@ -247,7 +263,10 @@ ok('shuffle chain complete');
 step('open_deck -- real Honk proofs, chunked');
 const finalHash = await deck.commitment(current);
 const chunks = deckOpen.chunkCount(SEATS);
-for (let chunk = 0; chunk < chunks; chunk++) {
+// Chunk 0 came with the final shuffle proof, so this starts at 1 and does not
+// run at all on a table of seven seats or fewer.
+if (chunks === 1) ok(`all ${deckOpen.inPlayCount(SEATS)} positions opened by the final shuffle proof`);
+for (let chunk = 1; chunk < chunks; chunk++) {
   const t0 = Date.now();
   const r = await deckOpen.proveOpenChunk({ deck: current, deckHash: finalHash, maxSeats: SEATS, chunk, circuitJson: openCircuit, wasmPath: null });
   const args = deckOpen.openDeckArgs(TABLE, r);
@@ -318,17 +337,12 @@ step('the published deck is findable however the table id was typed');
   ok('found and read back with the id written as hex and as a decimal');
 }
 
-step('the button draw');
-for (let seat = 0; seat < SEATS; seat++) {
-  const { c1, c2 } = ciphertextAt(deck.drawPosition(seat, SEATS));
-  const agg = aggregateAt(c1);
-  const card = reveal.cardFromShare({ c1, c2 }, agg.share);
-  await send(dealer, 'reveal_draw_card', reveal.revealDrawArgs({
-    tableId: TABLE, seat, share: agg.share, card, proof: agg.proof }));
-  ok(`seat ${seat} drew ${grumpkin.cardToName(card)}`);
-}
+step('the button');
+// Not drawn any more: begin_shuffle put it on the lowest occupied seat, before
+// any card existed. Nothing to send, so this only checks it is there.
+if (!(await view.get_button_set(TABLE))) fail('begin_shuffle did not set the button');
 const button = Number(await view.get_button(TABLE));
-ok(`button to seat ${button}`);
+ok(`button on seat ${button}`);
 
 step('hole cards -- committed at DEALING time, before any betting');
 // The commitment is the hinge this whole script exists to test. It is made
@@ -428,8 +442,9 @@ step('reveal_hole_card -- a dealing-time commitment, reopened at showdown');
 // card come from the commitment made before the flop. The contract reopens
 // one against the other (BAD_OPENING_HASH if they disagree) and then checks
 // the DLEQ against the joint key (CARD_REVEAL_REJECTED).
-for (let n = 0; n < SEATS; n++) {
-  const seat = Number(await view.get_showdown_turn(TABLE));
+// No turn order: every contender shows, in whatever order this loop reaches
+// them. Under the old rule this had to ask the contract whose turn it was.
+for (let seat = 0; seat < SEATS; seat++) {
   for (let slot = 0; slot < 2; slot++) {
     const o = openings[seat][slot];
     const { c1 } = ciphertextAt(o.pos);

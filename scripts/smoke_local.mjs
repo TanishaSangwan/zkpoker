@@ -139,17 +139,19 @@ step('the shuffle chain -- real Honk proofs, one per seat');
 // an earlier version of this script imported a cached bundle and spent two
 // runs testing stale code.
 const e2 = join(outdir, 'shuffle-entry.ts');
-writeFileSync(e2, `export { proveShuffle } from ${JSON.stringify(join(root, 'src/lib/shuffle.ts'))};`);
+writeFileSync(e2, `export { proveShuffle, proveShuffleAndOpen, submitFinalShuffleArgs } from ${JSON.stringify(join(root, 'src/lib/shuffle.ts'))};`);
 await build({ entryPoints: [e2], bundle: true, format: 'esm', platform: 'node',
   outfile: join(outdir, 'shuffle.mjs'),
   external: ['garaga', '@aztec/bb.js', '@noir-lang/noir_js'], logLevel: 'warning' });
-const { proveShuffle } = await import(
+const { proveShuffle, proveShuffleAndOpen, submitFinalShuffleArgs } = await import(
   pathToFileURL(join(outdir, 'shuffle.mjs')).href + `?v=${Date.now()}`);
 
 const shuffleCircuit = JSON.parse(readFileSync(
   join(root, 'circuits/shuffle_verifier/example_proof/beta16_build/target/shuffle.json'), 'utf8'));
 const openCircuit = JSON.parse(readFileSync(
   join(root, 'circuits/deck_open_verifier/example_proof/beta16_build/target/deck_open.json'), 'utf8'));
+const shuffleOpenCircuit = JSON.parse(readFileSync(
+  join(root, 'circuits/shuffle_open_verifier/example_proof/beta16_build/target/shuffle_open.json'), 'utf8'));
 
 let current = deck.initialDeck();
 for (let turn = 0; turn < SEATS; turn++) {
@@ -157,16 +159,33 @@ for (let turn = 0; turn < SEATS; turn++) {
   const head = await view.get_shuffle_commitment(TABLE);
   const headBig = typeof head === 'bigint' ? head : (BigInt(head.high) << 128n) | BigInt(head.low);
   const t0 = Date.now();
-  const r = await proveShuffle({ deckIn: current, jointKey: Y, commitmentIn: headBig, circuitJson: shuffleCircuit, wasmPath: null });
-  await send(players[seat], 'submit_shuffle', {
-    table_id: TABLE,
-    new_commitment: u256(r.commitmentOut),
-    deck: deck.deckToFields(r.deckOut).map((f) => u256(f)),
-    proof: r.calldata.map(hex),
-  });
-  current = r.deckOut;
-  ok(`position ${turn} (seat ${seat}): proof accepted on-chain in ${Date.now() - t0} ms, ` +
-     `${r.calldata.length} felts`);
+  // The last link proves its shuffle AND chunk 0 of the opening in one
+  // statement -- the contract refuses a plain shuffle there, and refuses the
+  // fused proof anywhere else. That is the whole saving: one fewer ~587M-gas
+  // verification per hand.
+  const last = turn === SEATS - 1;
+  if (last) {
+    const r = await proveShuffleAndOpen({
+      deckIn: current, jointKey: Y, commitmentIn: headBig, maxSeats: SEATS,
+      circuitJson: shuffleOpenCircuit, wasmPath: null,
+    });
+    const args = submitFinalShuffleArgs(TABLE, r);
+    await send(players[seat], 'submit_final_shuffle', { ...args, proof: r.calldata.map(hex) });
+    current = r.deckOut;
+    ok(`position ${turn} (seat ${seat}): FUSED shuffle+open accepted on-chain in ` +
+       `${Date.now() - t0} ms, ${r.calldata.length} felts, ${r.positions.length} positions opened`);
+  } else {
+    const r = await proveShuffle({ deckIn: current, jointKey: Y, commitmentIn: headBig, circuitJson: shuffleCircuit, wasmPath: null });
+    await send(players[seat], 'submit_shuffle', {
+      table_id: TABLE,
+      new_commitment: u256(r.commitmentOut),
+      deck: deck.deckToFields(r.deckOut).map((f) => u256(f)),
+      proof: r.calldata.map(hex),
+    });
+    current = r.deckOut;
+    ok(`position ${turn} (seat ${seat}): proof accepted on-chain in ${Date.now() - t0} ms, ` +
+       `${r.calldata.length} felts`);
+  }
 }
 if (!(await view.get_shuffle_complete(TABLE))) fail('shuffle chain did not complete');
 ok('shuffle chain complete');
@@ -174,7 +193,10 @@ ok('shuffle chain complete');
 step('open_deck -- real Honk proofs, chunked');
 const finalHash = await deck.commitment(current);
 const chunks = deckOpen.chunkCount(SEATS);
-for (let chunk = 0; chunk < chunks; chunk++) {
+// Chunk 0 came with the final shuffle proof, so this loop starts at 1 -- and
+// on a table of seven seats or fewer it does not run at all.
+if (chunks === 1) ok(`all ${deckOpen.inPlayCount(SEATS)} positions opened by the final shuffle proof`);
+for (let chunk = 1; chunk < chunks; chunk++) {
   const t0 = Date.now();
   const r = await deckOpen.proveOpenChunk({ deck: current, deckHash: finalHash, maxSeats: SEATS, chunk, circuitJson: openCircuit, wasmPath: null });
   const args = deckOpen.openDeckArgs(TABLE, r);
@@ -197,67 +219,21 @@ for (const pos of [0, 1, 2 * SEATS]) {
   ok(`position ${pos}: stored ciphertext matches the final deck`);
 }
 
-step('the button draw -- one card per seat, real aggregate DLEQ');
+step('the button -- a rule, not a card');
 //
-// This is the part no mock can stand in for. The card that decides who posts
-// which blind is an ordinary deck position, so reading it needs a decryption
-// share from EVERY seat, aggregated into one Chaum-Pedersen DLEQ against the
-// joint key, and the deployed DleqVerifier has to accept it and agree the
-// recovered point really is the claimed card.
+// This used to deal one card per seat and check the highest took the button,
+// which cost a decryption round and an on-chain aggregate DLEQ per seat. The
+// button is deterministic now: begin_shuffle puts it on the lowest occupied
+// seat, before any card exists, and start_next_hand moves it one seat left.
 //
-// Both secrets live in this process, so the three nonce rounds are done
-// inline rather than over the relay -- the arithmetic is identical, and what
-// is being tested here is the chain's side of it.
-const drawn = [];
-for (let seat = 0; seat < SEATS; seat++) {
-  const t0 = Date.now();
-  const pos = deck.drawPosition(seat, SEATS);
-  const ctFields = deck.deckToFields(current).slice(4 * pos, 4 * pos + 4);
-  const c1 = grumpkin.fromWire(ctFields[0], ctFields[1]);
-  const c2 = grumpkin.fromWire(ctFields[2], ctFields[3]);
-
-  // Round 1: each party picks a nonce. Round 2: the points are revealed and
-  // the challenge is taken over the SUMS. Round 3: each party responds.
-  const nonces = secrets.map(() => grumpkin.randomScalar());
-  const parts = secrets.map((x, i) => ({
-    pk: grumpkin.mulG(x),
-    d: grumpkin.mul(x, c1),
-    r1: grumpkin.mulG(nonces[i]),
-    r2: grumpkin.mul(nonces[i], c1),
-  }));
-  const sumOf = (pts) => pts.reduce((acc, p) => grumpkin.add(acc, p), null);
-  const e = dleq.challenge(
-    sumOf(parts.map((p) => p.pk)), c1, sumOf(parts.map((p) => p.d)),
-    sumOf(parts.map((p) => p.r1)), sumOf(parts.map((p) => p.r2)),
-  );
-  const contributions = parts.map((p, i) => ({ ...p, s: dleq.respond(secrets[i], nonces[i], e) }));
-  const proof = dleq.aggregate(contributions, c1);
-
-  const share = sumOf(parts.map((p) => p.d));
-  const card = reveal.cardFromShare({ c1, c2 }, share);
-  if (card === null) fail(`seat ${seat}'s draw did not decrypt to a card`);
-
-  await send(dealer, 'reveal_draw_card', reveal.revealDrawArgs({
-    tableId: TABLE, seat, share, card, proof,
-  }));
-  const stored = Number(await view.get_draw_card(TABLE, String(seat)));
-  if (stored !== card) fail(`seat ${seat}: chain stored card ${stored}, client computed ${card}`);
-  drawn.push(card);
-  ok(`seat ${seat} drew ${grumpkin.cardToName(card)} at position ${pos} ` +
-     `(aggregate DLEQ accepted on-chain in ${Date.now() - t0} ms)`);
-}
-
-if (!(await view.get_button_set(TABLE))) fail('every seat drew and no button was set');
+// Nothing is lost from THIS script's coverage by dropping it. The part no mock
+// could stand in for -- a real aggregate DLEQ over a real ciphertext, accepted
+// by the deployed DleqVerifier -- is exercised identically by the community
+// reveals below.
+if (!(await view.get_button_set(TABLE))) fail('begin_shuffle did not set the button');
 const button = Number(await view.get_button(TABLE));
-// Rank decides, suit breaks the tie -- the same total order the contract uses.
-const best = drawn.reduce((b, c, i) => {
-  const r = c % 13, br = drawn[b] % 13;
-  return r > br || (r === br && c > drawn[b]) ? i : b;
-}, 0);
-if (button !== best) {
-  fail(`button went to seat ${button}, but seat ${best} drew highest (${drawn.join(', ')})`);
-}
-ok(`button to seat ${button} -- the highest draw, decided by the deck and nobody else`);
+if (button !== 0) fail(`button on seat ${button}, expected the lowest occupied seat (0)`);
+ok(`button to seat ${button} -- fixed by seat order before any card existed`);
 
 step('post_blinds -- forced bets, from the button');
 {
@@ -295,5 +271,5 @@ step('post_blinds -- forced bets, from the button');
 }
 
 console.log('\nSmoke test passed: real Schnorr, real joint-key check, real shuffle chain,');
-console.log('real deck opening, a button drawn from the deck with a real aggregate DLEQ,');
+console.log('real deck opening, real aggregate DLEQs on the board,');
 console.log('and blinds posted from it.');

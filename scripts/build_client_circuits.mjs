@@ -16,6 +16,7 @@
 //   noirup --version 1.0.0-beta.16
 //   nargo compile --program-dir circuits/shuffle_verifier/example_proof/beta16_build
 //   nargo compile --program-dir circuits/deck_open_verifier/example_proof/beta16_build
+//   nargo compile --program-dir circuits/shuffle_open_verifier/example_proof/beta16_build
 //   noirup --version 1.0.0-beta.22
 import { cpSync, mkdirSync, existsSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -28,6 +29,9 @@ const OUT = R('public/circuits');
 const CIRCUITS = [
   ['shuffle.json', R('circuits/shuffle_verifier/example_proof/beta16_build/target/shuffle.json')],
   ['deck_open.json', R('circuits/deck_open_verifier/example_proof/beta16_build/target/deck_open.json')],
+  // The fused last-link circuit. A THIRD circuit, not the shuffle with extra
+  // inputs -- staging the wrong one produces proofs the chain rejects.
+  ['shuffle_open.json', R('circuits/shuffle_open_verifier/example_proof/beta16_build/target/shuffle_open.json')],
 ];
 
 for (const [name, path] of CIRCUITS) {

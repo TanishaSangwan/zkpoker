@@ -91,6 +91,14 @@ export async function readPublishedDeck(args: {
  * the calldata and is checked against the contract's stored hash, so an RPC
  * that lags or reorders events cannot substitute a deck.
  */
+// Block-range constants for the backwards scan below. The first window is
+// small because the deck is published moments before it is read, in the same
+// hand; the cap on total lookback keeps a table that will never be found from
+// walking a public chain to genesis one request at a time.
+const FIRST_WINDOW = 2_000;
+const MAX_WINDOW = 100_000;
+const MAX_LOOKBACK = 1_000_000;
+
 export async function findDeckPublishedTx(args: {
   provider: ProviderInterface;
   contract: string;
@@ -102,19 +110,45 @@ export async function findDeckPublishedTx(args: {
   // Normalised, because this goes to the node RAW rather than through
   // calldata compilation: starknet_getEvents rejects a decimal key filter.
   const tableKey = toFeltHex(tableId);
-  let token: string | undefined;
-  let latest: string | null = null;
-  do {
-    const page: any = await provider.getEvents({
-      address: contract,
-      keys: [[key], [tableKey]],
-      from_block: args.fromBlock ? { block_number: args.fromBlock } : { block_number: 0 },
-      to_block: 'latest',
-      chunk_size: 100,
-      continuation_token: token,
-    });
-    for (const e of page.events ?? []) latest = e.transaction_hash;
-    token = page.continuation_token;
-  } while (token);
-  return latest;
+
+  // ── Why this walks backwards instead of scanning from genesis ──────────
+  // It used to ask for [0, latest], which is correct on a devnet a few
+  // hundred blocks old and silently WRONG on a public chain: a node given a
+  // range that wide answers with an empty page rather than an error. On
+  // Sepolia that returned zero events in under a second, findDeckPublishedTx
+  // returned null, and the deck could never be read back -- the table simply
+  // stopped at "opening" with nothing to explain it. The same query over the
+  // last thousand blocks found the event in 412ms.
+  //
+  // So: scan backwards from the head in windows, newest first. The event we
+  // want is the most recent one, which is nearly always in the first window,
+  // and the windows double so that an old table still costs a handful of
+  // requests rather than one per thousand blocks.
+  const head = (await provider.getBlockLatestAccepted()).block_number;
+  const floor = Math.max(0, args.fromBlock ?? head - MAX_LOOKBACK);
+
+  let to = head;
+  let span = FIRST_WINDOW;
+  for (;;) {
+    const from = Math.max(floor, to - span + 1);
+    let token: string | undefined;
+    let latest: string | null = null;
+    do {
+      const page: any = await provider.getEvents({
+        address: contract,
+        keys: [[key], [tableKey]],
+        from_block: { block_number: from },
+        to_block: { block_number: to },
+        chunk_size: 100,
+        continuation_token: token,
+      });
+      // Within a window the last event is the most recent one.
+      for (const e of page.events ?? []) latest = e.transaction_hash;
+      token = page.continuation_token;
+    } while (token);
+    if (latest) return latest;
+    if (from <= floor) return null;
+    to = from - 1;
+    span = Math.min(span * 2, MAX_WINDOW);
+  }
 }

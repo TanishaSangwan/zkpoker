@@ -31,15 +31,13 @@ function seatStyle(index: number, total: number): React.CSSProperties {
 }
 
 function Seat({
-  seat, total, you, onTurn, dealer, button, blind, drawing, known,
+  seat, total, you, onTurn, dealer, button, blind, known,
 }: {
   seat: SeatState; total: number; you: boolean; onTurn: boolean; dealer: boolean;
   /** Holds the dealer button -- who posts which blind is measured from here. */
   button: boolean;
   /** This seat's forced bet this hand, if any. */
   blind: 'SB' | 'BB' | null;
-  /** The table is still drawing for the button, so show the draw cards. */
-  drawing: boolean;
   /** Cards this client knows locally for THIS seat -- only ever its own. */
   known?: (number | null)[];
 }) {
@@ -65,20 +63,10 @@ function Seat({
             {button ? <span className={styles.seatBadge} style={{ background: '#fff', color: '#222' }} title="dealer button">BTN</span> : null}
             {blind ? <span className={styles.seatBadge} style={{ background: '#2d8a4e' }} title={blind === 'SB' ? 'small blind' : 'big blind'}>{blind}</span> : null}
             {seat.folded ? <span className={styles.seatBadge} style={{ background: '#8a8a8a' }}>folded</span> : null}
+            {seat.forfeited ? <span className={styles.seatBadge} style={{ background: '#8a8a8a' }} title="did not show before the showdown clock ran out">forfeit</span> : null}
             {!seat.keyRegistered ? <span className={styles.seatBadge} style={{ background: '#c0392b' }}>no key</span> : null}
             {onTurn && !seat.folded ? <span className={styles.seatBadge} style={{ background: '#f5c542', color: '#222' }}>turn</span> : null}
           </div>
-          {/* The button draw. One card from the same committed deck as
-              everything else, face up because the whole table has to agree
-              on who drew highest. Shown only while it decides something. */}
-          {drawing ? (
-            <div className={styles.feltCards} style={{ marginTop: 4 }}>
-              {seat.drawRevealed
-                ? <Card card={seat.drawCard} />
-                : <div className={styles.cardBack} style={{ opacity: 0.35 }} title="drawing for the button" />}
-            </div>
-          ) : null}
-
           {/* Hole cards.
               Face-up in two cases and no others: the card has been REVEALED
               on-chain, so everyone can see it, or it is THIS client's own seat
@@ -139,7 +127,6 @@ export default function Felt({
     if (table.seated.length <= 2) { smallSeat = table.button; bigSeat = next; }
     else { smallSeat = next; bigSeat = nextOccupied(next); }
   }
-  const drawing = table.deckOpened && !table.buttonSet;
 
   return (
     <div className={styles.felt}>
@@ -148,12 +135,12 @@ export default function Felt({
         <div className={styles.feltStreet}>
           {table.voided ? 'voided'
             : table.settled ? 'settled'
-            : drawing ? 'drawing for the button'
             : STREET_NAMES[table.street] ?? `street ${table.street}`}
         </div>
         {table.bigBlind > 0n ? (
           <div className={styles.feltStreet} style={{ opacity: 0.7 }}>
             blinds {table.smallBlind.toString()}/{table.bigBlind.toString()}
+            {table.blindLevelHands > 0 ? ` · level ${table.blindLevel + 1}` : ''}
             {table.handNumber > 0 ? ` · hand ${table.handNumber + 1}` : ''}
           </div>
         ) : null}
@@ -174,7 +161,6 @@ export default function Felt({
           dealer={s.seat === dealerSeat}
           button={table.buttonSet && s.seat === table.button}
           blind={s.seat === smallSeat ? 'SB' : s.seat === bigSeat ? 'BB' : null}
-          drawing={drawing}
           known={yourSeat === s.seat ? yourCards : undefined}
         />
       ))}

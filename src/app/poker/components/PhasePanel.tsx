@@ -15,7 +15,7 @@ import type { TableState } from '../useTableState';
 import { asU256, decodeError, executeAndWait, pgCall, erc20ApproveCall, STREET_NAMES } from '../contract';
 import type { SeatIdentity } from '@/lib/identity';
 import { jointKey as sumKeys, prove as schnorrProve, initProver as initSchnorr } from '@/lib/schnorr';
-import { deckToU256, proveShuffle } from '@/lib/shuffle';
+import { deckToU256, proveShuffle, proveShuffleAndOpen, submitFinalShuffleArgs } from '@/lib/shuffle';
 import { useProvingEnvironment } from '../useProvingEnvironment';
 import { INITIAL_DECK_COMMITMENT, commitment, initialDeck, type Ciphertext } from '@/lib/deck';
 import { findDeckPublishedTx, readPublishedDeck } from '@/lib/publishedDeck';
@@ -149,18 +149,48 @@ export default function PhasePanel(p: Props) {
       }
       const expected = table.shuffleTurn === 0 ? INITIAL_DECK_COMMITMENT : table.commitment;
       setBusy({ label: 'Shuffling', detail: 'permuting and re-randomising 52 cards' });
+
+      // The LAST link opens the deck with the same proof. That is not an
+      // option the seat picks: submit_shuffle refuses the final turn and
+      // submit_final_shuffle refuses every other one, so the chain has exactly
+      // one shape. It costs this seat ~3% more gas than a plain shuffle and
+      // saves the table an entire ~587M-gas opening verification.
+      const isLast = table.shuffleTurn === table.shuffleOrder.length - 1;
+      const progress = (label: string) => (stage: string) =>
+        setBusy({
+          label,
+          detail:
+            stage === 'proving'
+              ? `generating the proof (~${env.multithreaded ? 5 : 10} s, ${env.threads} thread${env.threads === 1 ? '' : 's'})`
+              : stage,
+        });
+
+      if (isLast) {
+        const result = await proveShuffleAndOpen({
+          deckIn,
+          jointKey: table.jointKey,
+          commitmentIn: expected,
+          maxSeats: table.maxSeats,
+          onProgress: progress('Shuffling and opening'),
+        });
+        p.setDeck(result.deckOut);
+        const args = submitFinalShuffleArgs(table.tableId, result);
+        const txt = await send('submit_final_shuffle', {
+          ...args,
+          proof: args.proof.map((v) => '0x' + v.toString(16)),
+        });
+        return (
+          `${txt}\nshuffled and opened ${result.positions.length} positions in one proof\n` +
+          `witness ${result.timings.witnessMs} ms · proof ${result.timings.proveMs} ms · ` +
+          `calldata ${result.timings.calldataMs} ms`
+        );
+      }
+
       const result = await proveShuffle({
         deckIn,
         jointKey: table.jointKey,
         commitmentIn: expected,
-        onProgress: (stage) =>
-          setBusy({
-            label: 'Shuffling',
-            detail:
-              stage === 'proving'
-                ? `generating the proof (~${env.multithreaded ? 5 : 10} s, ${env.threads} thread${env.threads === 1 ? '' : 's'})`
-                : stage,
-          }),
+        onProgress: progress('Shuffling'),
       });
       p.setDeck(result.deckOut);
       const txt = await send('submit_shuffle', {
@@ -183,6 +213,11 @@ export default function PhasePanel(p: Props) {
   // 772M gas, barely under a shuffle's 811M.
   //
   // Needs no secret, only the final deck, so any party can carry it.
+  //
+  // Chunk 0 arrived with the last shuffle proof, so this button only appears
+  // on tables of EIGHT seats or more -- below that, 2*max_seats + 5 fits the
+  // one chunk of 19 that the fused proof already carried, and the deck is
+  // fully open the moment the chain closes.
   const chunks = table.maxSeats ? chunkCount(table.maxSeats) : 0;
 
   const openChunk = () =>
@@ -570,28 +605,20 @@ export default function PhasePanel(p: Props) {
         </>
       ) : null}
 
-      {table.phase === 'drawing' || table.phase === 'posting' ? (
+      {table.phase === 'posting' ? (
         <>
           <div className={styles.stateGrid}>
             <Item label="blinds" value={`${table.smallBlind} / ${table.bigBlind}`} />
+            <Item label="button" value={`seat ${table.button}`} />
             <Item
-              label="button"
-              value={table.buttonSet ? `seat ${table.button}` : 'drawing'}
-            />
-            <Item
-              label="draws in"
-              value={`${table.seats.filter((s) => s.occupied && s.drawRevealed).length} / ${table.seated.length}`}
+              label="level"
+              value={table.blindLevelHands > 0
+                ? `${table.blindLevel + 1} of 7 · ${table.blindLevelHands} hand${table.blindLevelHands === 1 ? '' : 's'} each`
+                : 'fixed'}
             />
           </div>
           <p className={styles.fieldHint}>
-            {table.phase === 'drawing' ? (
-              <>
-                Every seat is taking one card from the same committed deck as everything else, and
-                the highest takes the button — so who posts which blind is decided by a card nobody
-                could choose, see early or fake. It needs a decryption share from every player, so
-                it runs between the browsers and cannot be done by a dealer. Nothing to click.
-              </>
-            ) : (
+            {(
               <>
                 Button on seat {table.button}. Posting the small and big blinds from the allowances
                 you approved when you sat down. Permissionless and argument-free, so whichever
@@ -679,7 +706,6 @@ function titleFor(t: TableState): string {
     keys: 'Key registration',
     shuffling: 'Shuffle chain',
     opening: 'Opening the deck',
-    drawing: 'Drawing for the button',
     posting: 'Posting the blinds',
     dealing: 'Dealing',
     betting: 'Betting',
@@ -696,7 +722,7 @@ function hintFor(t: TableState, yourSeat: number | null): string {
     case 'shuffling': return 'Every seat shuffles in turn. k = n, always — a shorter chain means trusting whoever is in it.';
     case 'opening': return 'One proof binds the in-play ciphertexts to the committed deck.';
     case 'betting': return yourSeat === null ? 'Spectating.' : 'Turn-ordered; a raise reopens the action.';
-    case 'showdown': return 'Players reopen their dealing-time commitments. Mucking forfeits rather than blocks.';
+    case 'showdown': return 'Every contender reopens its dealing-time commitments. Not showing before the clock runs out forfeits.';
     case 'voided': return 'A party stalled. The hand is over and their stake is forfeit.';
     default: return '';
   }

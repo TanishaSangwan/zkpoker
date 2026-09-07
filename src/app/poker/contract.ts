@@ -39,18 +39,116 @@ export function erc20ApproveCall(tokenAddress: string, spender: string, amount: 
   };
 }
 
+// Starknet refuses a transaction that RESERVES more L2 gas than this, whatever
+// it goes on to spend:
+//
+//   Max gas amount is too high: GasAmount(1224841560),
+//   maximum allowed gas amount: 1210000000
+//
+// Verifying a Honk proof on chain sits just under that ceiling, and the
+// estimator's safety margin pushes its bound over it -- so `open_deck` at
+// K = 16 is rejected before it runs, despite consuming less than the cap (see
+// PROTOCOL.md 6.2: the gas ceiling binds before the public-input one).
+//
+// Clamped rather than lowered blindly: the bound is a ceiling on what MAY be
+// spent, not a prediction, so trimming it costs nothing while real consumption
+// stays underneath. A proof that genuinely needs more than the cap then fails
+// as out-of-gas, which is the honest signal that the circuit has outgrown a
+// single transaction.
+const L2_GAS_CAP = 1_209_000_000n;
+
+// Only the two entrypoints that verify a SNARK come anywhere near the cap.
+// Estimating costs a round trip, and making every check and bet pay for one
+// would be felt on a public chain, where this page already waits on blocks.
+const PROOF_ENTRYPOINTS = new Set(['submit_shuffle', 'open_deck']);
+
+/**
+ * Resource bounds for `calls`, or undefined to let the account estimate.
+ *
+ * Undefined on any failure on purpose: an estimate is an optimisation here,
+ * and a wallet that estimates for itself must keep working.
+ */
+async function clampedBounds(account: AccountInterface, calls: Call[]): Promise<any> {
+  if (!calls.some((c) => PROOF_ENTRYPOINTS.has(c.entrypoint))) return undefined;
+  try {
+    const est: any = await account.estimateInvokeFee(calls);
+    const src = est?.resourceBounds ?? est?.resource_bounds;
+    if (!src?.l2_gas) return undefined;
+    const want = BigInt(src.l2_gas.max_amount);
+    if (want <= L2_GAS_CAP) return undefined;
+    // BigInts, not the decimal strings the estimator hands back. When bounds
+    // are supplied rather than estimated, starknet.js hashes them directly and
+    // shifts the values, so a string throws "Cannot mix BigInt and other
+    // types" from deep inside the signer.
+    return {
+      resourceBounds: {
+        l1_gas: {
+          max_amount: BigInt(src.l1_gas.max_amount),
+          max_price_per_unit: BigInt(src.l1_gas.max_price_per_unit),
+        },
+        l1_data_gas: {
+          max_amount: BigInt(src.l1_data_gas.max_amount),
+          max_price_per_unit: BigInt(src.l1_data_gas.max_price_per_unit),
+        },
+        l2_gas: {
+          max_amount: L2_GAS_CAP,
+          max_price_per_unit: BigInt(src.l2_gas.max_price_per_unit),
+        },
+      },
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Execute through the connected account, then wait on `provider`.
  *
  * NOT account.provider -- that is fixed at wallet-connect time and can point
  * at a different network than the one the UI is reading.
  */
+// One transaction at a time per account.
+//
+// ── Why this is not optional on a public chain ──────────────────────────
+// This page deliberately races: every client starts a reveal for every seat's
+// draw card, and whoever lands first wins. Across clients that is right. From
+// ONE client it means several sends fired in the same tick,
+// alongside two commit_hole_shares -- five transactions from one account at
+// once. Each fetches the pending nonce independently, they all get the same
+// number, and exactly one survives.
+//
+// A devnet hides this completely: the nonce advances in milliseconds, so the
+// sends are effectively serial already. Sepolia takes ~20s to accept a
+// transaction, so every concurrent send after the first is dead on arrival --
+// which is exactly how a table stalled with all three DLEQ aggregates
+// finished off-chain and only one of the three draws on it.
+//
+// Keyed by address, not per-account-object: two components holding different
+// handles on the same account still share one nonce.
+const inFlight = new Map<string, Promise<unknown>>();
+
 export async function executeAndWait(
   account: AccountInterface,
   provider: ProviderInterface,
   calls: Call[],
 ): Promise<{ txHash: string; receipt: any }> {
-  const { transaction_hash } = await account.execute(calls);
+  const key = String(account.address).toLowerCase();
+  const prev = inFlight.get(key) ?? Promise.resolve();
+  // settle(), not then(): a failed predecessor must not cancel what follows.
+  const mine = prev
+    .then(() => undefined, () => undefined)
+    .then(() => sendOne(account, provider, calls));
+  inFlight.set(key, mine.then(() => undefined, () => undefined));
+  return mine;
+}
+
+async function sendOne(
+  account: AccountInterface,
+  provider: ProviderInterface,
+  calls: Call[],
+): Promise<{ txHash: string; receipt: any }> {
+  const details = await clampedBounds(account, calls);
+  const { transaction_hash } = await account.execute(calls, details);
   const receipt = await provider.waitForTransaction(transaction_hash, { retries: 400, retryInterval: 3000 });
   return { txHash: transaction_hash, receipt };
 }
@@ -68,7 +166,7 @@ export const SHOWDOWN_STREET = 4;
  */
 export type Phase =
   | 'no-table' | 'seating' | 'keys' | 'shuffling' | 'opening'
-  | 'drawing' | 'posting' | 'dealing' | 'betting' | 'showdown' | 'settled' | 'voided';
+  | 'posting' | 'dealing' | 'betting' | 'showdown' | 'settled' | 'voided';
 
 export function phaseOf(t: {
   exists: boolean; voided: boolean; settled: boolean;
@@ -89,10 +187,7 @@ export function phaseOf(t: {
   // while the contract would still refuse every one of them with
   // BLINDS_NOT_POSTED -- buttons that could only ever fail, on a table that
   // looked ready and was not.
-  if ((t.bigBlind ?? 0n) > 0n && t.street === 0) {
-    if (!t.buttonSet) return 'drawing';
-    if (!t.blindsPosted) return 'posting';
-  }
+  if ((t.bigBlind ?? 0n) > 0n && t.street === 0 && !t.blindsPosted) return 'posting';
   return 'betting';
 }
 

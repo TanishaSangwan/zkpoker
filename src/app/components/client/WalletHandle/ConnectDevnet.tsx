@@ -4,7 +4,7 @@ import { useState } from "react";
 import { Account, RpcProvider } from "starknet";
 import * as constants from "@/utils/constants";
 import { useFrontendProvider } from "../provider/providerContext";
-import { useDevnetAccount } from "../provider/devnetAccountContext";
+import { useLocalAccount } from "../provider/localAccountContext";
 import styles from "../../../poker/poker.module.css";
 import uni from "../../../uni.module.css";
 
@@ -25,15 +25,20 @@ type DevnetPredeployedAccount = {
 // starknet.js `Account` from it is the standard way to drive a devnet
 // without a wallet extension configured for a custom localhost network.
 //
-// Deliberately its own component/store (devnetAccountContext.ts) rather than
+// Deliberately its own component/store (localAccountContext.ts) rather than
 // touching SelectWallet.tsx or walletContext.ts — those are shared with the
 // original starter-kit page at `/`, which stays untouched (see README).
 export default function ConnectDevnet() {
   const setCurrentFrontendProviderIndex = useFrontendProvider((s) => s.setCurrentFrontendProviderIndex);
-  const devnetConnected = useDevnetAccount((s) => s.connected);
-  const devnetAddress = useDevnetAccount((s) => s.address);
-  const setDevnetAccount = useDevnetAccount((s) => s.setDevnetAccount);
-  const disconnectDevnet = useDevnetAccount((s) => s.disconnectDevnet);
+  // The store is shared with ConnectLocalKey, so "connected" alone is not
+  // enough -- a Sepolia key would otherwise be displayed here as a devnet
+  // account. Only claim the account when it was built against devnet.
+  const devnetConnected = useLocalAccount(
+    (s) => s.connected && s.providerIndex === constants.DEVNET_PROVIDER_INDEX,
+  );
+  const devnetAddress = useLocalAccount((s) => s.address);
+  const setDevnetAccount = useLocalAccount((s) => s.setLocalAccount);
+  const disconnectDevnet = useLocalAccount((s) => s.disconnectLocal);
 
   const [accounts, setAccounts] = useState<DevnetPredeployedAccount[] | null>(null);
   const [loading, setLoading] = useState(false);
@@ -67,7 +72,7 @@ export default function ConnectDevnet() {
   function connectAccount(acc: DevnetPredeployedAccount) {
     const provider = new RpcProvider({ nodeUrl: constants.devnetRpcUrl });
     const account = new Account({ provider, address: acc.address, signer: acc.private_key });
-    setDevnetAccount(account, acc.address);
+    setDevnetAccount(account, acc.address, constants.DEVNET_PROVIDER_INDEX);
     setCurrentFrontendProviderIndex(constants.DEVNET_PROVIDER_INDEX);
     setAccounts(null);
   }

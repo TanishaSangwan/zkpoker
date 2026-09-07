@@ -16,19 +16,24 @@
 // shuffle's 811M.
 //
 // ── Chunking ────────────────────────────────────────────────────────────
-// The circuit's K is fixed at 16, so the verifier's public-input count is
-// fixed too. A table has 3*max_seats + 5 in-play positions -- two hole cards
-// and one button draw per seat, plus the board -- which is not a
-// multiple of 16, so the contract takes it in chunks of K and PADS the final
-// chunk by repeating the last real position. This module reproduces that
-// padding exactly; anything else produces a proof whose public inputs do not
-// match what the contract builds, and it is rejected with BAD_OPENING.
+// The circuit's K is fixed at 19, so the verifier's public-input count is
+// fixed too. A table has 2*max_seats + 5 in-play positions -- two hole cards
+// per seat plus the board -- which is not a multiple of 19, so the contract
+// takes it in chunks of K and PADS the final chunk by repeating the last real
+// position. This module reproduces that padding exactly; anything else
+// produces a proof whose public inputs do not match what the contract builds,
+// and it is rejected with BAD_OPENING.
+//
+// CHUNK 0 IS NOT OPENED HERE any more. The last shuffler proves it as part of
+// its shuffle proof (see proveShuffleAndOpen in ./shuffle), which removes a
+// whole ~587M-gas verification from every hand. So this path only runs for
+// tables of EIGHT seats or more, where 2*max_seats + 5 exceeds 19.
 
 import { Ciphertext, deckToFields } from './deck';
 import { u256Parts } from './felt';
 
 /** MUST equal DECK_OPEN_K in cairo/src/lib.cairo and K in circuits/deck_open. */
-export const DECK_OPEN_K = 16;
+export const DECK_OPEN_K = 19;
 
 const CIRCUIT_URL = '/circuits/deck_open.json';
 const WASM_PATH = '/circuits/wasm/barretenberg.wasm.gz';
@@ -37,13 +42,16 @@ const WASM_PATH = '/circuits/wasm/barretenberg.wasm.gz';
 export function inPlayPositions(maxSeats: number): number[] {
   const holes = Array.from({ length: 2 * maxSeats }, (_, i) => i);
   const community = Array.from({ length: 5 }, (_, k) => 2 * maxSeats + k);
-  const draws = Array.from({ length: maxSeats }, (_, s) => 2 * maxSeats + 5 + s);
-  return [...holes, ...community, ...draws];
+  return [...holes, ...community];
+}
+
+/** `k_total` -- what the contract derives as 2*max_seats + 5. */
+export function inPlayCount(maxSeats: number): number {
+  return 2 * maxSeats + 5;
 }
 
 export function chunkCount(maxSeats: number): number {
-  const total = 3 * maxSeats + 5;
-  return Math.ceil(total / DECK_OPEN_K);
+  return Math.ceil(inPlayCount(maxSeats) / DECK_OPEN_K);
 }
 
 /**
@@ -54,7 +62,7 @@ export function chunkCount(maxSeats: number): number {
  * like any other slot and the contract rewrites an identical value.
  */
 export function chunkPositions(maxSeats: number, chunk: number): number[] {
-  const total = 3 * maxSeats + 5;
+  const total = inPlayCount(maxSeats);
   return Array.from({ length: DECK_OPEN_K }, (_, i) => {
     const raw = DECK_OPEN_K * chunk + i;
     return raw < total ? raw : total - 1;
@@ -126,7 +134,10 @@ export async function proveOpenChunk(args: {
   const noir = new Noir(circuitJson);
   const { witness } = await noir.execute({
     deck_hash: hex(deckHash),
-    positions: positions.map((p) => p.toString()),
+    // Not `positions`: the circuit derives them from these two, which is what
+    // freed the public-input budget to fuse the opening into the last shuffle.
+    chunk: chunk.toString(),
+    k_total: inPlayCount(maxSeats).toString(),
     cards: cards.map(hex),
     deck: fields.map(hex),
   } as any);

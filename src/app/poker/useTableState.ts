@@ -23,14 +23,16 @@ export type SeatState = {
   toCall: bigint;
   folded: boolean;
   keyRegistered: boolean;
-  mucked: boolean;
+  /**
+   * Gave up its claim on the pot by not showing before the showdown deadline.
+   * There is no voluntary muck any more, so this is only ever set by
+   * claim_showdown_timeout.
+   */
+  forfeited: boolean;
   pk: Point;
   holeCommitted: [boolean, boolean];
   holeRevealed: [boolean, boolean];
   holeCards: [number, number];
-  /** The high-card draw that decides the first button. */
-  drawRevealed: boolean;
-  drawCard: number;
 };
 
 export type TableState = {
@@ -63,11 +65,15 @@ export type TableState = {
   roundComplete: boolean;
 
   showdownStarted: boolean;
-  showdownTurn: number;
+  /** One deadline for the whole showdown; there is no per-seat turn. */
   showdownDeadline: number;
 
   smallBlind: bigint;
   bigBlind: bigint;
+  /** 0 when the table plays fixed blinds; otherwise hands per ladder rung. */
+  blindLevelHands: number;
+  /** Which rung this hand is playing. Always 0 on a fixed-blind table. */
+  blindLevel: number;
   /** The dealer button. Meaningless until `buttonSet`. */
   button: number;
   buttonSet: boolean;
@@ -134,32 +140,30 @@ export function useTableState(args: {
         c.get_published_deck_hash(tableId), c.get_published_deck_seat(tableId),
       ]);
 
-      const [showdownStarted, showdownTurn, showdownDeadline] = await Promise.all([
-        c.get_showdown_started(tableId), c.get_showdown_turn(tableId),
-        c.get_showdown_deadline(tableId),
+      const [showdownStarted, showdownDeadline] = await Promise.all([
+        c.get_showdown_started(tableId), c.get_showdown_deadline(tableId),
       ]);
 
-      const [smallBlind, bigBlind, button, buttonSet, blindsPosted, handNumber] = await Promise.all([
+      const [smallBlind, bigBlind, button, buttonSet, blindsPosted, handNumber,
+             blindLevelHands, blindLevel] = await Promise.all([
         c.get_small_blind(tableId), c.get_big_blind(tableId), c.get_button(tableId),
         c.get_button_set(tableId), c.get_blinds_posted(tableId), c.get_hand_number(tableId),
+        c.get_blind_level_hands(tableId), c.get_blind_level(tableId),
       ]);
 
       const n = num(maxSeats);
       const seats: SeatState[] = await Promise.all(
         Array.from({ length: n }, async (_, seat) => {
           const s = seat.toString();
-          const [owner, contributed, folded, keyRegistered, pkRaw, mucked] = await Promise.all([
+          const [owner, contributed, folded, keyRegistered, pkRaw, forfeited] = await Promise.all([
             c.get_seat_owner(tableId, s), c.get_seat_contributed(tableId, s),
             c.get_seat_folded(tableId, s), c.get_seat_key_registered(tableId, s),
-            c.get_seat_pk(tableId, s), c.get_seat_mucked(tableId, s),
+            c.get_seat_pk(tableId, s), c.get_seat_forfeited(tableId, s),
           ]);
           const occupied = BigInt(owner ?? 0) !== 0n;
           const [streetContributed, toCall] = occupied
             ? await Promise.all([c.get_street_contributed(tableId, s), c.get_amount_to_call(tableId, s)])
             : [0n, 0n];
-          const [drawRevealed, drawCard] = occupied
-            ? await Promise.all([c.get_draw_revealed(tableId, s), c.get_draw_card(tableId, s)])
-            : [false, 0];
           const [hc0, hc1, hr0, hr1, com0, com1] = occupied
             ? await Promise.all([
                 c.get_hole_card(tableId, s, 0), c.get_hole_card(tableId, s, 1),
@@ -172,12 +176,11 @@ export function useTableState(args: {
             contributed: BigInt(contributed ?? 0),
             streetContributed: BigInt(streetContributed ?? 0),
             toCall: BigInt(toCall ?? 0),
-            folded: !!folded, keyRegistered: !!keyRegistered, mucked: !!mucked,
+            folded: !!folded, keyRegistered: !!keyRegistered, forfeited: !!forfeited,
             pk: pointOrNull(pkRaw),
             holeCommitted: [BigInt(com0 ?? 0) !== 0n, BigInt(com1 ?? 0) !== 0n],
             holeRevealed: [!!hr0, !!hr1],
             holeCards: [num(hc0), num(hc1)],
-            drawRevealed: !!drawRevealed, drawCard: num(drawCard),
           } satisfies SeatState;
         }),
       );
@@ -210,9 +213,9 @@ export function useTableState(args: {
         actionTurn: Number(actionTurn ?? 0), actionDeadline: num(actionDeadline),
         roundComplete: !!roundComplete,
         showdownStarted: !!showdownStarted,
-        showdownTurn: Number(showdownTurn ?? 0),
         showdownDeadline: num(showdownDeadline),
         smallBlind: BigInt(smallBlind ?? 0), bigBlind: BigInt(bigBlind ?? 0),
+        blindLevelHands: num(blindLevelHands), blindLevel: num(blindLevel),
         button: Number(button ?? 0), buttonSet: !!buttonSet,
         blindsPosted: !!blindsPosted, handNumber: num(handNumber),
         seats, community, seated,
@@ -267,8 +270,9 @@ function emptyTable(tableId: string): TableState {
     shuffleTurn: 0, shuffleOrder: [], shuffleDeadline: 0, commitment: 0n, jointKey: null,
     deckOpened: false, deckOpenChunk: 0, publishedDeckHash: 0n, publishedDeckSeat: 0,
     actionTurn: 0, actionDeadline: 0,
-    roundComplete: false, showdownStarted: false, showdownTurn: 0, showdownDeadline: 0,
-    smallBlind: 0n, bigBlind: 0n, button: 0, buttonSet: false, blindsPosted: false,
+    roundComplete: false, showdownStarted: false, showdownDeadline: 0,
+    smallBlind: 0n, bigBlind: 0n, blindLevelHands: 0, blindLevel: 0,
+    button: 0, buttonSet: false, blindsPosted: false,
     handNumber: 0,
     seats: [], community: [], seated: [], phase: 'no-table',
   };

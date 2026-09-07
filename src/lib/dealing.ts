@@ -30,7 +30,8 @@
 // The cost of (3) is honest and worth stating: it diverges from
 // docs/PROTOCOL.md §4 phase 4's "no new proof is generated here", and it makes
 // a showdown depend on the other parties still being reachable. A player who
-// cannot assemble the aggregate cannot show, and mucking forfeits. §9.5
+// cannot assemble the aggregate cannot show, and a seat that does not show
+// before the showdown clock runs out forfeits its claim on the pot. §9.5
 // records this.
 //
 // Community cards are unaffected: their shares are public by design, so the
