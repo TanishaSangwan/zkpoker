@@ -612,11 +612,13 @@ export default function PhasePanel(p: Props) {
                   exactly the shortfall when something is. */}
               {(mySeat?.toCall ?? 0n) > 0n ? (
                 <button className={styles.chipBtn} disabled={!!busy}
-                  onClick={() => run(`Calling ${mySeat!.toCall}`, () => send('bet', {
+                  onClick={() => run(`Calling ${fmtAmount(mySeat!.toCall)}`, () => send('bet', {
                     table_id: table.tableId, seat: String(yourSeat),
                     amount: mySeat!.toCall.toString(),
                   }))}>
-                  Call {mySeat!.toCall.toString()}
+                  {/* The AMOUNT sent stays raw base units -- that is what the
+                      contract takes. Only the label is converted. */}
+                  Call {fmtAmount(mySeat!.toCall)}
                 </button>
               ) : (
                 <button className={styles.chipBtn} disabled={!!busy}

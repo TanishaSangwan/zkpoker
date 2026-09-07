@@ -65,7 +65,19 @@ function Seat({
         <>
           <div className={styles.seatAvatar} aria-hidden>{SEAT_SUITS[seat.seat % SEAT_SUITS.length]}</div>
           <div className={styles.seatAddr}>{you ? 'you' : `${seat.owner.slice(0, 6)}…${seat.owner.slice(-4)}`}</div>
-          <div className={styles.seatChips}>{fmtAmount(seat.contributed)}</div>
+          {/* Two DIFFERENT numbers, and conflating them is how you misread a
+              hand: `contributed` is what this seat has put INTO the pot, and
+              `stack` is what it has left to bet with. The stack only exists on
+              a table with a buy-in -- without one the wallet is the stack and
+              there is nothing on the table to show. */}
+          {seat.stack > 0n || seat.allIn ? (
+            <div className={styles.seatStack} title="chips left on the table">
+              {seat.allIn ? 'ALL IN' : fmtAmount(seat.stack)}
+            </div>
+          ) : null}
+          <div className={styles.seatChips} title="put into the pot this hand">
+            {fmtAmount(seat.contributed)}
+          </div>
           {/* Winnings are NOT in the pot and not in `contributed`. award()
               moves the pot into pending_payout keyed by the seat's payout
               note and zeroes the pot, so between hands a winner's money is

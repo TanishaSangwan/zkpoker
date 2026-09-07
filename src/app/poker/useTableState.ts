@@ -39,6 +39,17 @@ export type SeatState = {
    * vanishing: the pot cleared and nothing anywhere said where it went.
    */
   pendingPayout: bigint;
+  /**
+   * Chips this seat has left ON THE TABLE.
+   *
+   * Only meaningful on a table with a buy-in: that is what escrows chips at
+   * join_table and draws them down as you bet. A table created with buy_in 0
+   * plays out of wallets and reads 0 here, which is correct rather than
+   * missing -- there is no stack to show.
+   */
+  stack: bigint;
+  /** Pushed its last chip: in the hand, but with nothing left to bet. */
+  allIn: boolean;
   holeCommitted: [boolean, boolean];
   holeRevealed: [boolean, boolean];
   holeCards: [number, number];
@@ -175,6 +186,12 @@ export function useTableState(args: {
             : [0n, 0n];
           // Keyed by NOTE, not by seat: pending_payout survives the seat being
           // reset between hands, which is the whole point of it.
+          const [stack, allIn] = occupied
+            ? await Promise.all([
+                c.get_seat_stack(tableId, s).catch(() => 0n),
+                c.get_seat_all_in(tableId, s).catch(() => false),
+              ])
+            : [0n, false];
           const pendingPayout = occupied
             ? await c.get_seat_note(tableId, s)
                 .then((note: unknown) => c.get_pending_payout(toHex(note)))
@@ -195,6 +212,7 @@ export function useTableState(args: {
             folded: !!folded, keyRegistered: !!keyRegistered, forfeited: !!forfeited,
             pk: pointOrNull(pkRaw),
             pendingPayout: BigInt(pendingPayout ?? 0),
+            stack: BigInt(stack ?? 0), allIn: !!allIn,
             holeCommitted: [BigInt(com0 ?? 0) !== 0n, BigInt(com1 ?? 0) !== 0n],
             holeRevealed: [!!hr0, !!hr1],
             holeCards: [num(hc0), num(hc1)],
