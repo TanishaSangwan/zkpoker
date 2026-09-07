@@ -11,6 +11,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { AccountInterface, ProviderInterface } from 'starknet';
 import styles from '../poker.module.css';
 import uni from '../../uni.module.css';
+import Why from './Why';
 import type { TableState } from '../useTableState';
 import { asU256, decodeError, executeAndWait, pgCall, erc20ApproveCall, STREET_NAMES } from '../contract';
 import type { SeatIdentity } from '@/lib/identity';
@@ -379,12 +380,12 @@ export default function PhasePanel(p: Props) {
           <button className={uni.btn} disabled={!!busy} onClick={registerKey}>
             Register key share
           </button>
-          <span className={styles.fieldHint}>
+          <Why>
             Happening automatically — this button is only a retry. Generates a Grumpkin key in this
             browser and proves you know its secret. Mandatory, and not a preference: without the
             proof the last seat to register could choose a share making the joint key theirs alone
             and read every hole card at the table.
-          </span>
+          </Why>
         </div>
       ) : null}
 
@@ -407,10 +408,10 @@ export default function PhasePanel(p: Props) {
               >
                 Begin shuffle
               </button>
-              <span className={styles.fieldHint}>
+              <Why>
                 Freezes the participant list and pins the joint key. Every seated player must have
                 registered first — the contract refuses otherwise.
-              </span>
+              </Why>
             </div>
           ) : null}
         </>
@@ -455,13 +456,13 @@ export default function PhasePanel(p: Props) {
               >
                 Dispute the deck
               </button>
-              <span className={styles.fieldHint}>
+              <Why>
                 Only if the deck seat {table.publishedDeckSeat} published does not open the
                 commitment the chain is on. Ends the hand and forfeits <strong>nobody</strong> — the
                 contract cannot check the claim, and nothing has been bet yet, so every seat
                 reclaims exactly what it put in. Do this <em>before</em> your clock expires:
                 afterwards you forfeit.
-              </span>
+              </Why>
             </div>
           ) : null}
           {shuffleClock === 'expired' ? (
@@ -473,10 +474,10 @@ export default function PhasePanel(p: Props) {
               >
                 Claim shuffle timeout
               </button>
-              <span className={styles.fieldHint}>
+              <Why>
                 Voids the hand and forfeits seat {table.shuffleOrder[table.shuffleTurn]}&apos;s stake to
                 everyone else. Callable by anyone — the stalling player will not report themselves.
-              </span>
+              </Why>
             </div>
           ) : null}
         </>
@@ -491,6 +492,12 @@ export default function PhasePanel(p: Props) {
             <Item label="your street total" value={(mySeat?.streetContributed ?? 0n).toString()} />
             <Item label="clock" value={myTurn ? clock : table.roundComplete ? 'round complete' : `seat ${table.actionTurn}`} />
           </div>
+          {myTurn ? (
+            <div className={styles.turnBanner}>
+              <span>Your turn</span>
+              <span className={styles.turnBannerClock}>{clock}</span>
+            </div>
+          ) : null}
           {myTurn ? (
             <div className={styles.actionBar}>
               {/* Check and call are DIFFERENT on-chain actions, and one button
@@ -518,11 +525,11 @@ export default function PhasePanel(p: Props) {
                 placeholder={(mySeat?.toCall ?? 0n) > 0n ? `more than ${mySeat!.toCall}` : 'amount'}
                 value={betAmount}
                 onChange={(e) => setBetAmount(e.target.value)} style={{ maxWidth: 160 }} />
-              <button className={styles.chipBtn} disabled={!!busy || !betAmount}
+              <button className={`${styles.chipBtn} ${styles.chipBtnPrimary}`} disabled={!!busy || !betAmount}
                 onClick={() => run('Betting', () => send('bet', { table_id: table.tableId, seat: String(yourSeat), amount: betAmount }))}>
                 {(mySeat?.toCall ?? 0n) > 0n ? 'Raise' : 'Bet'}
               </button>
-              <button className={styles.chipBtn} disabled={!!busy}
+              <button className={`${styles.chipBtn} ${styles.chipBtnFold}`} disabled={!!busy}
                 onClick={() => run('Folding', () => send('fold', { table_id: table.tableId, seat: String(yourSeat) }))}>
                 Fold
               </button>
@@ -540,10 +547,10 @@ export default function PhasePanel(p: Props) {
                 onClick={() => run('Folding the clock', () => send('claim_action_timeout', { table_id: table.tableId }))}>
                 Fold seat {table.actionTurn} on time
               </button>
-              <span className={styles.fieldHint}>
+              <Why>
                 Folds the seat and play continues — a missing bet costs nothing to supply, so this is
                 the one stall that is recoverable. Their chips stay in the pot.
-              </span>
+              </Why>
             </div>
           ) : null}
           <div className={styles.actionsRow}>
@@ -557,11 +564,11 @@ export default function PhasePanel(p: Props) {
                 Advance street
               </button>
             ) : null}
-            <span className={styles.fieldHint}>
+            <Why>
               Anyone may advance a completed round — it takes no input beyond the table and its
               precondition is checked on-chain, so no dealer has to be online for the hand to
               continue.
-            </span>
+            </Why>
           </div>
         </>
       ) : null}
@@ -594,13 +601,13 @@ export default function PhasePanel(p: Props) {
             <button className={uni.btn} disabled={!!busy} onClick={openChunk}>
               Open chunk {table.deckOpenChunk + 1} of {chunks}
             </button>
-            <span className={styles.fieldHint}>
+            <Why>
               Binds the in-play ciphertexts to the deck the chain committed to. The contract cannot
               check that itself — the commitment is a Poseidon2 hash over BN254 and Cairo&apos;s
               Poseidon is over the STARK field — so this proof is what stops a fabricated deck.
               Needs no secret, so anyone at the table can do it. The circuit opens 16 slots at a
               time, and the last chunk repeats the final position to fill up.
-            </span>
+            </Why>
           </div>
         </>
       ) : null}

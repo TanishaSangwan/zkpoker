@@ -12,6 +12,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { AccountInterface, ProviderInterface } from 'starknet';
 import styles from '../poker.module.css';
 import uni from '../../uni.module.css';
+import Why from './Why';
 import type { TableState } from '../useTableState';
 import { asU256, decodeError, executeAndWait, pgCall, pokerGameReader, readU256 } from '../contract';
 import type { SeatIdentity } from '@/lib/identity';
@@ -839,12 +840,12 @@ export default function RevealPanel(p: Props) {
             <button className={uni.btn} disabled={!!busy} onClick={dealMyHoleCards}>
               Deal my hole cards
             </button>
-            <span className={styles.fieldHint}>
+            <Why>
               Happening automatically — this button is only a retry. Collects a share from every
               seat, verifies each against that seat&apos;s registered key, and commits to the
               combination <em>before</em> betting, which is what stops anyone shopping for a
               friendlier share set after seeing the board.
-            </span>
+            </Why>
           </div>
 
           {/* Serving shares is automatic. It is left switchable because the
@@ -943,14 +944,14 @@ export default function RevealPanel(p: Props) {
                 onClick={() => run('Settling', () => send('settle_from_reveals', { table_id: table.tableId }))}>
                 Settle
               </button>
-              <span className={styles.fieldHint}>
+              <Why>
                 Settling takes no input beyond the table — every card comes from storage a reveal
                 proof bound — so anyone may call it and nobody can steer it, and it is refused until
                 the showdown is actually over. There is no muck: every contender shows, and a seat
                 that does not show before the clock runs out forfeits its claim on the pot.
                 Helping others show is automatic, since their card needs a share from every seat and
                 sitting out only stops the hand resolving.
-              </span>
+              </Why>
             </div>
           ) : null}
         </>

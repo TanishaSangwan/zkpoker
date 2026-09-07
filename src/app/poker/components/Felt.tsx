@@ -45,10 +45,12 @@ function Seat({
     styles.seat,
     !seat.occupied ? styles.seatEmpty : '',
     you ? styles.seatYou : '',
+    seat.occupied && seat.folded ? styles.seatFolded : '',
+    onTurn ? styles.seatTurn : '',
   ].filter(Boolean).join(' ');
 
   return (
-    <div className={cls} style={{ ...seatStyle(seat.seat, total), ...(onTurn ? { boxShadow: '0 0 0 2px #f5c542' } : {}) }}>
+    <div className={cls} style={seatStyle(seat.seat, total)}>
       {!seat.occupied ? (
         <>seat {seat.seat}<br />empty</>
       ) : (
@@ -138,7 +140,7 @@ export default function Felt({
             : STREET_NAMES[table.street] ?? `street ${table.street}`}
         </div>
         {table.bigBlind > 0n ? (
-          <div className={styles.feltStreet} style={{ opacity: 0.7 }}>
+          <div className={styles.feltSub}>
             blinds {table.smallBlind.toString()}/{table.bigBlind.toString()}
             {table.blindLevelHands > 0 ? ` · level ${table.blindLevel + 1}` : ''}
             {table.handNumber > 0 ? ` · hand ${table.handNumber + 1}` : ''}
