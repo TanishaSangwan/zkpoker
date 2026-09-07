@@ -185,13 +185,60 @@ export class RelayTransport implements Transport {
   close() { this.stop(); this.handlers.clear(); }
 }
 
+/** Where a viewer-set relay override is kept. Per browser, per device. */
+const RELAY_OVERRIDE_KEY = 'zkpoker.relayUrl';
+
 /**
  * The transport this deployment should use.
  *
  * A relay URL means a real game between separate clients; without one, the
  * BroadcastChannel fallback still demonstrates a table across tabs of one
  * browser. Chosen here rather than at each call site so there is one answer.
+ *
+ * A viewer-set override wins over the build-time default, and that ordering
+ * is the point rather than a convenience. `NEXT_PUBLIC_RELAY_URL` is inlined
+ * at BUILD time, so without this the relay is frozen into the bundle: every
+ * public deployment could only ever talk to whichever relay existed when it
+ * was compiled, and standing up a new one -- or a tunnel, whose hostname
+ * changes every session -- would mean rebuilding and redeploying the whole
+ * app to change one string. Players on different devices need to agree on a
+ * relay at run time, so it is set at run time.
+ *
+ * Storing it per browser is also the right scope: two people at one table
+ * must point at the SAME relay, but nothing about that choice belongs to the
+ * table, the chain, or anyone else's client.
  */
 export function relayUrl(): string | null {
-  return shareRelayUrl && shareRelayUrl !== '0' ? shareRelayUrl : null;
+  const override = relayOverride();
+  const chosen = override ?? shareRelayUrl;
+  return chosen && chosen !== '0' ? chosen : null;
+}
+
+/** The viewer's own relay setting, or null if they have not set one. */
+export function relayOverride(): string | null {
+  try {
+    const v = localStorage.getItem(RELAY_OVERRIDE_KEY);
+    return v && v.trim() ? v.trim() : null;
+  } catch {
+    // Private mode, or storage blocked. The build-time default still applies.
+    return null;
+  }
+}
+
+/**
+ * Point this browser at a relay. Pass null to go back to the built-in value.
+ *
+ * Returns the value stored, so a caller can show what actually took effect
+ * rather than what it asked for.
+ */
+export function setRelayOverride(url: string | null): string | null {
+  const v = url?.trim() ?? '';
+  try {
+    if (!v) localStorage.removeItem(RELAY_OVERRIDE_KEY);
+    else localStorage.setItem(RELAY_OVERRIDE_KEY, v);
+  } catch {
+    // Storage blocked: the setting lasts for this page only, which is still
+    // better than refusing to accept it.
+  }
+  return v || null;
 }

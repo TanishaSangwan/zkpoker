@@ -25,7 +25,7 @@ import {
   revealHoleArgs, saveHoleOpening,
 } from '@/lib/reveal';
 import { BroadcastTransport, type Transport } from '@/lib/shares';
-import { RelayTransport, relayUrl } from '@/lib/relayTransport';
+import { RelayTransport, relayOverride, relayUrl, setRelayOverride } from '@/lib/relayTransport';
 import { communityPosition, seatHolePositions } from '@/lib/deck';
 
 type Props = {
@@ -66,6 +66,12 @@ export default function RevealPanel(p: Props) {
   // exchange real. Either way every hole share is encrypted to its recipient
   // before it leaves, so the transport is never trusted.
   const [transportKind, setTransportKind] = useState<'relay' | 'local'>('local');
+  // Read in an effect, not here: localStorage does not exist on the server,
+  // and seeding state from it during render is a hydration mismatch.
+  const [relayInput, setRelayInput] = useState('');
+  const [relayRev, setRelayRev] = useState(0);
+  const [activeRelay, setActiveRelay] = useState<string | null>(null);
+  useEffect(() => { setRelayInput(relayOverride() ?? ''); }, []);
   useEffect(() => {
     const url = relayUrl();
     const t: Transport & { close: () => void } = url
@@ -73,6 +79,7 @@ export default function RevealPanel(p: Props) {
       : new BroadcastTransport(table.tableId);
     transport.current = t;
     setTransportKind(url ? 'relay' : 'local');
+    setActiveRelay(url);
     // `served` is per TABLE, not per tab. Without this it survives a table
     // change, and deck positions are small integers that collide immediately:
     // a tab that served seat 0's holes (positions 0 and 1) on one table then
@@ -86,7 +93,10 @@ export default function RevealPanel(p: Props) {
     // protocol asymmetry and is not one.
     served.current = new Set();
     return () => { t.close(); };
-  }, [table.tableId]);
+    // relayRev: changing the relay must tear the old connection down and
+    // reconnect, not wait for a reload. It also clears `served`, which is
+    // correct -- a new relay has heard none of what the old one carried.
+  }, [table.tableId, relayRev]);
 
   // Wake the DLEQ prover as soon as there is a deck, not when the clock is
   // running.
@@ -828,10 +838,42 @@ export default function RevealPanel(p: Props) {
           <>
             <strong>No relay.</strong> Shares are going over BroadcastChannel, which only reaches
             other <em>tabs of this browser</em> — another player&apos;s client will never receive
-            them, and both sides will wait forever. Start <code>node scripts/relay.mjs</code> and
-            reload.
+            them, and both sides will wait forever. Run <code>node scripts/relay.mjs</code>, or
+            point this browser at one below.
           </>
         )}
+      </div>
+
+      {/* Set at run time, not baked in. NEXT_PUBLIC_RELAY_URL is inlined when
+          the app is BUILT, so a deployed build could otherwise only ever talk
+          to the relay that existed at compile time -- and players on separate
+          devices need to agree on one now, without a redeploy. Everyone at a
+          table must enter the SAME url. */}
+      <div className={styles.actionsRow}>
+        <label className={styles.fieldHint} style={{ display: 'flex', alignItems: 'center', gap: 6, flex: 1 }}>
+          Relay
+          <input
+            className={styles.input}
+            style={{ flex: 1, minWidth: 220 }}
+            placeholder={activeRelay ?? 'https://your-relay.example — blank uses this build\u2019s default'}
+            value={relayInput}
+            onChange={(e) => setRelayInput(e.target.value)}
+          />
+        </label>
+        <button
+          className={uni.btn}
+          onClick={() => {
+            setRelayOverride(relayInput || null);
+            setRelayRev((n) => n + 1);
+            say(relayInput ? `relay set to ${relayInput}` : 'relay reset to this build\u2019s default');
+          }}>
+          Use this relay
+        </button>
+        <span className={styles.fieldHint}>
+          Every player at the table must point at the same one. It is trusted with nothing —
+          shares are sealed to the recipient&apos;s registered key and carry a proof the recipient
+          checks — so any of you can host it.
+        </span>
       </div>
 
       {yourSeat !== null ? (

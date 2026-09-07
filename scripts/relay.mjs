@@ -31,7 +31,20 @@
 // EventSource is native in the browser and streamable via fetch in Node.
 import { createServer } from 'node:http';
 
-const PORT = Number(process.env.RELAY_PORT ?? 3100);
+// RELAY_PORT is the local knob; PORT is what every hosting platform injects.
+// Both, so `node scripts/relay.mjs` works unchanged and a deployed instance
+// works without editing this file.
+const PORT = Number(process.env.RELAY_PORT ?? process.env.PORT ?? 3100);
+
+// Loopback locally, every interface when hosted.
+//
+// The default is deliberately NOT 0.0.0.0: running a relay to play a hand on
+// your own machine should not also publish it to your network. But bound to
+// loopback a hosted instance is unreachable -- the platform's router cannot
+// see it -- and it fails as a timeout rather than an error, which is a bad
+// afternoon. So: if a platform told us its PORT, it intends to route traffic
+// here, and we listen accordingly. RELAY_HOST overrides either way.
+const HOST = process.env.RELAY_HOST ?? (process.env.PORT ? '0.0.0.0' : '127.0.0.1');
 
 /** table id -> set of SSE response streams */
 const rooms = new Map();
@@ -158,8 +171,8 @@ const server = createServer((req, res) => {
   res.writeHead(404); res.end('not found');
 });
 
-server.listen(PORT, '127.0.0.1', () => {
-  console.log(`share relay on http://127.0.0.1:${PORT}`);
+server.listen(PORT, HOST, () => {
+  console.log(`share relay on http://${HOST}:${PORT}`);
   console.log('  GET  /events?table=<id>   SSE stream');
   console.log('  POST /publish             {tableId, ...envelope}');
   console.log('\nIt understands none of what it carries. See the header for why that is safe.');
