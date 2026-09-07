@@ -705,6 +705,22 @@ export default function RevealPanel(p: Props) {
     if (!autoServe || yourSeat === null || !account || !provider) return;
     if (!table.buttonSet || table.blindsPosted || table.settled || table.voided) return;
     if (table.bigBlind === 0n) return; // a table with no structure
+    // NOT until the deck is open, even though the contract would allow it.
+    //
+    // post_blinds needs only button_set and street 0, and button_set is
+    // written by begin_shuffle -- so this used to fire the instant the shuffle
+    // opened, putting real money on the table before a single card existed.
+    // Then the 600s shuffle clock ran with the pot funded, and a shuffle that
+    // did not land in time cost the small blind: exactly what happened on
+    // TABLE_2, where 30 STRK sat on a table that was never dealt and the
+    // stalled seat forfeited 10 of it.
+    //
+    // Waiting costs nothing. The blinds are still fixed before any card is
+    // READABLE -- the deck opens as ciphertexts and needs every seat's share
+    // to reveal anything -- so the property that matters (stakes not tuned to
+    // a deal) holds either way. It also matches phaseOf, which already puts
+    // 'posting' after 'opening'; the client was contradicting its own model.
+    if (!table.deckOpened) return;
     if (postedFor.current === table.handNumber) return;
     postedFor.current = table.handNumber;
     say('posting the blinds');
@@ -723,7 +739,8 @@ export default function RevealPanel(p: Props) {
       }
     })();
   }, [autoServe, yourSeat, account, provider, table.buttonSet, table.blindsPosted,
-      table.settled, table.voided, table.bigBlind, table.handNumber, table.tableId, say]);
+      table.deckOpened, table.settled, table.voided, table.bigBlind, table.handNumber,
+      table.tableId, say]);
 
   // ── deal your own cards without being asked ───────────────────────────
   //
