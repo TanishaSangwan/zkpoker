@@ -1,8 +1,50 @@
 # Deployments
 
-## Starknet Sepolia — 2026-09-07 (fused shuffle+open redeploy)
+## Starknet Sepolia — 2026-09-08 (stacks, all-in, side pots)
 
-The current deployment. Public, permanent, and readable by anyone at
+The current deployment.
+
+| | class hash | address |
+|---|---|---|
+| `UltraKeccakZKHonkVerifier` (shuffle) | `0x052273e9c0b297c2aabe7f97fa2d10727a6ba113c44c69d9123eda277a3ea8c1` | `0x04f9be63aa39f83da74659e32bdb8bc0114f449ff47b93d70b9602b1c3a80541` |
+| `UltraKeccakZKHonkVerifier` (shuffle+open) | `0x02c3c713738112c195b07aabdab09499e3ee01083ee7ab87b943a3040928ccb8` | `0x066a5f04dc4d34630d753e7094d58a8f4bace08a7b50a51485df18c4ba58f255` |
+| `UltraKeccakZKHonkVerifier` (deck open, K=19) | `0x022c7ee726115333ef86c172dea4d794aaa5eef01ed7922d83a40811b28e28e6` | `0x01ed80924c16e11f709784bcd05f98ecf378db726f3fc42111b11b8e162fccb8` |
+| `SchnorrKeyVerifier` | `0x05c89ad6970fcccd1ae338de0509b189f9a37004470898d451ebb4be92f8537e` | `0x03fa647c8158bed248f33de1d7666a37efa8e1ed27ac8762a6fe01b195501766` |
+| `DleqVerifier` | `0x07258c8fea11a1b883e1bf8ec83d7d60898d33d09f6e7fd6e5e2efe06b793329` | `0x062ef330e18c2e052417912ddd21b9dc980f09df03d9a44ae915390e84a0eef4` |
+| `VerifierAdapter` | `0x0005ea1a1e9d87b175564e871c7c6570b8aab28f47066f74b812d6235a9c50be` | `0x04c58a3fa9a221439908871d21cbf2f05ef72ed1e74197a2e96298b90cc4b3a1` |
+| `PokerGame` | *(new)* | `0x0042d80afb94a3ec7984a97e1b9790593b2eb8aed77f96c717ebe236434bd75d` |
+
+**What is new.** `table_buy_in` is enforced: a table created with a buy-in
+escrows chips at `join_table`, betting draws them down, a seat that cannot
+cover may fold or go all-in, and settlement splits the pot into layers so a
+short stack wins only what it matched. `leave_table` cashes out between
+hands. The rising blind ladder takes a `unit`, so `10^18` gives 10/20 STRK
+through 300/600 STRK instead of 10/20 wei. A table created with `buy_in = 0`
+keeps the original wallet-funded betting exactly as it was.
+
+**Only `PokerGame` was redeclared** — the six other classes were already on
+chain from the 2026-09-07 deploy and reported as such, which is why this cost
+a third of that one. Verified live: **99 entrypoints**, including
+`leave_table`, `get_seat_stack`, `get_seat_all_in`, `get_table_buy_in` and
+`get_blind_level_unit`.
+
+### What it cost
+
+**150.69 STRK** (459.93 -> 309.24 on the deployer).
+
+The first attempt was REJECTED AT VALIDATION without spending anything:
+`Resources bounds ... exceed balance`, wanting ~338 STRK against 259.93. That
+number is the declare's resource BOUND, not its price — the declare that
+followed cost 150.69. So a redeploy needs roughly twice its own cost sitting
+in the account before it will start.
+
+**`scripts/deploy_local.sh` rewrites `.env.local` only.** `.env.production` is
+what the hosted build reads and has to be updated by hand, or the deployed
+frontend keeps pointing at the previous contract.
+
+## Starknet Sepolia — 2026-09-07 (fused shuffle+open) — SUPERSEDED
+
+The previous deployment. Public, permanent, and readable by anyone at
 `sepolia.voyager.online`.
 
 | | class hash | address |
