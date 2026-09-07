@@ -14,7 +14,7 @@ import styles from '../poker.module.css';
 import uni from '../../uni.module.css';
 import Why from './Why';
 import type { TableState } from '../useTableState';
-import { asU256, decodeError, executeAndWait, pgCall, pokerGameReader, readU256 } from '../contract';
+import { asU256, decodeError, executeAndWait, pgCall, pokerGameReader, readU256, SHOWDOWN_STREET } from '../contract';
 import type { SeatIdentity } from '@/lib/identity';
 import { fromWire, type Point, cardToName } from '@/lib/grumpkin';
 import { randomFelt } from '@/lib/felt';
@@ -457,6 +457,7 @@ export default function RevealPanel(p: Props) {
   latest.current = { keys, table, identity, openedAt, gatherShares, refresh, send };
   const [autoServe, setAutoServe] = useState(true);
   const [autoShow, setAutoShow] = useState(true);
+  const [autoSettle, setAutoSettle] = useState(true);
   // Automatic-coordination status (share serving, reveals, blind posting)
   // used to accumulate as a local <pre> block that only ever grew. It goes
   // to the shared activity log now, same as everything else -- see
@@ -921,6 +922,56 @@ export default function RevealPanel(p: Props) {
     })();
   }, [table.showdownStarted, table.showdownDeadline, table.settled, account, provider]);
 
+  // ── settling ───────────────────────────────────────────────────────────
+  //
+  // The last thing at the table that still needed a human to press a button.
+  // Every other step drives itself -- shares, shows, the street, the next hand
+  // -- so a finished showdown sat there with the pot unpaid until somebody
+  // noticed the Settle button.
+  //
+  // Safe to automate for the same reason advance_street is: settle_from_reveals
+  // takes nothing but the table id. Every card it scores comes from storage a
+  // reveal proof already bound, so the caller supplies no input and steers no
+  // outcome, and anyone may send it.
+  //
+  // Gated on the SAME conditions the contract checks, rather than sent
+  // hopefully and allowed to revert -- a poll loop that fires a doomed
+  // transaction every few seconds is not automation, it is a faucet pointed at
+  // your gas.
+  const settleReady = (() => {
+    if (table.street !== SHOWDOWN_STREET || table.settled || table.voided) return false;
+    const contenders = table.seats.filter((s) => s.inHand && !s.folded && !s.forfeited);
+    // Nobody left to pay, or nobody to beat: the contract short-circuits both
+    // before it asks for cards, so neither waits on a reveal.
+    if (contenders.length <= 1) return true;
+    // Contested. Every contender must have shown, or the clock must have run
+    // out on the ones who did not -- and the board has to be complete, because
+    // a hand is scored against it.
+    const shown = contenders.every((s) => s.holeRevealed[0] && s.holeRevealed[1]);
+    const expired = table.showdownDeadline !== 0
+      && Date.now() > table.showdownDeadline * 1000;
+    return (shown || expired) && table.community.every((c) => c.revealed);
+  })();
+
+  const settling = useRef(false);
+  useEffect(() => {
+    if (!autoSettle || !settleReady) return;
+    if (!account || !provider || settling.current) return;
+    settling.current = true;
+    void (async () => {
+      try {
+        await send('settle_from_reveals', { table_id: table.tableId });
+        refresh();
+      } catch {
+        // Someone else settled first, which is the point of it being
+        // permissionless -- or a share landed between the gate and the send
+        // and the next poll will re-decide.
+      } finally {
+        settling.current = false;
+      }
+    })();
+  }, [autoSettle, settleReady, table.tableId, account, provider]);
+
   // ── accusations ────────────────────────────────────────────────────────
   const [accSeat, setAccSeat] = useState('0');
   const [accPos, setAccPos] = useState('0');
@@ -1095,6 +1146,10 @@ export default function RevealPanel(p: Props) {
                 <input type="checkbox" checked={autoShow} onChange={(e) => setAutoShow(e.target.checked)} />
                 Show my hand automatically at showdown
               </label>
+              <label className={styles.fieldHint} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <input type="checkbox" checked={autoSettle} onChange={(e) => setAutoSettle(e.target.checked)} />
+                Settle automatically once the showdown is over
+              </label>
               {/* One button for the hand, not one per card: both reveals go in
                   a single transaction, which is also one fewer round trip
                   against the showdown clock. */}
@@ -1120,7 +1175,7 @@ export default function RevealPanel(p: Props) {
               })()}
               <button className={uni.btn} disabled={!!busy}
                 onClick={() => run('Settling', () => send('settle_from_reveals', { table_id: table.tableId }))}>
-                Settle
+                Settle{autoSettle && settleReady ? ' now' : ''}
               </button>
               <Why>
                 Settling takes no input beyond the table — every card comes from storage a reveal
