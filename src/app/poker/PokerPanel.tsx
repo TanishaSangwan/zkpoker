@@ -449,12 +449,12 @@ function CreateTable(p: any) {
   const [token, setToken] = useState(
     providerIndex === 3 ? constants.defaultDevnetToken : constants.defaultPokerToken,
   );
-  const [buyIn, setBuyIn] = useState('1000');
+  const [buyIn, setBuyIn] = useState('200000000000000000000'); // 200 STRK
   const [maxSeats, setMaxSeats] = useState('3');
   // A conventional 1/2 of the buy-in's hundredth, i.e. a 50-big-blind stack.
   // Editable, because the right stakes for a table are the table's business.
-  const [smallBlind, setSmallBlind] = useState('10');
-  const [bigBlind, setBigBlind] = useState('20');
+  const [smallBlind, setSmallBlind] = useState('10000000000000000000'); // 10 STRK
+  const [bigBlind, setBigBlind] = useState('20000000000000000000'); // 20 STRK
   // Hands per rung of the rising ladder. Empty or 0 means fixed blinds, which
   // is what the two fields above are for -- the two structures are exclusive,
   // and the contract refuses a schedule of 0.
@@ -512,12 +512,12 @@ function CreateTable(p: any) {
       </div>
       <div className={styles.grid3}>
         <Field label="buy-in token" value={token} onChange={setToken} />
-        <Field label="buy-in" value={buyIn} onChange={setBuyIn} />
+        <Field label="buy-in" value={buyIn} onChange={setBuyIn} hint={asStrk(buyIn)} />
         <Field label="max seats" value={maxSeats} onChange={setMaxSeats} />
         {blindMode === 'fixed' ? (
           <>
-            <Field label="small blind" value={smallBlind} onChange={setSmallBlind} />
-            <Field label="big blind" value={bigBlind} onChange={setBigBlind} />
+            <Field label="small blind" value={smallBlind} onChange={setSmallBlind} hint={asStrk(smallBlind)} />
+            <Field label="big blind" value={bigBlind} onChange={setBigBlind} hint={asStrk(bigBlind)} />
           </>
         ) : (
           <Field label="hands per blind level" value={levelHands} onChange={setLevelHands} />
@@ -536,8 +536,8 @@ function CreateTable(p: any) {
         </label>
         <span className={styles.fieldHint}>
           {blindMode === 'rising'
-            ? 'Ladder is fixed in the contract — 10/20, 20/40, 30/60, 50/100, 100/200, 200/400, 300/600, then held. You choose the pace, not the price.'
-            : 'The same small/big every hand.'}{' '}
+            ? 'Ladder is fixed in the contract — 10/20 up to 300/600, then held. You choose the pace, not the price. DEMO SCALE ONLY: those rungs are raw base units, so the top one is 6e-16 STRK — the whole ladder is dust against a hand of gas. Use fixed blinds for a stake worth playing for.'
+            : 'The same small/big every hand, and the only mode that can express a real stake — the amount is yours to choose.'}{' '}
           <strong>Decide now:</strong> a schedule is only accepted before the first hand, so a
           table created with fixed blinds can never be switched to rising.
         </span>
@@ -561,13 +561,40 @@ function CreateTable(p: any) {
   );
 }
 
-function Field({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) {
+function Field(
+  { label, value, onChange, hint }:
+  { label: string; value: string; onChange: (v: string) => void; hint?: string },
+) {
   return (
     <div className={styles.field}>
       <label className={styles.label}>{label}</label>
       <input className={styles.input} value={value} onChange={(e) => onChange(e.target.value)} />
+      {hint ? <span className={styles.fieldHint}>{hint}</span> : null}
     </div>
   );
+}
+
+/**
+ * Base units as a human amount.
+ *
+ * Every amount this contract takes is a raw u128 in the token's smallest
+ * unit, and nothing converts: a "10" typed here is TEN WEI, not ten STRK.
+ * With 18 decimals that is 1e-17 STRK, which is how a table ended up with
+ * blinds of 10/20 while a hand of gas cost ~86 STRK -- the stakes were
+ * seventeen orders of magnitude below the cost of playing for them.
+ *
+ * Shown next to every amount field rather than converted for you, because
+ * the field is what goes on chain and a silent multiply would be its own
+ * trap.
+ */
+function asStrk(raw: string): string {
+  let v: bigint;
+  try { v = BigInt(raw.trim() || '0'); } catch { return 'not a number'; }
+  if (v === 0n) return '0 STRK';
+  const whole = v / 10n ** 18n;
+  const frac = (v % 10n ** 18n).toString().padStart(18, '0').replace(/0+$/, '');
+  if (whole === 0n) return `0.${frac} STRK — dust; a hand of gas costs ~86 STRK`;
+  return `= ${whole}${frac ? `.${frac}` : ''} STRK`;
 }
 
 /**

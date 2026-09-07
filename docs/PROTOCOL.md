@@ -1611,6 +1611,34 @@ one rung every `hands_per_level` hands, **clamped** at the top rung. Clamping,
 not wrapping: a ladder that wrapped would take a table from 300/600 back to
 10/20 and quietly undo every stack it had just decided.
 
+**The rungs are DEMO SCALE, and that is a defect, not a decision.** They are
+hardcoded `u128` literals in `blind_level_amounts`, and every amount this
+contract takes is a raw base unit with no conversion anywhere. Against
+18-decimal STRK the top rung, 300/600, is **6×10⁻¹⁶ STRK** — while a
+three-handed hand of gas measured **~86 STRK** after §6.5. The stakes sit
+seventeen orders of magnitude below the cost of playing for them, and because
+the rungs are compiled in, a rising-blind table cannot be scaled to fix it.
+
+`set_blinds` has no such limit: it takes an arbitrary `u128`, so a fixed-blind
+table can be set to 10/20 **STRK** (`10000000000000000000` /
+`20000000000000000000`) and is the only mode that expresses a real stake
+today. The client defaults to fixed blinds at that scale and labels the
+rising option as demo-only.
+
+The fix, when a contract change is next worth its redeploy (§6.4: the last one
+cost 391.39 STRK), is a unit multiplier — `set_blind_schedule(table_id,
+hands_per_level, unit)` with rung amounts multiplied by `unit`, so `unit =
+10^18` yields 10/20 STRK through 300/600 STRK. It is deliberately NOT a
+per-table rung table: the point of compiling the ladder in is that the dealer
+picks the pace and not the price.
+
+The same units trap applies to `buy_in`, which has a second problem on top of
+it: `table_buy_in` is written by `create_table` and **never read**. There is
+no getter, `join_table` moves no tokens, and betting pulls from the player's
+wallet at bet time (`transfer_from` inside `bet`). So there is no stack, no
+cap, and no all-in — a seat's balance is its stack, and the buy-in is
+decorative.
+
 **The rungs are fixed in the contract, not passed in.** The dealer chooses the
 pace, not the price. A dealer-chosen ladder is a lever over other players'
 stacks, and `set_blinds` already covers a table that wants to name its own
