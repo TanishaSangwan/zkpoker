@@ -88,7 +88,17 @@ const L2_GAS_CAP = 1_209_000_000n;
 // Only the two entrypoints that verify a SNARK come anywhere near the cap.
 // Estimating costs a round trip, and making every check and bet pay for one
 // would be felt on a public chain, where this page already waits on blocks.
-const PROOF_ENTRYPOINTS = new Set(['submit_shuffle', 'open_deck']);
+// Every entrypoint that verifies a SNARK, and therefore every one whose
+// estimate can breach Starknet's per-transaction L2 gas cap.
+//
+// Miss one and the raw estimate goes to the node, which refuses the whole
+// transaction: "Max gas amount is too high: GasAmount(1292125200), maximum
+// allowed gas amount: 1210000000". That is exactly what happened to
+// submit_final_shuffle -- it was added as a new proof path and not added
+// here. The fused proof costs ~853M; it is the estimator's safety margin on
+// top that breaches the cap, so the bound has to be clamped even though the
+// work fits.
+const PROOF_ENTRYPOINTS = new Set(['submit_shuffle', 'submit_final_shuffle', 'open_deck']);
 
 /**
  * Resource bounds for `calls`, or undefined to let the account estimate.
