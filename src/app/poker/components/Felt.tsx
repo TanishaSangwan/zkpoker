@@ -15,11 +15,8 @@ function Card({ card }: { card: number }) {
   const { rank, suit, red } = cardToGlyph(card);
   return (
     <div className={`${styles.cardFace} ${red ? styles.cardFaceRed : ''}`} title={`${rank}${suit}`}>
-      <span className={styles.cardCorner}>
-        <span>{rank}</span>
-        <span>{suit}</span>
-      </span>
-      <span className={styles.cardPip}>{suit}</span>
+      <span className={styles.cardRank}>{rank}</span>
+      <span className={styles.cardSuit}>{suit}</span>
     </div>
   );
 }

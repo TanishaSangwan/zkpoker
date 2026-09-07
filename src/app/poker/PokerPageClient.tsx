@@ -23,14 +23,15 @@ const BG_TOKENS: BgToken[] = [
 ];
 
 // The hero's paragraph-of-facts got replaced by four short claims -- what
-// used to take a sentence each now takes three words, with a dot coloured
-// to the same accent the rest of the page uses for that kind of state
-// (green = a property of the protocol, purple = where it runs / who sees it).
-const HERO_PILLS: { text: string; color: 'green' | 'pink' }[] = [
-  { text: 'No trusted dealer', color: 'green' },
-  { text: 'Provably fair shuffle', color: 'green' },
-  { text: 'Hole cards stay yours', color: 'pink' },
-  { text: 'Runs in your browser', color: 'pink' },
+// used to take a sentence each now takes three words. One colour (green)
+// for all of them: they're all the same kind of claim -- a guarantee the
+// protocol gives you -- so mixed colours were signalling a distinction
+// that doesn't exist.
+const HERO_PILLS = [
+  'No trusted dealer',
+  'Provably fair shuffle',
+  'Hole cards stay yours',
+  'Runs in your browser',
 ];
 
 export default function PokerPageClient() {
@@ -63,10 +64,10 @@ export default function PokerPageClient() {
         <p className={styles.heroTagline}>Shuffle like no one&apos;s watching. Because no one can.</p>
         <p className={styles.heroSub}>Every card dealt, proven and revealed — with no dealer to trust.</p>
         <ul className={styles.heroPills}>
-          {HERO_PILLS.map((p) => (
-            <li key={p.text} className={styles.heroPill}>
-              <span className={styles.heroPillDot} style={{ color: `var(--${p.color})` }} />
-              {p.text}
+          {HERO_PILLS.map((text) => (
+            <li key={text} className={styles.heroPill}>
+              <span className={styles.heroPillDot} />
+              {text}
             </li>
           ))}
         </ul>

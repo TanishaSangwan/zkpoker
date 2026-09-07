@@ -343,18 +343,25 @@
 .heroPill {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
-  font-size: 11.5px;
+  gap: 8px;
+  font-size: 12px;
   font-weight: 700;
-  letter-spacing: 0.02em;
-  padding: 8px 14px;
+  letter-spacing: 0.01em;
+  padding: 9px 16px;
   border-radius: 999px;
-  border: 1px solid var(--line);
-  background: var(--card);
+  border: 1px solid var(--green-soft-2);
+  background: linear-gradient(180deg, var(--green-soft), var(--card) 130%);
   color: var(--ink);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35), 0 0 18px -10px rgba(60, 240, 168, 0.7);
 }
-.heroPillDot { width: 6px; height: 6px; border-radius: 50%; flex: none; box-shadow: 0 0 8px 1px currentColor; }
+.heroPillDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--green);
+  box-shadow: 0 0 8px 2px rgba(60, 240, 168, 0.65);
+}
 
 .tableIdRow {
   display: flex;
@@ -390,9 +397,13 @@
 .felt {
   position: relative;
   width: 100%;
-  aspect-ratio: 16 / 10;
-  min-height: 280px;
-  border-radius: 50% / 45%;
+  aspect-ratio: 16 / 9;
+  min-height: 300px;
+  /* A stadium shape, not a true ellipse: an oversized radius clamps to half
+     the shorter side, the same "999px" trick every pill button in this file
+     already uses. The old two-axis `50% / 45%` pinched at the sides once the
+     min-height floor kicked in on a narrow viewport -- this can't. */
+  border-radius: 999px;
   /* A neon rail instead of a wood one -- still reads as "table edge", now in
      the page's own violet/green accents rather than a mismatched brown. */
   border: 8px solid transparent;
@@ -454,50 +465,53 @@
   from { opacity: 0; transform: translateY(5px) scale(0.88); }
   to { opacity: 1; transform: none; }
 }
+/* A dark plaque with a glowing suit mark, not a busy stripe pattern -- reads
+   as "card, face down" at a glance instead of competing for attention. */
 .cardBack {
-  width: 38px;
-  height: 52px;
-  border-radius: 6px;
-  background:
-    radial-gradient(circle at 50% 50%, rgba(60, 240, 168, 0.3), transparent 65%),
-    repeating-linear-gradient(135deg, #180f2c, #180f2c 4px, #6d28d9 4px, #6d28d9 8px);
-  border: 1px solid rgba(60, 240, 168, 0.55);
-  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.4), inset 0 0 0 1px rgba(177, 102, 255, 0.25);
-  flex: none;
-  animation: cardIn 220ms ease-out;
-}
-.cardFace {
-  position: relative;
-  width: 38px;
-  height: 52px;
-  border-radius: 6px;
-  /* Deliberately NOT var(--ink): this stays a physical white card regardless
-     of page theme, so its text stays a fixed dark ink to read against it --
-     var(--ink) is near-white on the dark skin, which would vanish here. */
-  background: linear-gradient(160deg, #ffffff, #ece7fb);
-  border: 1px solid rgba(0, 0, 0, 0.12);
-  color: #17162a;
+  width: 40px;
+  height: 56px;
+  border-radius: 8px;
   display: flex;
   align-items: center;
   justify-content: center;
+  background: radial-gradient(circle at 50% 42%, #2b1a52, #150c28 75%);
+  border: 2px solid var(--green);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5), inset 0 0 14px rgba(177, 102, 255, 0.4);
   flex: none;
-  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.45), inset 0 0 0 1px rgba(255, 255, 255, 0.6);
   animation: cardIn 220ms ease-out;
 }
-.cardFaceRed { color: #c0392b; }
-.cardCorner {
-  position: absolute;
-  top: 3px;
-  left: 4px;
+.cardBack::after {
+  content: '♠';
+  font-family: var(--font-display, var(--font-body)), sans-serif;
+  font-size: 20px;
+  color: rgba(60, 240, 168, 0.55);
+  text-shadow: 0 0 10px rgba(60, 240, 168, 0.6);
+}
+/* A card, not a chip with two characters on it: rank stacked over suit,
+   bold and large enough to read at a glance, with a border colour that
+   carries the red/black split real cards use. */
+.cardFace {
+  width: 40px;
+  height: 56px;
+  border-radius: 8px;
+  /* Deliberately NOT var(--ink): this stays a physical white card regardless
+     of page theme, so its text stays a fixed dark ink to read against it --
+     var(--ink) is near-white on the dark skin, which would vanish here. */
+  background: linear-gradient(160deg, #ffffff, #eee9fb);
+  border: 2px solid #241d3d;
+  color: #201a38;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 0;
-  line-height: 1;
-  font-size: 9px;
-  font-weight: 800;
+  justify-content: center;
+  gap: 1px;
+  flex: none;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5), inset 0 0 0 1px rgba(255, 255, 255, 0.7);
+  animation: cardIn 220ms ease-out;
 }
-.cardPip { font-size: 21px; font-weight: 800; }
+.cardFaceRed { border-color: #d94a55; color: #c0392b; }
+.cardRank { font-size: 19px; font-weight: 800; line-height: 1; }
+.cardSuit { font-size: 15px; line-height: 1; }
 
 .seat {
   z-index: 1;
