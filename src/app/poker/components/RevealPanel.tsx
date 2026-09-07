@@ -123,7 +123,27 @@ export default function RevealPanel(p: Props) {
     return m;
   }, [table.seats]);
 
+  // A run can be abandoned from the UI.
+  //
+  // `busy` disables every button in this panel, and the gathers inside a
+  // reveal wait up to two minutes each for shares that may never arrive. So
+  // one unanswered seat left the whole panel dead for minutes DURING a
+  // showdown clock, with no way back but reloading the tab -- which is what
+  // happened on TABLE_4, where "Show my hand" was greyed out and nothing said
+  // why. The work itself cannot be cancelled (a promise in flight keeps
+  // running), but the UI must not be held hostage by it: abandoning clears
+  // the lock and lets the seat try again, and a late result from the
+  // abandoned run is ignored rather than allowed to overwrite state.
+  const runId = useRef(0);
+  const abandon = () => {
+    runId.current += 1;
+    setBusy(null);
+    setError('Abandoned. Anything already sent to the chain still stands — re-read the table before retrying.');
+  };
+
   async function run(label: string, fn: () => Promise<string | void>) {
+    const id = ++runId.current;
+    const mine = () => runId.current === id;
     setBusy(label); setError(null); setNote(null);
     try {
       // Every action here ends in a DLEQ somewhere -- sending a share,
@@ -134,12 +154,14 @@ export default function RevealPanel(p: Props) {
       // first share button. Idempotent, so the cost is one check per action.
       await initDleqProver();
       const out = await fn();
+      if (!mine()) return; // abandoned; its result is no longer this panel's
       if (typeof out === 'string') setNote(out);
       refresh();
     } catch (e) {
+      if (!mine()) return;
       setError(decodeError(e));
     } finally {
-      setBusy(null);
+      if (mine()) setBusy(null);
     }
   }
 
@@ -345,13 +367,22 @@ export default function RevealPanel(p: Props) {
    */
   const showHoleCards = (slots: number[]) =>
     run('Showing my hand', async () => {
-      setBusy('running the aggregates for both cards');
-      const args = await Promise.all(slots.map(prepareReveal));
+      setBusy(`running the aggregate${slots.length === 1 ? '' : 's'}`);
+      // allSettled, not all: one slot whose aggregate never completes used to
+      // take the other down with it, so a hand with one gatherable card
+      // showed nothing at all and the seat forfeited a pot it could have
+      // won. Show what can be shown, say what could not.
+      const settled = await Promise.allSettled(slots.map(prepareReveal));
+      const ready = settled.flatMap((r) => (r.status === 'fulfilled' ? [r.value] : []));
+      const failed = settled.flatMap((r, i) =>
+        r.status === 'rejected' ? [`slot ${slots[i]}: ${String(r.reason?.message ?? r.reason).slice(0, 90)}`] : []);
+      if (!ready.length) throw new Error(failed.join(' · ') || 'no aggregate completed');
       const { txHash } = await executeAndWait(
         account!, provider!,
-        args.map((a) => pgCall(contract, 'reveal_hole_card', a as any)),
+        ready.map((a) => pgCall(contract, 'reveal_hole_card', a as any)),
       );
-      return `showed ${args.length} card${args.length === 1 ? '' : 's'} — ${txHash}`;
+      const note = failed.length ? `\nstill missing — ${failed.join(' · ')}` : '';
+      return `showed ${ready.length} card${ready.length === 1 ? '' : 's'} — ${txHash}${note}`;
     });
 
   // ── automatic share service ────────────────────────────────────────────
@@ -786,6 +817,25 @@ export default function RevealPanel(p: Props) {
   //
   // Folded and already-forfeited seats are skipped: they have nothing to show
   // and the contract would reject it.
+  // Why the automatic show is NOT running, when it is a contender's turn to
+  // show and nothing is happening. Same reasoning as shuffleBlocker: an
+  // effect that returns early looks exactly like one that never fired, and
+  // during a showdown the clock is running while you guess.
+  const showdownBlocker = (() => {
+    if (!table.showdownStarted || table.settled) return null;
+    if (yourSeat === null) return 'you are not seated at this table';
+    const me = table.seats[yourSeat];
+    if (!me) return null;
+    if (me.folded) return 'you folded — nothing to show';
+    if (me.forfeited) return 'you forfeited on the clock — the contract will refuse a reveal';
+    if (me.holeRevealed[0] && me.holeRevealed[1]) return null;
+    if (!autoShow) return 'automatic showing is switched off — use "Show my hand"';
+    if (!mySecretHex) return 'no seat key in this browser — reconnect the account that registered';
+    if (!account) return 'no wallet or local account is connected';
+    if (busy) return `waiting on ${busy}`;
+    return null;
+  })();
+
   const showing = useRef(false);
   useEffect(() => {
     if (!autoShow || yourSeat === null || !mySecretHex) return;
@@ -1006,8 +1056,20 @@ export default function RevealPanel(p: Props) {
                   a single transaction, which is also one fewer round trip
                   against the showdown clock. */}
               {(() => {
+                // Only a seat that MAY show gets the button.
+                //
+                // It used to appear for any seat with unrevealed slots, which
+                // includes one that folded -- and a folded seat has nothing to
+                // show, so pressing it started an aggregate no other client
+                // would ever join (the responder refuses a request whose owner
+                // has folded). That seat then sat in a two-minute-per-card
+                // wait with `busy` disabling its whole panel, publishing
+                // shares for its own dead cards, while the contenders needed
+                // it to be answering THEIR rounds instead. That is what
+                // stalled TABLE_4's showdown.
+                const canShow = mySeatState && !mySeatState.folded && !mySeatState.forfeited;
                 const owed = [0, 1].filter((slot) => !mySeatState?.holeRevealed[slot]);
-                return owed.length ? (
+                return canShow && owed.length ? (
                   <button className={`${uni.btn} ${uni.btnPrimary}`} disabled={!!busy} onClick={() => showHoleCards(owed)}>
                     Show my hand{owed.length === 1 ? ` (slot ${owed[0]})` : ''}
                   </button>
@@ -1085,8 +1147,24 @@ export default function RevealPanel(p: Props) {
       </div>
 
       {busy ? <div className={`${uni.receipt} ${uni.receiptPending}`}>
-        <div className={uni.receiptHead}><span className={uni.receiptIcon}>⋯</span><span>{busy}</span></div>
+        <div className={uni.receiptHead}>
+          <span className={uni.receiptIcon}>⋯</span><span>{busy}</span>
+          {/* The way out. A gather waits up to two minutes per card for
+              shares that may never come, and `busy` disables everything --
+              so without this the panel is dead for minutes during a showdown
+              clock and the only escape is reloading the tab. */}
+          <button className={uni.btn} style={{ marginLeft: 'auto' }} onClick={abandon}>
+            Abandon
+          </button>
+        </div>
       </div> : null}
+
+      {/* Why nothing is happening at showdown, when something should be. */}
+      {showdownBlocker ? (
+        <div className={styles.caution}>
+          <strong>Not showing:</strong> {showdownBlocker}
+        </div>
+      ) : null}
       {note ? <div className={`${uni.receipt} ${uni.receiptOk}`}><pre className={uni.receiptNote}>{note}</pre></div> : null}
       {error ? <div className={`${uni.receipt} ${uni.receiptError}`}><pre className={uni.receiptNote}>{error}</pre></div> : null}
     </div>
