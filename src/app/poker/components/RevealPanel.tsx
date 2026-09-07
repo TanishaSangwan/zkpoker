@@ -279,7 +279,7 @@ export default function RevealPanel(p: Props) {
           tableId: table.tableId, seat: yourSeat!, slot, share: D!, blinding,
         }));
         saveHoleOpening(
-          { chainId: p.chainId, contract, tableId: table.tableId, seat: yourSeat!, slot },
+          { chainId: p.chainId, contract, tableId: table.tableId, hand: table.handNumber, seat: yourSeat!, slot },
           { share: { x: D!.x, y: D!.y }, blinding, card, proof: [] },
         );
         out.push(`slot ${slot}: ${cardToName(card)}`);
@@ -334,7 +334,10 @@ export default function RevealPanel(p: Props) {
   // show (see the auto-join gate), and why building it earlier would hand the
   // table a hand nobody had agreed to expose.
   const prepareReveal = async (slot: number) => {
-    const stored = loadHoleOpening({ chainId: p.chainId, contract, tableId: table.tableId, seat: yourSeat!, slot });
+    const stored = loadHoleOpening({
+      chainId: p.chainId, contract, tableId: table.tableId,
+      hand: table.handNumber, seat: yourSeat!, slot,
+    });
     if (!stored) {
       throw new Error(
         `No stored opening for slot ${slot}. It was written at dealing time and is needed to ` +
@@ -424,6 +427,24 @@ export default function RevealPanel(p: Props) {
   // scoping below is the security property, not a convenience.
   const served = useRef<Set<number>>(new Set());
   const joined = useRef<Set<number>>(new Set());
+
+  // The per-position latches are per HAND, not just per table.
+  //
+  // `served` and `joined` are keyed by deck position, and the positions repeat
+  // every hand -- seat s's cards are always at 2s and 2s+1, the board is
+  // always the five after the holes. They are cleared on a table change
+  // already; without clearing them on a HAND change too, the second hand at a
+  // table serves nobody and joins nothing, because every position reads as
+  // already done. Exactly the bug that made a new table silently refuse to
+  // deal, one scope in.
+  const handLatch = useRef<number | null>(null);
+  useEffect(() => {
+    if (handLatch.current === table.handNumber) return;
+    handLatch.current = table.handNumber;
+    served.current = new Set();
+    joined.current = new Set();
+  }, [table.handNumber]);
+
   // The auto-join effect must subscribe ONCE. Anything it needs that changes
   // on every poll -- the seat keys, the community array, the callbacks that
   // close over them -- goes in a ref instead of the dependency array, or the

@@ -149,11 +149,28 @@ export type HoleOpening = {
   proof: bigint[];
 };
 
-const storageKey = (p: { chainId: string; contract: string; tableId: string; seat: number; slot: number }) =>
-  ['zkpoker', 'hole', 'v1', p.chainId, p.contract.toLowerCase(), p.tableId, p.seat, p.slot].join(':');
+/**
+ * Keyed by HAND as well as seat and slot.
+ *
+ * Deck positions repeat every hand -- seat s's cards are always at 2s and
+ * 2s+1 -- so a key without the hand number reads hand 1's opening back on
+ * hand 2 and every hand after it. That is not a stale-display nuisance:
+ * prepareReveal takes the stored card and blinding from here, so a showdown
+ * would try to reopen a commitment from a previous hand and be rejected on
+ * chain, while the table showed cards that were never dealt.
+ *
+ * v2 because v1 entries are keyed without the hand and cannot be migrated --
+ * there is no way to know which hand they belonged to. They simply stop being
+ * found, which is correct: an opening from an unknown hand is not usable.
+ */
+const storageKey = (
+  p: { chainId: string; contract: string; tableId: string; hand: number; seat: number; slot: number },
+) =>
+  ['zkpoker', 'hole', 'v2', p.chainId, p.contract.toLowerCase(), p.tableId, p.hand, p.seat, p.slot]
+    .join(':');
 
 export function saveHoleOpening(
-  p: { chainId: string; contract: string; tableId: string; seat: number; slot: number },
+  p: { chainId: string; contract: string; tableId: string; hand: number; seat: number; slot: number },
   o: HoleOpening,
 ): void {
   try {
@@ -168,7 +185,7 @@ export function saveHoleOpening(
 }
 
 export function loadHoleOpening(p: {
-  chainId: string; contract: string; tableId: string; seat: number; slot: number;
+  chainId: string; contract: string; tableId: string; hand: number; seat: number; slot: number;
 }): HoleOpening | null {
   try {
     const raw = window.localStorage.getItem(storageKey(p));

@@ -206,11 +206,15 @@ export default function PokerPanel() {
     if (!tableId || yourSeat === null) { setMyCards([null, null]); return; }
     setMyCards([0, 1].map((slot) => {
       const o = loadHoleOpening({
-        chainId: String(providerIndex), contract, tableId, seat: yourSeat, slot,
+        chainId: String(providerIndex), contract, tableId,
+        hand: table?.handNumber ?? 0, seat: yourSeat, slot,
       });
       return o ? o.card : null;
     }));
-  }, [tableId, yourSeat, providerIndex, contract, table?.seats]);
+    // handNumber in the deps: the cards CHANGE when the hand does, and
+    // without it the panel kept showing the previous hand's until something
+    // else happened to re-render it.
+  }, [tableId, yourSeat, providerIndex, contract, table?.seats, table?.handNumber]);
   useEffect(() => {
     if (!tableId || !deployed || !provider) return;
     (async () => {
