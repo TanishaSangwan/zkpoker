@@ -72,6 +72,18 @@ export default function RevealPanel(p: Props) {
       : new BroadcastTransport(table.tableId);
     transport.current = t;
     setTransportKind(url ? 'relay' : 'local');
+    // `served` is per TABLE, not per tab. Without this it survives a table
+    // change, and deck positions are small integers that collide immediately:
+    // a tab that served seat 0's holes (positions 0 and 1) on one table then
+    // skips them on the next, silently, because the ref still says "done".
+    //
+    // Found by play. Two seats, two tabs, TABLE_2 then TABLE_3: the seat whose
+    // tab had already served positions 0 and 1 served nothing on the new
+    // table, so its opponent could never combine a share, never commit, and
+    // never see a card -- while the other seat, which owed positions 2 and 3,
+    // worked perfectly. Exactly one seat's cards appear, which reads like a
+    // protocol asymmetry and is not one.
+    served.current = new Set();
     return () => { t.close(); };
   }, [table.tableId]);
 
