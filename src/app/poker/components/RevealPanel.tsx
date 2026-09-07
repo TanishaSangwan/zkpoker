@@ -830,7 +830,7 @@ export default function RevealPanel(p: Props) {
           the failure is silent: with BroadcastChannel the buttons work, the
           messages go nowhere a second client can hear, and both sides sit
           waiting for shares that were genuinely sent. */}
-      <div className={transportKind === 'relay' && relayStatus === 'open' ? styles.chip : styles.caution}>
+      <div className={transportKind === 'relay' && relayStatus === 'open' ? styles.bannerOk : styles.caution}>
         {transportKind === 'relay' && relayStatus !== 'open' ? (
           <>
             {/* A relay that is DOWN must not read the same as one that is
@@ -921,7 +921,7 @@ export default function RevealPanel(p: Props) {
             </span>
             {/* Both auto-effects return early without a joint key, silently.
                 An n-of-n aggregate then stalls with no error anywhere. */}
-            <span className={table.jointKey ? styles.chip : styles.caution}>
+            <span className={table.jointKey ? styles.chipOwner : styles.caution}>
               joint key: {table.jointKey ? 'yes' : 'MISSING'}
             </span>
             <span className={styles.chip}>street {table.street}</span>
@@ -991,7 +991,7 @@ export default function RevealPanel(p: Props) {
               {(() => {
                 const owed = [0, 1].filter((slot) => !mySeatState?.holeRevealed[slot]);
                 return owed.length ? (
-                  <button className={uni.btn} disabled={!!busy} onClick={() => showHoleCards(owed)}>
+                  <button className={`${uni.btn} ${uni.btnPrimary}`} disabled={!!busy} onClick={() => showHoleCards(owed)}>
                     Show my hand{owed.length === 1 ? ` (slot ${owed[0]})` : ''}
                   </button>
                 ) : null;

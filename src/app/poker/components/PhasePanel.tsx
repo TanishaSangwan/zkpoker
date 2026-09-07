@@ -435,7 +435,7 @@ export default function PhasePanel(p: Props) {
           <p className={styles.fieldHint}>
             registered:{' '}
             {table.seats.filter((s) => s.occupied).map((s) => (
-              <span key={s.seat} className={s.keyRegistered ? styles.chip : styles.chipMuted}>
+              <span key={s.seat} className={s.keyRegistered ? styles.chipOwner : styles.chipMuted}>
                 seat {s.seat} {s.keyRegistered ? '✓' : '…'}{' '}
               </span>
             ))}
@@ -443,7 +443,7 @@ export default function PhasePanel(p: Props) {
           {isDealer(table, account) ? (
             <div className={styles.actionsRow}>
               <button
-                className={uni.btn}
+                className={`${uni.btn} ${uni.btnPrimary}`}
                 disabled={!!busy || table.seats.some((s) => s.occupied && !s.keyRegistered) || table.seated.length < 2}
                 onClick={beginShuffle}
               >
@@ -468,7 +468,7 @@ export default function PhasePanel(p: Props) {
                 <input type="checkbox" checked={autoShuffle} onChange={(e) => setAutoShuffle(e.target.checked)} />
                 Shuffle automatically on my turn
               </label>
-              <button className={uni.btn} disabled={!!busy} onClick={doShuffle}>
+              <button className={`${uni.btn} ${uni.btnPrimary}`} disabled={!!busy} onClick={doShuffle}>
                 Shuffle &amp; prove
               </button>
               {shuffleBlocker ? (
@@ -635,7 +635,7 @@ export default function PhasePanel(p: Props) {
               refuses it -- those seats reclaim individually, and dealing over
               the top would strand whatever had not been reclaimed. */}
           {table.phase === 'settled' ? (
-            <button className={uni.btn} disabled={!!busy} onClick={startNextHand}>
+            <button className={`${uni.btn} ${uni.btnPrimary}`} disabled={!!busy} onClick={startNextHand}>
               Start hand {table.handNumber + 1}
             </button>
           ) : null}
@@ -657,7 +657,7 @@ export default function PhasePanel(p: Props) {
             <Item label="chain head" value={`0x${table.commitment.toString(16).slice(0, 10)}…`} />
           </div>
           <div className={styles.actionsRow}>
-            <button className={uni.btn} disabled={!!busy} onClick={openChunk}>
+            <button className={`${uni.btn} ${uni.btnPrimary}`} disabled={!!busy} onClick={openChunk}>
               Open chunk {table.deckOpenChunk + 1} of {chunks}
             </button>
             <Why>

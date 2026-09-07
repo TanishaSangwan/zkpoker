@@ -353,7 +353,7 @@ export default function PokerPanel() {
         <div className={styles.tableIdRow}>
           <input className={styles.input} value={tableIdInput}
             onChange={(e) => setTableIdInput(e.target.value)} placeholder="table id" />
-          <button className={uni.btn} disabled={!deployed}
+          <button className={`${uni.btn} ${uni.btnPrimary}`} disabled={!deployed}
             onClick={() => { try { setTableId(toFelt(tableIdInput)); setError(null); } catch (e) { setError(decodeError(e)); } }}>
             Open
           </button>
@@ -496,7 +496,7 @@ function SeatControls(p: any) {
         </div>
       </div>
       <div className={styles.actionsRow}>
-        <button className={uni.btn} disabled={busy || !account || firstFreeSeat === null} onClick={sitDown}>
+        <button className={`${uni.btn} ${uni.btnPrimary}`} disabled={busy || !account || firstFreeSeat === null} onClick={sitDown}>
           {busy ? 'Sitting down…' : 'Sit down'}
         </button>
       </div>
@@ -608,7 +608,7 @@ function CreateTable(p: any) {
         </span>
       </div>
       <div className={styles.actionsRow}>
-        <button className={uni.btn} disabled={busy || !account} onClick={create}>
+        <button className={`${uni.btn} ${uni.btnPrimary}`} disabled={busy || !account} onClick={create}>
           {busy ? 'Creating…' : 'Create table'}
         </button>
         <span className={styles.fieldHint}>

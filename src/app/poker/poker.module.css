@@ -49,6 +49,10 @@
   font-size: 12px;
   font-weight: 600;
   white-space: nowrap;
+  /* Neutral pill by default -- most call sites are informational readouts
+     (share counts, street, party lists), not a state worth colouring. */
+  color: var(--muted);
+  background: var(--inset);
 }
 .chipDealer { color: var(--pink-text); background: var(--pink-soft); }
 .chipOwner { color: var(--green); background: var(--green-soft); }
@@ -97,6 +101,9 @@
 .textarea { font-family: var(--font-mono-ui, monospace); min-height: 64px; resize: vertical; }
 
 .fieldHint { color: var(--muted); font-size: 12px; line-height: 1.4; }
+/* Every checkbox/radio in this page lives inside a .fieldHint label --
+   themed here so they match the pink accent instead of the OS default. */
+.fieldHint input[type="checkbox"], .fieldHint input[type="radio"] { accent-color: var(--pink); }
 
 .actionsRow {
   display: flex;
@@ -136,6 +143,20 @@
   border: 1px solid #f4dcc9;
   background: #fdf3ea;
   color: #8a5a1f;
+  border-radius: 12px;
+  padding: 12px 14px;
+  font-size: 12.5px;
+  line-height: 1.55;
+  margin-top: 10px;
+}
+
+/* Same shape as .caution, for when the thing being reported is fine --
+   e.g. the relay is reachable. A bare .chip pill was being reused here for
+   a full sentence, which rendered as unstyled text with no container. */
+.bannerOk {
+  border: 1px solid #bfe9d5;
+  background: var(--green-soft);
+  color: #1b7a53;
   border-radius: 12px;
   padding: 12px 14px;
   font-size: 12.5px;

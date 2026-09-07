@@ -11,9 +11,11 @@ export default function PokerPageClient() {
     <div className={uni.page}>
       <nav className={styles.nav}>
         <div className={styles.navLinks}>
-          <Link href="/" className={styles.navLink}>
-            STRK20 demo
+          <Link href="/" className={uni.brand} aria-label="STRK20 home">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src="/tokens/strk20.png" alt="STRK20" className={uni.brandImg} />
           </Link>
+          <span className={styles.navLink} aria-hidden>/</span>
           <span className={`${styles.navLink} ${styles.navLinkActive}`}>PokerGame</span>
         </div>
         <SelectWallet variant="nav" />
