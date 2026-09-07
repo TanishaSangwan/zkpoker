@@ -1,0 +1,37 @@
+# Render Blueprint for the share relay.
+#
+# The relay is what lets players on DIFFERENT DEVICES finish a hand: every
+# hole card needs a decryption share from every seat, and that exchange is
+# off-chain. Without one, the app falls back to BroadcastChannel, which
+# reaches only tabs of a single browser.
+#
+# To deploy: Render dashboard -> New -> Blueprint -> pick this repo. Then put
+# the resulting https URL into the "Relay" field on the table (every player
+# enters the same one). It is set at run time, so this needs no rebuild of the
+# web app.
+#
+# ── Why a web service and not a function ────────────────────────────────
+# Share delivery is Server-Sent Events, so a connection is held open for the
+# life of a table. Serverless instances do not share memory, so a publish
+# landing in one instance would never reach a listener held by another --
+# the fan-out has to happen inside one long-lived process.
+#
+# ── What it is trusted with: nothing ────────────────────────────────────
+# Hole-card shares are ECIES-encrypted to the recipient's registered key
+# before they reach it, each carries a DLEQ the recipient checks against the
+# sender's on-chain key, and a relay that drops messages is the liveness case
+# the on-chain accusation path handles. So it can be run by anyone, including
+# a player. See the header of scripts/relay.mjs.
+services:
+  - type: web
+    name: zkpoker-relay
+    runtime: node
+    plan: free
+    # Nothing to build: the relay is one dependency-free Node file. `npm ci`
+    # would install the whole proving stack for no reason.
+    buildCommand: 'echo "no build step: the relay has no dependencies"'
+    startCommand: node scripts/relay.mjs
+    # Render injects PORT; scripts/relay.mjs reads it and binds 0.0.0.0 when
+    # it is set, staying on loopback for a local run.
+    healthCheckPath: /healthz
+    autoDeploy: false

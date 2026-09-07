@@ -76,6 +76,18 @@ const server = createServer((req, res) => {
 
   if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
+  // Liveness, for a platform that decides whether to keep this running.
+  //
+  // Not cosmetic: a host pings a path and expects 2xx, "/" answers 404 here,
+  // and /events is an SSE stream that never completes -- so without this the
+  // only two obvious probes either fail the check or hang it, and the service
+  // is restarted or marked unhealthy while working perfectly.
+  if (req.method === 'GET' && url.pathname === '/healthz') {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, tables: rooms.size }));
+    return;
+  }
+
   if (req.method === 'GET' && url.pathname === '/events') {
     const table = url.searchParams.get('table');
     if (!table) { res.writeHead(400); res.end('table required'); return; }

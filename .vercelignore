@@ -1,0 +1,23 @@
+# Build outputs that a web deploy has no use for.
+#
+# Without this the upload is ~580 MB, nearly all of it Scarb and Noir
+# artifacts: cairo/target is 168 MB, cairo-verifier/target 111 MB, and each
+# generated Honk verifier carries another ~86 MB. None of it is read by
+# `next build`.
+#
+# The pattern is one level deep on purpose. `circuits/*/target` matches
+# circuits/shuffle_open_verifier/target and NOT
+# circuits/shuffle_open_verifier/example_proof/beta16_build/target -- which
+# must be uploaded, because scripts/build_client_circuits.mjs stages the three
+# compiled circuits from there into public/circuits/ during the build. A blunt
+# `**/target` would exclude those too and the deployed app would serve no
+# circuits at all: it would load, connect, read a table, and fail on the first
+# shuffle with a 404.
+cairo/target
+cairo-verifier/target
+circuits/*/target
+
+# Cairo test/build caches and local records.
+cairo/.snfoundry_cache
+cairo-verifier/.snfoundry_cache
+circuits/*/.snfoundry_cache
