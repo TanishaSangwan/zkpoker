@@ -1,25 +1,29 @@
-/* Faithful Uniswap-style light theme for the WalletAccountV6 STRK20 panel:
-   clean white, scattered blurred token-orbs, flat card, soft-pink pills. */
-
+/* Dark/neon theme, shared with the poker page by design: this is the one
+   place these custom properties are declared, so both pages -- and every
+   uni.* component (buttons, receipts, the wallet modal) -- stay in sync by
+   construction rather than by two files agreeing to match. Violet for the
+   brand/CTA accent, neon green for success/positive; see
+   poker.module.css's top comment for how the poker page's own copy of this
+   ramp reasons about elevation (card lighter than inset, both lighter than
+   bg). */
 .page {
-  --ink: #0d0e0e;
-  --muted: #7d7d8a;
-  --bg: #ffffff;
-  --card: #ffffff;
-  --line: #eaeaef;
-  --inset: #f5f5f7;
-  --inset-2: #ededf1;
-  /* Lightened terracotta (adapted from #d75821) - var names kept for continuity. */
-  --pink: #e56b43;
-  --pink-soft: #fdefe9;
-  --pink-soft-2: #f9ddd1;
-  --pink-text: #b0491f;
-  --green: #0e9f6e;
-  --green-soft: #e7f7ef;
-  --green-soft-2: #cdeede;
-  --danger: #e5484d;
-  --danger-soft: #fdeceb;
-  --danger-soft-2: #f4cccb;
+  --ink: #eef0fb;
+  --muted: #9791b8;
+  --bg: #06050c;
+  --inset: #100d1e;
+  --card: #171330;
+  --inset-2: #221c40;
+  --line: rgba(176, 130, 255, 0.16);
+  --pink: #b166ff;
+  --pink-soft: rgba(177, 102, 255, 0.14);
+  --pink-soft-2: rgba(177, 102, 255, 0.45);
+  --pink-text: #dcb8ff;
+  --green: #3cf0a8;
+  --green-soft: rgba(60, 240, 168, 0.14);
+  --green-soft-2: rgba(60, 240, 168, 0.4);
+  --danger: #ff5d7a;
+  --danger-soft: rgba(255, 93, 122, 0.12);
+  --danger-soft-2: rgba(255, 93, 122, 0.4);
 
   position: relative;
   min-height: 100vh;
@@ -72,21 +76,39 @@
 
 /* --- Hero ---------------------------------------------------------------- */
 .hero {
+  position: relative;
   text-align: center;
   margin: 46px auto 30px;
   padding: 0 20px;
 }
+/* Same glow-behind-the-heading treatment as the poker page, so the two
+   read as one product's hero rather than two different designs. */
+.heroGlow {
+  position: absolute;
+  top: -70px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(680px, 92vw);
+  height: 320px;
+  background: radial-gradient(ellipse at center, rgba(177, 102, 255, 0.32), rgba(60, 240, 168, 0.12) 45%, transparent 72%);
+  filter: blur(50px);
+  pointer-events: none;
+  z-index: 0;
+}
 .heroTitle {
-  font-weight: 600;
-  font-size: clamp(40px, 7vw, 76px);
-  line-height: 1.04;
-  letter-spacing: -0.035em;
+  position: relative;
+  font-family: var(--font-display, var(--font-body)), sans-serif;
+  font-weight: 800;
+  font-size: clamp(38px, 7vw, 72px);
+  line-height: 1.05;
+  letter-spacing: 0.005em;
   margin: 0;
   color: var(--ink);
   text-wrap: balance;
 }
-.heroAccent { color: var(--pink); }
+.heroAccent { color: var(--pink); text-shadow: 0 0 30px rgba(177, 102, 255, 0.65); }
 .heroSub {
+  position: relative;
   margin: 18px auto 0;
   max-width: 420px;
   color: var(--muted);
@@ -115,7 +137,15 @@
   background: var(--inset);
   color: var(--ink);
 }
-.btn:not(:disabled):hover { background: var(--inset-2); transform: translateY(-1px); }
+/* "Slot" highlight: the boundary brightens to the accent colour and the
+   fill itself picks up a faint tint of it, not just a flat grey-on-grey
+   background swap. */
+.btn:not(:disabled):hover {
+  background: color-mix(in srgb, var(--pink) 10%, var(--inset-2));
+  border-color: color-mix(in srgb, var(--pink) 50%, var(--line));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--pink) 16%, transparent);
+  transform: translateY(-1px);
+}
 .btn:active { transform: scale(0.98); }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .btn:focus-visible { outline: 2px solid var(--pink-soft-2); outline-offset: 2px; }
@@ -222,8 +252,8 @@
   border: 1px solid var(--line);
   background: var(--inset);
 }
-.verdictPass { border-color: #bfe9d5; background: var(--green-soft); }
-.verdictFail { border-color: #f4c9cb; background: #fdecec; }
+.verdictPass { border-color: var(--green-soft-2); background: var(--green-soft); }
+.verdictFail { border-color: var(--danger-soft-2); background: var(--danger-soft); }
 .verdictHead {
   display: flex;
   align-items: center;
@@ -376,7 +406,7 @@
 }
 .footer a { color: var(--pink-text); text-decoration: none; font-weight: 500; }
 .footer a:hover { text-decoration: underline; }
-.footerDot { color: #d8d8de; }
+.footerDot { color: var(--muted); opacity: 0.5; }
 
 /* --- Tabbed action interface (Umbra-style) ------------------------------ */
 .panel { width: min(520px, calc(100vw - 32px)); margin: 0 auto; }
@@ -401,9 +431,9 @@
   cursor: pointer;
   transition: background 140ms, color 140ms;
 }
-.tab:hover { color: var(--ink); }
+.tab:hover { color: var(--ink); background: var(--inset); }
 .tabActive { color: var(--pink-text); background: var(--pink-soft); font-weight: 600; }
-.tabActive:hover { color: var(--pink-text); }
+.tabActive:hover { color: var(--pink-text); background: var(--pink-soft); }
 
 .inputBlock {
   background: var(--inset);
@@ -427,7 +457,7 @@
   font-weight: 600;
   font-size: 15px;
   color: var(--ink);
-  background: #fff;
+  background: var(--card);
   border: 1px solid var(--line);
   border-radius: 999px;
   padding: 7px 15px 7px 8px;
@@ -459,7 +489,7 @@
   border-radius: 16px;
   font-size: 14px;
   color: var(--muted);
-  background: #fff;
+  background: var(--card);
 }
 .feeVal { display: inline-flex; align-items: center; gap: 7px; color: var(--ink); font-weight: 500; }
 

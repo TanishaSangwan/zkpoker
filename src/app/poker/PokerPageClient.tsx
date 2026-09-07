@@ -37,7 +37,7 @@ const HERO_PILLS = [
 
 export default function PokerPageClient() {
   return (
-    <div className={styles.pokerPage}>
+    <div className={uni.page}>
       <div className={uni.aurora} aria-hidden>
         {BG_TOKENS.map((t, i) => (
           <span key={i} className={uni.tok} style={{ ...t.pos, filter: `blur(${t.blur}px)`, opacity: t.opacity }}>

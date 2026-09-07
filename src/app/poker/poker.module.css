@@ -1,47 +1,10 @@
-/* Poker page — a dark/neon skin, deliberately distinct from the STRK20
-   page's light "aurora" theme. Self-contained: .pokerPage redeclares the
-   SAME custom-property names uni.module.css's .page defines (--ink, --muted,
-   --pink, --pink-soft, --pink-text, --green, --green-soft, --danger, --line,
-   --inset, --inset-2, ...) so every uni.* component (buttons, receipts, the
-   wallet modal) re-themes automatically just by being a descendant — nothing
-   in uni.module.css or this file needs an if/else for which page it's on.
-   Applied on the page root INSTEAD OF uni.page (not alongside it), so there
-   is no cross-file cascade order to reason about. */
-.pokerPage {
-  --ink: #eef0fb;
-  --muted: #9791b8;
-  --bg: #06050c;
-  /* Ramp, darkest to lightest: bg < inset (recessed wells: inputs, chips,
-     the toggle track) < card (elevated surfaces: section cards, modal) <
-     inset-2 (hover/pressed -- brightens, mirroring the light theme's
-     darken-on-hover). .modeBtnActive relies on card being lighter than the
-     inset track it sits on to read as "raised/selected". */
-  --inset: #100d1e;
-  --card: #171330;
-  --inset-2: #221c40;
-  --line: rgba(176, 130, 255, 0.16);
-  /* Brand/CTA accent -- neon violet, in the vars every button and chip
-     already reads as "the pink". */
-  --pink: #b166ff;
-  --pink-soft: rgba(177, 102, 255, 0.14);
-  --pink-soft-2: rgba(177, 102, 255, 0.45);
-  --pink-text: #dcb8ff;
-  /* Success/positive -- neon green. */
-  --green: #3cf0a8;
-  --green-soft: rgba(60, 240, 168, 0.14);
-  --green-soft-2: rgba(60, 240, 168, 0.4);
-  --danger: #ff5d7a;
-  --danger-soft: rgba(255, 93, 122, 0.12);
-  --danger-soft-2: rgba(255, 93, 122, 0.4);
-
-  position: relative;
-  min-height: 100vh;
-  background: var(--bg);
-  color: var(--ink);
-  font-family: var(--font-body), system-ui, sans-serif;
-  overflow-x: hidden;
-  isolation: isolate;
-}
+/* Poker page — shares uni.module.css's .page for its dark/neon theme
+   (custom properties: --ink, --muted, --pink, --pink-soft, --pink-text,
+   --green, --green-soft, --danger, --line, --inset, --inset-2, ...). Both
+   pages use the SAME class now, on purpose: one ramp declared once is what
+   makes them look like one product instead of two that happen to agree.
+   See uni.module.css's top-of-file comment for the ramp's reasoning
+   (elevation: card lighter than inset, both lighter than bg). */
 
 .wrap {
   width: min(720px, calc(100vw - 32px));
@@ -390,8 +353,12 @@
   background: transparent;
   color: var(--muted);
   cursor: pointer;
+  transition: background 140ms, color 140ms;
 }
-.modeBtnActive { background: var(--card); color: var(--ink); box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08); }
+/* Each pill is a "slot" in the toggle -- it had no hover feedback at all
+   before, which made the row look inert until you'd already clicked. */
+.modeBtn:not(.modeBtnActive):hover { background: var(--inset-2); color: var(--ink); }
+.modeBtnActive { background: var(--card); color: var(--ink); box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3); }
 
 /* ── Visual table (Play mode) ────────────────────────────────────────── */
 .felt {
@@ -605,7 +572,12 @@
   cursor: pointer;
   transition: background 140ms, transform 120ms, box-shadow 140ms;
 }
-.chipBtn:not(:disabled):hover { background: var(--inset-2); transform: translateY(-1px); }
+.chipBtn:not(:disabled):hover {
+  background: color-mix(in srgb, var(--pink) 10%, var(--inset-2));
+  border-color: color-mix(in srgb, var(--pink) 50%, var(--line));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--pink) 16%, transparent);
+  transform: translateY(-1px);
+}
 .chipBtn:not(:disabled):active { transform: scale(0.97); }
 .chipBtn:disabled { opacity: 0.5; cursor: default; }
 
