@@ -30,6 +30,15 @@ export type SeatState = {
    */
   forfeited: boolean;
   pk: Point;
+  /**
+   * Winnings banked to this seat's payout note, not yet withdrawn.
+   *
+   * award() moves the pot OUT of table_pot and into pending_payout keyed by
+   * note, then zeroes the pot. So between hands a winner's money is real and
+   * on-chain but invisible in the pot -- and without this the table showed it
+   * vanishing: the pot cleared and nothing anywhere said where it went.
+   */
+  pendingPayout: bigint;
   holeCommitted: [boolean, boolean];
   holeRevealed: [boolean, boolean];
   holeCards: [number, number];
@@ -164,6 +173,13 @@ export function useTableState(args: {
           const [streetContributed, toCall] = occupied
             ? await Promise.all([c.get_street_contributed(tableId, s), c.get_amount_to_call(tableId, s)])
             : [0n, 0n];
+          // Keyed by NOTE, not by seat: pending_payout survives the seat being
+          // reset between hands, which is the whole point of it.
+          const pendingPayout = occupied
+            ? await c.get_seat_note(tableId, s)
+                .then((note: unknown) => c.get_pending_payout(toHex(note)))
+                .catch(() => 0n)
+            : 0n;
           const [hc0, hc1, hr0, hr1, com0, com1] = occupied
             ? await Promise.all([
                 c.get_hole_card(tableId, s, 0), c.get_hole_card(tableId, s, 1),
@@ -178,6 +194,7 @@ export function useTableState(args: {
             toCall: BigInt(toCall ?? 0),
             folded: !!folded, keyRegistered: !!keyRegistered, forfeited: !!forfeited,
             pk: pointOrNull(pkRaw),
+            pendingPayout: BigInt(pendingPayout ?? 0),
             holeCommitted: [BigInt(com0 ?? 0) !== 0n, BigInt(com1 ?? 0) !== 0n],
             holeRevealed: [!!hr0, !!hr1],
             holeCards: [num(hc0), num(hc1)],

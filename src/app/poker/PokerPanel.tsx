@@ -458,7 +458,16 @@ function CreateTable(p: any) {
   // Hands per rung of the rising ladder. Empty or 0 means fixed blinds, which
   // is what the two fields above are for -- the two structures are exclusive,
   // and the contract refuses a schedule of 0.
-  const [levelHands, setLevelHands] = useState('');
+  // Explicit, because the two are mutually exclusive and ONE OF THEM IS A
+  // ONE-WAY DOOR: set_blind_schedule is only accepted while hand_number == 0
+  // (deliberately -- otherwise a dealer could watch a hand and re-time the
+  // rungs against whoever is winning), so a table created with fixed blinds
+  // can never be given a ladder afterwards. Inferring the mode from whether
+  // an optional field happened to be filled in made that irreversible choice
+  // silently, by default, and every table created so far got fixed blinds
+  // without anyone choosing them.
+  const [blindMode, setBlindMode] = useState<'fixed' | 'rising'>('fixed');
+  const [levelHands, setLevelHands] = useState('10');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -477,7 +486,10 @@ function CreateTable(p: any) {
       // A ladder replaces the fixed pair rather than adding to it: with a
       // schedule set the stored small/big are never read, so writing them
       // would only leave two numbers on chain that describe nothing.
-      const ladder = Number(levelHands || '0');
+      const ladder = blindMode === 'rising' ? Number(levelHands || '0') : 0;
+      if (blindMode === 'rising' && ladder <= 0) {
+        throw new Error('Rising blinds need a positive number of hands per level.');
+      }
       if (ladder > 0) {
         calls.push(pgCall(contract, 'set_blind_schedule', {
           table_id: tableId, hands_per_level: String(ladder),
@@ -502,9 +514,33 @@ function CreateTable(p: any) {
         <Field label="buy-in token" value={token} onChange={setToken} />
         <Field label="buy-in" value={buyIn} onChange={setBuyIn} />
         <Field label="max seats" value={maxSeats} onChange={setMaxSeats} />
-        <Field label="small blind" value={smallBlind} onChange={setSmallBlind} />
-        <Field label="big blind" value={bigBlind} onChange={setBigBlind} />
-        <Field label="rising blinds: hands per level" value={levelHands} onChange={setLevelHands} />
+        {blindMode === 'fixed' ? (
+          <>
+            <Field label="small blind" value={smallBlind} onChange={setSmallBlind} />
+            <Field label="big blind" value={bigBlind} onChange={setBigBlind} />
+          </>
+        ) : (
+          <Field label="hands per blind level" value={levelHands} onChange={setLevelHands} />
+        )}
+      </div>
+      <div className={styles.actionsRow}>
+        <label className={styles.fieldHint} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <input type="radio" name="blindMode" checked={blindMode === 'fixed'}
+            onChange={() => setBlindMode('fixed')} />
+          Fixed blinds
+        </label>
+        <label className={styles.fieldHint} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <input type="radio" name="blindMode" checked={blindMode === 'rising'}
+            onChange={() => setBlindMode('rising')} />
+          Rising blinds
+        </label>
+        <span className={styles.fieldHint}>
+          {blindMode === 'rising'
+            ? 'Ladder is fixed in the contract — 10/20, 20/40, 30/60, 50/100, 100/200, 200/400, 300/600, then held. You choose the pace, not the price.'
+            : 'The same small/big every hand.'}{' '}
+          <strong>Decide now:</strong> a schedule is only accepted before the first hand, so a
+          table created with fixed blinds can never be switched to rising.
+        </span>
       </div>
       <div className={styles.actionsRow}>
         <button className={uni.btn} disabled={busy || !account} onClick={create}>

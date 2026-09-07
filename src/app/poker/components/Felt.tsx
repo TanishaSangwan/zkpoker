@@ -57,6 +57,16 @@ function Seat({
         <>
           <div className={styles.seatAddr}>{you ? 'you' : `${seat.owner.slice(0, 6)}…${seat.owner.slice(-4)}`}</div>
           <div className={styles.seatChips}>{seat.contributed.toString()}</div>
+          {/* Winnings are NOT in the pot and not in `contributed`. award()
+              moves the pot into pending_payout keyed by the seat's payout
+              note and zeroes the pot, so between hands a winner's money is
+              real, on-chain, and was previously invisible everywhere on this
+              page -- the pot cleared and nothing said where it went. */}
+          {seat.pendingPayout > 0n ? (
+            <div className={styles.seatWon} title="won and banked to this seat's payout note, not yet withdrawn">
+              won {seat.pendingPayout.toString()}
+            </div>
+          ) : null}
           <div className={styles.seatBadges}>
             {/* Two different things that both used to be "D". The creator
                 runs begin_shuffle; the button decides the blinds and moves

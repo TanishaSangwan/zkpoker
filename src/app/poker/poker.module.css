@@ -287,6 +287,8 @@
 }
 .seatAddr { font-family: var(--font-mono-ui, monospace); font-weight: 600; }
 .seatChips { color: #b7f3d6; font-weight: 700; margin-top: 2px; font-size: 12.5px; }
+/* Banked winnings, distinct from what this seat has put IN this hand. */
+.seatWon { color: #f5c542; font-weight: 700; margin-top: 1px; font-size: 11.5px; }
 .seatBadges { display: flex; gap: 4px; justify-content: center; margin-top: 3px; }
 .seatBadge {
   font-size: 9px;
