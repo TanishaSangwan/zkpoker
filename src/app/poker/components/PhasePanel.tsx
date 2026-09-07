@@ -482,6 +482,28 @@ export default function PhasePanel(p: Props) {
   const [betAmount, setBetAmount] = useState('');
   const myTurn = table.phase === 'betting' && !table.roundComplete && table.actionTurn === yourSeat && !mySeat?.folded;
 
+  // ── all-in ─────────────────────────────────────────────────────────────
+  //
+  // `toCall` comes from the contract and is what the STREET owes, which is
+  // not the same as what you can pay. Facing a bet larger than your stack,
+  // Call sent the full amount and reverted on `amount <= stack` -- so the one
+  // response the rules actually give you here, short of folding, had no
+  // button: push what is left. bet() accepts it because spending the last
+  // chip sets seat_all_in in the same call, and the below-the-call assert
+  // reads `put_in >= high || is_all_in`.
+  //
+  // Only on a table with a buy-in. Without one the wallet is the stack, there
+  // is nothing on the table to be short of, and `stack` reads 0 for every
+  // seat -- an all-in button there would offer to bet nothing.
+  const myStack = mySeat?.stack ?? 0n;
+  const myToCall = mySeat?.toCall ?? 0n;
+  const stacked = table.buyIn > 0n;
+  const shortOfCall = stacked && myToCall > 0n && myStack < myToCall;
+  const shove = () =>
+    run(`Going all in for ${fmtAmount(myStack)}`, () => send('bet', {
+      table_id: table.tableId, seat: String(yourSeat), amount: myStack.toString(),
+    }));
+
   const clock = useCountdown(table.actionDeadline);
   const shuffleClock = useCountdown(table.shuffleDeadline);
 
@@ -647,16 +669,26 @@ export default function PhasePanel(p: Props) {
                   in the hand without matching. So the button follows the
                   amount owed -- `check` when nothing is owed, `bet` for
                   exactly the shortfall when something is. */}
-              {(mySeat?.toCall ?? 0n) > 0n ? (
-                <button className={styles.chipBtn} disabled={!!busy}
-                  onClick={() => run(`Calling ${fmtAmount(mySeat!.toCall)}`, () => send('bet', {
-                    table_id: table.tableId, seat: String(yourSeat),
-                    amount: mySeat!.toCall.toString(),
-                  }))}>
-                  {/* The AMOUNT sent stays raw base units -- that is what the
-                      contract takes. Only the label is converted. */}
-                  Call {fmtAmount(mySeat!.toCall)}
-                </button>
+              {myToCall > 0n ? (
+                shortOfCall ? (
+                  /* You cannot call. Calling would mean putting in less than
+                     the bet while still holding chips, which the contract
+                     refuses -- so the button becomes the shove it has to be. */
+                  <button className={styles.chipBtn} disabled={!!busy || myStack === 0n}
+                    onClick={shove}>
+                    All in {fmtAmount(myStack)}
+                  </button>
+                ) : (
+                  <button className={styles.chipBtn} disabled={!!busy}
+                    onClick={() => run(`Calling ${fmtAmount(myToCall)}`, () => send('bet', {
+                      table_id: table.tableId, seat: String(yourSeat),
+                      amount: myToCall.toString(),
+                    }))}>
+                    {/* The AMOUNT sent stays raw base units -- that is what the
+                        contract takes. Only the label is converted. */}
+                    Call {fmtAmount(myToCall)}
+                  </button>
+                )
               ) : (
                 <button className={styles.chipBtn} disabled={!!busy}
                   onClick={() => run('Checking', () => send('check', { table_id: table.tableId, seat: String(yourSeat) }))}>
@@ -664,25 +696,47 @@ export default function PhasePanel(p: Props) {
                 </button>
               )}
               <input className={styles.input}
-                placeholder={(mySeat?.toCall ?? 0n) > 0n ? `more than ${fmtAmount(mySeat!.toCall)}` : 'amount in STRK'}
+                placeholder={stacked
+                  ? (myToCall > 0n
+                      ? `${fmtAmount(myToCall)}–${fmtAmount(myStack)}`
+                      : `up to ${fmtAmount(myStack)}`)
+                  : (myToCall > 0n ? `more than ${fmtAmount(myToCall)}` : 'amount in STRK')}
                 value={betAmount}
                 onChange={(e) => setBetAmount(e.target.value)} style={{ maxWidth: 160 }} />
               <button className={`${styles.chipBtn} ${styles.chipBtnPrimary}`} disabled={!!busy || !betAmount}
                 onClick={() => run('Betting', () => send('bet', { table_id: table.tableId, seat: String(yourSeat), amount: strkToBase(betAmount).toString() }))}>
-                {(mySeat?.toCall ?? 0n) > 0n ? 'Raise' : 'Bet'}
+                {myToCall > 0n ? 'Raise' : 'Bet'}
               </button>
+              {/* The voluntary shove, as opposed to the forced one above. Not
+                  shown when the call button is ALREADY the shove, or there
+                  would be two identical buttons side by side. */}
+              {stacked && myStack > 0n && !shortOfCall ? (
+                <button className={styles.chipBtn} disabled={!!busy} onClick={shove}>
+                  All in {fmtAmount(myStack)}
+                </button>
+              ) : null}
               <button className={`${styles.chipBtn} ${styles.chipBtnFold}`} disabled={!!busy}
                 onClick={() => run('Folding', () => send('fold', { table_id: table.tableId, seat: String(yourSeat) }))}>
                 Fold
               </button>
             </div>
-          ) : (
+          ) : null}
+          {myTurn && shortOfCall ? (
+            <p className={styles.fieldHint}>
+              The bet is {fmtAmount(myToCall)} and you have {fmtAmount(myStack)}, so you cannot
+              call — put in less than the bet while still holding chips and the contract refuses
+              it. Push what is left or fold. Going all in still wins everything you matched:
+              settlement splits the pot into layers, and the part above your stack goes back to
+              the players who put it up.
+            </p>
+          ) : null}
+          {!myTurn ? (
             <p className={styles.fieldHint}>
               {table.roundComplete
                 ? 'Round complete — waiting for the dealer to advance the street.'
                 : `Waiting for seat ${table.actionTurn}.`}
             </p>
-          )}
+          ) : null}
           {clock === 'expired' && !table.roundComplete ? (
             <div className={styles.actionsRow}>
               <button className={uni.btn} disabled={!!busy}
