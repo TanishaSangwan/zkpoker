@@ -187,7 +187,28 @@ async function sendOne(
 ): Promise<{ txHash: string; receipt: any }> {
   const details = await clampedBounds(account, calls);
   const { transaction_hash } = await account.execute(calls, details);
-  const receipt = await provider.waitForTransaction(transaction_hash, { retries: 400, retryInterval: 3000 });
+  // Poll fast, because the poll interval IS the latency here.
+  //
+  // starknet.js sleeps for `retryInterval` BEFORE its first status check and
+  // then between every check, so the wait is quantised: at the old 3000ms
+  // every confirmation was rounded up to a multiple of three seconds, and any
+  // indexing lag was rounded up with it. Sepolia produces blocks every 1-2s
+  // (measured) and a status read costs ~330ms against the Cartridge endpoint,
+  // so 400ms polling costs a handful of cheap reads and removes the rounding.
+  //
+  // The retry count is raised to keep the overall ceiling near where it was --
+  // 1500 x 400ms is ten minutes, which is the thing that has to outlast a slow
+  // block, not the thing that decides how a fold feels.
+  //
+  // What this does NOT do is accept PRE_CONFIRMED as done. starknet.js
+  // excludes it by default and that is the right call for anything whose
+  // events we parse; a pre-confirmed transaction can still fail consensus, and
+  // reporting a bet as landed before it is accepted would be a lie the table
+  // then has to walk back.
+  const receipt = await provider.waitForTransaction(transaction_hash, {
+    retries: 1500,
+    retryInterval: 400,
+  });
   return { txHash: transaction_hash, receipt };
 }
 
