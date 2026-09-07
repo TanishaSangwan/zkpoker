@@ -30,8 +30,13 @@ const SEAT_SUITS = ['♠', '♥', '♦', '♣'];
 function seatStyle(index: number, total: number): React.CSSProperties {
   const angle = Math.PI / 2 + (2 * Math.PI * index) / Math.max(total, 1);
   return {
-    left: `${50 + 42 * Math.cos(angle)}%`,
-    top: `${50 + 40 * Math.sin(angle)}%`,
+    // Pushed further out than the felt's own edge radius (was 42/40) --
+    // at 3+ seats, a seat at a diagonal angle sits close to BOTH the
+    // vertical and horizontal centre at once, which is exactly where the
+    // community cards are. More clearance here, not a taller felt alone,
+    // is what keeps a seat's own box off the card row.
+    left: `${50 + 46 * Math.cos(angle)}%`,
+    top: `${50 + 45 * Math.sin(angle)}%`,
   };
 }
 

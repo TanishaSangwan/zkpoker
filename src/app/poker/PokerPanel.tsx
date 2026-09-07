@@ -382,19 +382,18 @@ export default function PokerPanel() {
       {table && table.exists ? (
         <>
           <Felt table={table} yourSeat={yourSeat} yourCards={myCards} />
-          {/* Right after the table, before any panel that can push a
-              result into it -- so it's already in view before you click
-              anything, not something you scroll down to discover. */}
-          <ActivityLog />
           <SeatControls
             table={table} yourSeat={yourSeat} contract={contract} token={tableToken}
             account={account} provider={provider} refresh={refresh}
           />
+          {/* Betting/actions above the log -- what you can DO right now
+              outranks a record of what already happened. */}
           <PhasePanel
             table={table} yourSeat={yourSeat} identity={identity}
             account={account} provider={provider} contract={contract}
             deck={deck} setDeck={setDeck} refresh={refresh}
           />
+          <ActivityLog />
           <RevealPanel
             table={table} yourSeat={yourSeat} identity={identity}
             account={account} provider={provider} contract={contract}

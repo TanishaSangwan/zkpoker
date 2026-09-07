@@ -75,6 +75,27 @@
   margin-bottom: 4px;
 }
 
+/* A .sectionHead that IS a <summary> -- the whole panel collapses behind
+   it, closed by default, the same <details> idiom .why already uses just
+   applied to a whole section instead of one explanation. */
+.sectionHeadToggle {
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+.sectionHeadToggle::-webkit-details-marker { display: none; }
+.sectionHeadToggle::before {
+  content: "\25B8";
+  flex: none;
+  align-self: center;
+  font-size: 11px;
+  color: var(--muted);
+  margin-right: 2px;
+  transition: transform 140ms;
+}
+details[open] > .sectionHeadToggle::before { content: "\25B8"; transform: rotate(90deg); }
+.sectionHeadToggle:hover .sectionTitle { color: var(--pink-text); }
+
 .sectionTitle {
   font-weight: 600;
   font-size: 16px;
@@ -364,8 +385,13 @@
 .felt {
   position: relative;
   width: 100%;
-  aspect-ratio: 16 / 9;
-  min-height: 300px;
+  /* Taller than before (was 16/9, closer to a real table's 16/10) and a
+     much higher min-height floor: seats and cards are fixed pixel sizes,
+     so a felt that shrinks with a narrow viewport but doesn't grow taller
+     runs out of room for its own content -- that's what let a seat's own
+     box reach the community-card row. */
+  aspect-ratio: 4 / 3;
+  min-height: 400px;
   /* A stadium shape, not a true ellipse: an oversized radius clamps to half
      the shorter side, the same "999px" trick every pill button in this file
      already uses. The old two-axis `50% / 45%` pinched at the sides once the
@@ -402,7 +428,11 @@
   z-index: 0;
 }
 .feltCenter {
-  z-index: 1;
+  /* Higher than .seat (below): they were equal before, which meant DOM
+     order decided the winner on any overlap -- a seat renders after the
+     centre, so it painted OVER the community cards instead of the other
+     way around. The community cards are the thing that must stay legible. */
+  z-index: 2;
   position: absolute;
   left: 50%;
   top: 50%;
@@ -711,4 +741,17 @@
   flex: none;
   margin-top: 2px;
   opacity: 0.7;
+}
+
+/* ── Narrow phones ────────────────────────────────────────────────────
+   Seats and cards are fixed pixel sizes; the felt is not. Shrinking them
+   a little here is the last line of defence against a seat's own box
+   reaching the community-card row on the smallest screens, on top of the
+   larger felt and wider seat clearance above. */
+@media (max-width: 420px) {
+  .seat { min-width: 88px; max-width: 118px; padding: 9px 8px 8px; }
+  .seatAvatar { width: 22px; height: 22px; font-size: 11px; }
+  .cardFace, .cardBack { width: 32px; height: 44px; }
+  .cardRank { font-size: 15px; }
+  .cardSuit { font-size: 12px; }
 }

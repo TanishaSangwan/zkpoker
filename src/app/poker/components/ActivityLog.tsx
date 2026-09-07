@@ -4,6 +4,10 @@
 // PhasePanel and RevealPanel report funnels here via useActivityLog, newest
 // first, in a fixed-height scrolling list rather than one that grows the
 // page. See activityLog.ts for why.
+//
+// Closed by default: betting is the thing you need open at a glance, this
+// is the thing you check when you want to. The summary still names the
+// latest entry, so closed is not the same as invisible.
 
 import styles from '../poker.module.css';
 import { useActivityLog, type LogEntry } from '../activityLog';
@@ -20,11 +24,13 @@ export default function ActivityLog() {
   if (entries.length === 0) return null;
 
   return (
-    <div className={styles.section}>
-      <div className={styles.sectionHead}>
+    <details className={styles.section}>
+      <summary className={`${styles.sectionHead} ${styles.sectionHeadToggle}`}>
         <div className={styles.sectionTitle}>Activity</div>
-        <div className={styles.sectionHint}>What just happened, newest first.</div>
-      </div>
+        <div className={styles.sectionHint}>
+          {entries.length} event{entries.length === 1 ? '' : 's'} — latest: {entries[0].text}
+        </div>
+      </summary>
       <div className={styles.logList}>
         {entries.map((e) => (
           <div key={e.id} className={`${styles.logRow} ${kindClass(e.kind)}`}>
@@ -39,6 +45,6 @@ export default function ActivityLog() {
           </div>
         ))}
       </div>
-    </div>
+    </details>
   );
 }

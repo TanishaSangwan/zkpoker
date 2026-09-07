@@ -926,14 +926,14 @@ export default function RevealPanel(p: Props) {
   const mySeatState = yourSeat === null ? null : table.seats[yourSeat];
 
   return (
-    <div className={styles.section}>
-      <div className={styles.sectionHead}>
+    <details className={styles.section}>
+      <summary className={`${styles.sectionHead} ${styles.sectionHeadToggle}`}>
         <div className={styles.sectionTitle}>Dealing &amp; reveals</div>
         <div className={styles.sectionHint}>
           Every card needs a share from every seat. Nobody can read your hole cards — decrypting one
           needs your own share, and pooling everything else leaves them one short.
         </div>
-      </div>
+      </summary>
 
       {/* Which transport is carrying shares. Prominent because it decides
           whether a game between two people is possible at all, and because
@@ -1206,7 +1206,7 @@ export default function RevealPanel(p: Props) {
           <strong>Not showing:</strong> {showdownBlocker}
         </div>
       ) : null}
-    </div>
+    </details>
   );
 }
 
