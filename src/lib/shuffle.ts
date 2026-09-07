@@ -21,7 +21,7 @@
 // public/circuits/ is the beta.16 one.
 
 import type { Point } from './grumpkin';
-import { Ciphertext, commitment, deckToFields, shuffle as shuffleDeck, shuffleCircuitInputs } from './deck';
+import { Ciphertext, INITIAL_DECK_COMMITMENT, commitment, deckToFields, shuffle as shuffleDeck, shuffleCircuitInputs } from './deck';
 import { chunkPositions, inPlayCount } from './deckOpen';
 import { u256Parts } from './felt';
 
@@ -51,6 +51,65 @@ export function provingEnvironment(): ProvingEnvironment {
   const isolated = typeof self !== 'undefined' && self.crossOriginIsolated === true;
   const hw = typeof navigator !== 'undefined' ? navigator.hardwareConcurrency || 1 : 1;
   return { crossOriginIsolated: isolated, threads: isolated ? hw : 1, multithreaded: isolated };
+}
+
+/**
+ * One backend per circuit, shared and kept alive.
+ *
+ * A fresh `UltraHonkBackend` re-fetches and RE-COMPILES the ~2.4 MB
+ * barretenberg wasm and reloads the CRS points, and the old code built one
+ * per proof and destroyed it after. That put the whole of that setup inside
+ * the shuffle clock, every time, which is why a session's first proof is so
+ * much slower than the ones after it -- except there were no "ones after it",
+ * because each proof paid the cost again.
+ *
+ * Caching by circuit object keeps the compiled module and the loaded points
+ * across proofs, and lets `warmProver` pay for them BEFORE it is this seat's
+ * turn. The circuit objects are themselves memoised per URL, so identity is
+ * stable and a WeakMap is the right shape: nothing is pinned alive that the
+ * page has otherwise finished with.
+ *
+ * Nothing calls destroy() any more. The backend lives as long as the page,
+ * which is the point -- destroying it is what made the next proof expensive.
+ */
+const backends = new WeakMap<object, Promise<any>>();
+function backendFor(circuitJson: any, wasmPath: string | null, threads: number): Promise<any> {
+  const existing = backends.get(circuitJson);
+  if (existing) return existing;
+  const made = import('@aztec/bb.js').then(({ UltraHonkBackend }) =>
+    new UltraHonkBackend(
+      circuitJson.bytecode,
+      wasmPath === null ? { threads } : { threads, wasmPath },
+    ),
+  );
+  backends.set(circuitJson, made);
+  return made;
+}
+
+/**
+ * Compile the wasm and load the proving key BEFORE it is your turn.
+ *
+ * Every seat sits idle while the seats before it shuffle, and that idle time
+ * is exactly as long as the work this moves out of the critical path. Safe to
+ * call repeatedly and safe to call when nothing will ever be proved; it only
+ * warms caches.
+ *
+ * Failures are swallowed on purpose. This is an optimisation -- if the wasm
+ * or the points cannot be fetched now, the real proof will try again and
+ * report properly, and a warm-up must never be the thing that puts an error
+ * on screen.
+ */
+export async function warmProver(which: 'shuffle' | 'shuffle_open' = 'shuffle'): Promise<void> {
+  try {
+    const env = provingEnvironment();
+    const json = which === 'shuffle' ? await circuit() : await shuffleOpenCircuit();
+    const backend = await backendFor(json, WASM_PATH, env.threads);
+    // Forces the wasm to compile and the CRS to load. Cheaper than a proof and
+    // it is the same setup a proof would otherwise pay for.
+    await backend.getVerificationKey({ keccakZK: true });
+  } catch {
+    // Optimisation only. See above.
+  }
 }
 
 let circuitPromise: Promise<any> | null = null;
@@ -154,10 +213,7 @@ export async function proveShuffle(args: {
   // import.meta.url, which the bundler rewrites. Given a path it appends
   // "-threads" itself when multithreaded, so both files sit under /circuits/wasm/.
     const wasmPath = args.wasmPath === undefined ? WASM_PATH : args.wasmPath;
-  const backend = new UltraHonkBackend(
-    circuitJson.bytecode,
-    wasmPath === null ? { threads: env.threads } : { threads: env.threads, wasmPath },
-  );
+  const backend = await backendFor(circuitJson, wasmPath, env.threads);
   // keccakZK matches the deployed verifier's verify_ultra_keccak_zk_honk_proof.
   // Any other flavour verifies in bb here and is rejected on-chain.
   const opts = { keccakZK: true };
@@ -174,7 +230,8 @@ export async function proveShuffle(args: {
       .map((v) => BigInt(v as any)),
   );
   const calldataMs = Math.round(performance.now() - t2);
-  await backend.destroy();
+  // NOT destroyed: the compiled wasm and loaded points are the expensive
+  // part, and the next proof should not pay for them again.
 
   // The contract compares the proof's public inputs against its own stored
   // joint key and chain head, so a mismatch here is caught on-chain. Catching
@@ -348,6 +405,56 @@ function shuffleOpenCircuit(): Promise<any> {
 }
 
 /**
+ * Prove position 0's shuffle BEFORE the shuffle opens.
+ *
+ * The first link of every chain shuffles `a_0`, the canonical starting deck
+ * pinned in the contract as INITIAL_DECK_COMMITMENT. It depends on nothing
+ * about the table -- not the seats, not the hand, not the deck anyone else
+ * produced -- so the seat that will play position 0 can prove it while the
+ * table is still filling up, and submit the instant `begin_shuffle` lands.
+ *
+ * The ONE thing it does depend on is the joint key: the circuit
+ * re-randomises under `pk`, and `pk` is the sum of the registered shares. So
+ * a precomputed proof is only valid while that sum is unchanged, and
+ * `fingerprint` is what says so -- the caller passes something derived from
+ * the registered key set, and a cached proof whose fingerprint no longer
+ * matches is thrown away rather than submitted. Submitting a stale one would
+ * not be dangerous (the contract checks the joint key against its own
+ * storage and would reject it) but it would waste the seat's turn, which on a
+ * 600-second clock is the expensive kind of mistake.
+ */
+let precomputed: { fingerprint: string; result: ShuffleResult } | null = null;
+
+export async function precomputeFirstShuffle(args: {
+  jointKey: Point;
+  /** Anything that changes when the registered key set changes. */
+  fingerprint: string;
+  circuitJson?: any;
+  wasmPath?: string | null;
+}): Promise<void> {
+  if (precomputed?.fingerprint === args.fingerprint) return;
+  const { initialDeck } = await import('./deck');
+  const result = await proveShuffle({
+    deckIn: initialDeck(),
+    jointKey: args.jointKey,
+    commitmentIn: INITIAL_DECK_COMMITMENT,
+    circuitJson: args.circuitJson,
+    wasmPath: args.wasmPath,
+  });
+  precomputed = { fingerprint: args.fingerprint, result };
+}
+
+/** The precomputed first shuffle, if one matches `fingerprint`. */
+export function takePrecomputedFirstShuffle(fingerprint: string): ShuffleResult | null {
+  if (precomputed?.fingerprint !== fingerprint) return null;
+  const r = precomputed.result;
+  // Consumed: a shuffle proof is for ONE turn. Keeping it would risk a later
+  // link submitting the first link's proof.
+  precomputed = null;
+  return r;
+}
+
+/**
  * Prove the LAST shuffle and chunk 0 of the deck opening as one statement.
  *
  * The chain's final seat calls this instead of `proveShuffle`, and the
@@ -427,10 +534,7 @@ export async function proveShuffleAndOpen(args: {
   say('proving');
   const env = provingEnvironment();
   const wasmPath = args.wasmPath === undefined ? WASM_PATH : args.wasmPath;
-  const backend = new UltraHonkBackend(
-    circuitJson.bytecode,
-    wasmPath === null ? { threads: env.threads } : { threads: env.threads, wasmPath },
-  );
+  const backend = await backendFor(circuitJson, wasmPath, env.threads);
   const opts = { keccakZK: true };
 
   const t1 = performance.now();
@@ -445,7 +549,8 @@ export async function proveShuffleAndOpen(args: {
       .map((v) => BigInt(v as any)),
   );
   const calldataMs = Math.round(performance.now() - t2);
-  await backend.destroy();
+  // NOT destroyed: the compiled wasm and loaded points are the expensive
+  // part, and the next proof should not pay for them again.
 
   // The first four public inputs are the plain shuffle's, in the same order,
   // so the same check applies to them -- the opening's follow, and the chain

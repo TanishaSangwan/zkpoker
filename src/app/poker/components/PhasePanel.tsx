@@ -16,7 +16,7 @@ import type { TableState } from '../useTableState';
 import { asU256, baseToStrk, fmtAmount, decodeError, executeAndWait, pgCall, erc20ApproveCall, strkToBase, STREET_NAMES, type Phase } from '../contract';
 import type { SeatIdentity } from '@/lib/identity';
 import { jointKey as sumKeys, prove as schnorrProve, initProver as initSchnorr } from '@/lib/schnorr';
-import { deckToU256, proveShuffle, proveShuffleAndOpen, submitFinalShuffleArgs } from '@/lib/shuffle';
+import { deckToU256, precomputeFirstShuffle, proveShuffle, proveShuffleAndOpen, submitFinalShuffleArgs, takePrecomputedFirstShuffle, warmProver } from '@/lib/shuffle';
 import { useProvingEnvironment } from '../useProvingEnvironment';
 import { INITIAL_DECK_COMMITMENT, commitment, initialDeck, type Ciphertext } from '@/lib/deck';
 import { findDeckPublishedTx, readPublishedDeck } from '@/lib/publishedDeck';
@@ -190,7 +190,10 @@ export default function PhasePanel(p: Props) {
         );
       }
 
-      const result = await proveShuffle({
+      // Already proved? Position 0's proof does not depend on anything that
+      // has happened since, so if the key set is unchanged it is still valid.
+      const ready = table.shuffleTurn === 0 ? takePrecomputedFirstShuffle(keyFingerprint) : null;
+      const result = ready ?? await proveShuffle({
         deckIn,
         jointKey: table.jointKey,
         commitmentIn: expected,
@@ -329,6 +332,60 @@ export default function PhasePanel(p: Props) {
   // that one client was offline (PROTOCOL.md §8.0). Making the call
   // permissionless first turns the automation into a convenience that anyone
   // can provide and nobody has to.
+  // Compile the prover while earlier seats are still shuffling.
+  //
+  // The first proof of a session pays for fetching the circuit, compiling the
+  // ~2.4 MB barretenberg wasm and loading the CRS, and all of that used to
+  // land inside the shuffle clock on the seat's own turn. Every seat has idle
+  // time before its turn that is easily long enough to cover it, so this
+  // spends that instead.
+  //
+  // Started as soon as the table has a shuffle to do -- not when it becomes
+  // your turn, which would be too late to be worth anything. The last seat in
+  // the order also warms the fused circuit, which is a different one.
+  const warmed = useRef(false);
+  useEffect(() => {
+    if (warmed.current || yourSeat === null) return;
+    if (table.phase !== 'keys' && table.phase !== 'shuffling') return;
+    warmed.current = true;
+    const last = table.shuffleOrder.length > 0
+      && table.shuffleOrder[table.shuffleOrder.length - 1] === yourSeat;
+    void warmProver('shuffle');
+    if (last) void warmProver('shuffle_open');
+  }, [table.phase, yourSeat, table.shuffleOrder]);
+
+  // Prove position 0's shuffle before the shuffle even opens.
+  //
+  // The first link always shuffles a_0, the canonical deck pinned in the
+  // contract, so it can be proved as soon as the joint key is known -- which
+  // is as soon as every seated player has registered. For the seat that will
+  // play position 0 that turns a ~5s wait on its own clock into no wait at
+  // all.
+  //
+  // Position 0 is the LOWEST OCCUPIED SEAT: begin_shuffle walks the seats in
+  // order, so this is knowable before the order is frozen.
+  //
+  // The fingerprint is the registered key set. A proof is only valid under
+  // the joint key it was made for, so if anyone joins, leaves or registers
+  // between now and begin_shuffle, the cached proof is discarded rather than
+  // spent on a turn.
+  const keyFingerprint = table.seats
+    .filter((s) => s.occupied && s.keyRegistered && s.pk)
+    .map((s) => `${s.seat}:${s.pk!.x.toString(16)}`)
+    .join('|');
+  const everyoneRegistered = table.seats.filter((s) => s.occupied).length >= 2
+    && table.seats.filter((s) => s.occupied).every((s) => s.keyRegistered && s.pk);
+  const lowestOccupied = table.seats.find((s) => s.occupied)?.seat ?? null;
+  const precomputing = useRef('');
+  useEffect(() => {
+    if (table.shuffleStarted || !everyoneRegistered || !table.jointKey) return;
+    if (yourSeat === null || yourSeat !== lowestOccupied) return;
+    if (precomputing.current === keyFingerprint) return;
+    precomputing.current = keyFingerprint;
+    void precomputeFirstShuffle({ jointKey: table.jointKey, fingerprint: keyFingerprint })
+      .catch(() => { precomputing.current = ''; });
+  }, [table.shuffleStarted, everyoneRegistered, table.jointKey, yourSeat, lowestOccupied, keyFingerprint]);
+
   const advancing = useRef(false);
   useEffect(() => {
     if (!autoAdvance || table.phase !== 'betting' || !table.roundComplete) return;
