@@ -27,6 +27,7 @@ import {
 import { BroadcastTransport, type Transport } from '@/lib/shares';
 import { RelayStatus, RelayTransport, relayOverride, relayUrl, setRelayOverride } from '@/lib/relayTransport';
 import { communityPosition, seatHolePositions } from '@/lib/deck';
+import { useActivityLog } from '../activityLog';
 
 type Props = {
   table: TableState;
@@ -42,8 +43,7 @@ type Props = {
 export default function RevealPanel(p: Props) {
   const { table, yourSeat, identity, account, provider, contract, refresh } = p;
   const [busy, setBusy] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [note, setNote] = useState<string | null>(null);
+  const pushLog = useActivityLog((s) => s.push);
   // ONE stream per tab, not two.
   //
   // There used to be a second, replay-disabled connection for the aggregate
@@ -146,13 +146,13 @@ export default function RevealPanel(p: Props) {
   const abandon = () => {
     runId.current += 1;
     setBusy(null);
-    setError('Abandoned. Anything already sent to the chain still stands — re-read the table before retrying.');
+    pushLog('error', 'Abandoned', 'Anything already sent to the chain still stands — re-read the table before retrying.');
   };
 
   async function run(label: string, fn: () => Promise<string | void>) {
     const id = ++runId.current;
     const mine = () => runId.current === id;
-    setBusy(label); setError(null); setNote(null);
+    setBusy(label);
     try {
       // Every action here ends in a DLEQ somewhere -- sending a share,
       // aggregating, answering an accusation -- and building one needs
@@ -163,11 +163,14 @@ export default function RevealPanel(p: Props) {
       await initDleqProver();
       const out = await fn();
       if (!mine()) return; // abandoned; its result is no longer this panel's
-      if (typeof out === 'string') setNote(out);
+      // The result goes to the shared activity log (see activityLog.ts)
+      // instead of rendering inline here -- only the pending indicator
+      // stays next to the button that was clicked.
+      pushLog('ok', label, typeof out === 'string' ? out : undefined);
       refresh();
     } catch (e) {
       if (!mine()) return;
-      setError(decodeError(e));
+      pushLog('error', label, decodeError(e));
     } finally {
       if (mine()) setBusy(null);
     }
@@ -430,8 +433,11 @@ export default function RevealPanel(p: Props) {
   latest.current = { keys, table, identity, openedAt, gatherShares, refresh, send };
   const [autoServe, setAutoServe] = useState(true);
   const [autoShow, setAutoShow] = useState(true);
-  const [autoLog, setAutoLog] = useState<string[]>([]);
-  const say = useCallback((m: string) => setAutoLog((l) => [...l.slice(-6), m]), []);
+  // Automatic-coordination status (share serving, reveals, blind posting)
+  // used to accumulate as a local <pre> block that only ever grew. It goes
+  // to the shared activity log now, same as everything else -- see
+  // activityLog.ts.
+  const say = useCallback((m: string) => pushLog('info', m), [pushLog]);
 
   /**
    * The street a community card belongs to. Mirrors the contract's own gate.
@@ -1010,10 +1016,6 @@ export default function RevealPanel(p: Props) {
             <span className={styles.chip}>street {table.street}</span>
           </div>
 
-          {autoLog.length ? (
-            <pre className={uni.receiptNote}>{autoLog.join('\n')}</pre>
-          ) : null}
-
           {!autoServe ? (
             <div className={styles.actionsRow}>
               {table.seats.filter((s) => s.occupied && s.seat !== yourSeat).flatMap((s) =>
@@ -1162,6 +1164,8 @@ export default function RevealPanel(p: Props) {
         </button>
       </div>
 
+      {/* Result goes to the shared activity log -- see the `pushLog` calls
+          in `run()` above. Only the in-flight indicator stays here. */}
       {busy ? <div className={`${uni.receipt} ${uni.receiptPending}`}>
         <div className={uni.receiptHead}>
           <span className={uni.receiptIcon}>⋯</span><span>{busy}</span>
@@ -1181,8 +1185,6 @@ export default function RevealPanel(p: Props) {
           <strong>Not showing:</strong> {showdownBlocker}
         </div>
       ) : null}
-      {note ? <div className={`${uni.receipt} ${uni.receiptOk}`}><pre className={uni.receiptNote}>{note}</pre></div> : null}
-      {error ? <div className={`${uni.receipt} ${uni.receiptError}`}><pre className={uni.receiptNote}>{error}</pre></div> : null}
     </div>
   );
 }

@@ -22,6 +22,7 @@ import { INITIAL_DECK_COMMITMENT, commitment, initialDeck, type Ciphertext } fro
 import { findDeckPublishedTx, readPublishedDeck } from '@/lib/publishedDeck';
 import { chunkCount, openDeckArgs, proveOpenChunk } from '@/lib/deckOpen';
 import { cardToName } from '@/lib/grumpkin';
+import { useActivityLog } from '../activityLog';
 
 export type Busy = { label: string; detail?: string } | null;
 
@@ -41,21 +42,23 @@ type Props = {
 export default function PhasePanel(p: Props) {
   const { table, yourSeat, identity, account, provider, contract, refresh } = p;
   const [busy, setBusy] = useState<Busy>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [note, setNote] = useState<string | null>(null);
 
   const { env, ready: envReady } = useProvingEnvironment();
   const mySeat = yourSeat === null ? null : table.seats[yourSeat];
+  const pushLog = useActivityLog((s) => s.push);
 
   async function run(label: string, fn: () => Promise<string | void>) {
-    if (!account || !provider) { setError('Connect a wallet first.'); return; }
-    setBusy({ label }); setError(null); setNote(null);
+    if (!account || !provider) { pushLog('error', label, 'Connect a wallet first.'); return; }
+    setBusy({ label });
     try {
       const out = await fn();
-      if (typeof out === 'string') setNote(out);
+      // The pending indicator stays inline, right next to the button that
+      // was clicked -- this is the RESULT, which is the part worth keeping
+      // visible without scrolling back to find it. See activityLog.ts.
+      pushLog('ok', label, typeof out === 'string' ? out : undefined);
       refresh();
     } catch (e) {
-      setError(decodeError(e));
+      pushLog('error', label, decodeError(e));
     } finally {
       setBusy(null);
     }
@@ -699,24 +702,16 @@ export default function PhasePanel(p: Props) {
         </>
       ) : null}
 
+      {/* The result (success or failure) goes to the shared activity log
+          instead of appearing here -- see the `pushLog` calls in `run()`
+          above. Only the in-flight indicator stays inline, next to
+          whatever was just clicked. */}
       {busy ? (
         <div className={`${uni.receipt} ${uni.receiptPending}`}>
           <div className={uni.receiptHead}>
             <span className={uni.receiptIcon}>⋯</span>
             <span>{busy.label}{busy.detail ? ` — ${busy.detail}` : ''}</span>
           </div>
-        </div>
-      ) : null}
-      {note ? (
-        <div className={`${uni.receipt} ${uni.receiptOk}`}>
-          <div className={uni.receiptHead}><span className={uni.receiptIcon}>✓</span><span>Done</span></div>
-          <pre className={uni.receiptNote}>{note}</pre>
-        </div>
-      ) : null}
-      {error ? (
-        <div className={`${uni.receipt} ${uni.receiptError}`}>
-          <div className={uni.receiptHead}><span className={uni.receiptIcon}>!</span><span>Failed</span></div>
-          <pre className={uni.receiptNote}>{error}</pre>
         </div>
       ) : null}
     </div>

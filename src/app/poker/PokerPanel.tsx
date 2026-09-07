@@ -24,6 +24,7 @@ import { useLocalAccount } from '../components/client/provider/localAccountConte
 import { useTableState } from './useTableState';
 import { asU256, decodeError, erc20ApproveCall, erc20Balances, executeAndWait, fmtAmount, pgCall, pokerGameReader, shortHex, strkToBase, toFelt } from './contract';
 import Felt from './components/Felt';
+import ActivityLog from './components/ActivityLog';
 import PhasePanel from './components/PhasePanel';
 import RevealPanel from './components/RevealPanel';
 import { loadOrCreateSeatKey, seatKeyIsPersisted, type SeatIdentity } from '@/lib/identity';
@@ -377,6 +378,10 @@ export default function PokerPanel() {
       {table && table.exists ? (
         <>
           <Felt table={table} yourSeat={yourSeat} yourCards={myCards} />
+          {/* Right after the table, before any panel that can push a
+              result into it -- so it's already in view before you click
+              anything, not something you scroll down to discover. */}
+          <ActivityLog />
           <SeatControls
             table={table} yourSeat={yourSeat} contract={contract} token={tableToken}
             account={account} provider={provider} refresh={refresh}
