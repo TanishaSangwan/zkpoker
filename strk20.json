@@ -1,5 +1,11 @@
 {
-  "transactions": [],
+  "network": "starknet-sepolia",
+  "transactions_note": "SEPOLIA, not mainnet, and not STRK20 pool transactions. This entry has no mainnet deployment. These are three real transactions against this project's own contract on Starknet Sepolia, listed so the work is verifiable rather than to claim the mainnet criterion.",
+  "transactions": [
+    "0x538ef969d2feb64b52656a275f17c19388749de984d5abadd9faaa2f40fb079",
+    "0x337bb9d7a24b5a210fcc481ac3ddb2f51facc0aa42b1e70dd35de0f402983e8",
+    "0x43d74fb05791f35a31e4544cdf42844e3110ae9d8042a74b9b5403cec8233dd"
+  ],
   "contracts": [
     "0x014b3c7c70159f0da82699dad66e9be372417fd6c5cb9fbe57492bd8cd19e049",
     "0x0764cd547bb935624574f751a9ec7a9f0946d1ab2d0447cb4e18cf129c215a01",

@@ -25,9 +25,27 @@ yourself; two people on two machines need the share relay (below).
 | Audit | None. Do not put money on this |
 
 The mainnet row is the honest one and it is the hackathon's own headline
-criterion. This entry does not meet it: `strk20.json` carries no mainnet
-transaction hashes, because none were made. Everything else here is real and
-verifiable on Sepolia.
+criterion. **This entry does not meet it.** The hashes in `strk20.json` are
+Sepolia, against this project's own contract, not mainnet and not the STRK20
+pool — they are there so the work can be checked, not to claim the criterion.
+
+### A whole hand, on chain
+
+One complete hand against the deployed contract, in order, all verifiable on
+[Voyager](https://sepolia.voyager.online/):
+
+| | transaction |
+|---|---|
+| `begin_shuffle` — freezes the participants, checks the joint key is the sum of the registered shares | [`0x1fdf36b5…`](https://sepolia.voyager.online/tx/0x1fdf36b5f4b5eed94c789dcd19304851cad93e1eebc07f9aed4bc2e911e48b1) |
+| `submit_shuffle` — one player's permutation + re-randomisation proof | [`0x597c0170…`](https://sepolia.voyager.online/tx/0x597c0170372621d164a71e30e5de478cf8cf9810536725f74abed996087bd40) |
+| `submit_final_shuffle` — the last shuffle fused with the deck opening, one proof instead of two (3,787 felts of calldata) | [`0x538ef969…`](https://sepolia.voyager.online/tx/0x538ef969d2feb64b52656a275f17c19388749de984d5abadd9faaa2f40fb079) |
+| `reveal_hole_card` — threshold decryption, with a DLEQ proof that the share used the registered secret | [`0x337bb9d7…`](https://sepolia.voyager.online/tx/0x337bb9d7a24b5a210fcc481ac3ddb2f51facc0aa42b1e70dd35de0f402983e8) |
+| `settle_from_reveals` — the pot paid out from cards a proof bound | [`0x43d74fb0…`](https://sepolia.voyager.online/tx/0x43d74fb05791f35a31e4544cdf42844e3110ae9d8042a74b9b5403cec8233dd) |
+| `end_table` — one player held every chip, so the table closed | [`0x5e045fd0…`](https://sepolia.voyager.online/tx/0x5e045fd0e6ce9d1d89eaea9ddad2fb23444add9d72e78a5c66562852b07db18) |
+
+Nothing in that sequence trusts anybody. The shuffle proofs are checked by a
+Garaga-generated verifier on chain, the joint key is recomputed rather than
+accepted, and no card is readable until every seat has published a share.
 
 ## How it actually works
 
