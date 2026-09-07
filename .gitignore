@@ -82,3 +82,6 @@ node_modules/.cache/
 
 # Terminal-seat state for scripts/duel.mjs (contains a seat secret)
 .duel-*.json
+
+# Staged by scripts/stage_crs.mjs during build (~25 MB of CRS points).
+/public/crs/

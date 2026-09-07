@@ -4,10 +4,11 @@
   "private": true,
   "scripts": {
     "dev": "next dev --webpack",
-    "build": "npm run circuits && next build --webpack",
+    "build": "npm run circuits && npm run crs && next build --webpack",
     "start": "next start",
     "lint": "next lint",
     "circuits": "node scripts/build_client_circuits.mjs",
+    "crs": "node scripts/stage_crs.mjs",
     "abi": "node scripts/gen_abi.mjs",
     "check:abi": "node scripts/gen_abi.mjs --check",
     "check:crypto": "node scripts/check_client_crypto.mjs",

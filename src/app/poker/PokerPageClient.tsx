@@ -6,6 +6,7 @@ import uni from "../uni.module.css";
 import styles from "./poker.module.css";
 import SelectWallet from "../components/client/WalletHandle/SelectWallet";
 import PokerPanel from "./PokerPanel";
+import CrsServiceWorker from "./CrsServiceWorker";
 import { StrkCoin, BtcCoin, EthCoin, ZecCoin } from "../components/TokenIcons";
 
 // A toned-down version of the home page's scattered token ambience -- edges
@@ -74,6 +75,7 @@ export default function PokerPageClient() {
       </header>
 
       <main>
+        <CrsServiceWorker />
         <PokerPanel />
       </main>
 
