@@ -1,6 +1,8 @@
 {
   "transactions": [],
-  "contracts": [],
+  "contracts": [
+    "0x014b3c7c70159f0da82699dad66e9be372417fd6c5cb9fbe57492bd8cd19e049"
+  ],
   "demo_video": "",
   "demo_url": "https://zkpoker-three.vercel.app"
 }

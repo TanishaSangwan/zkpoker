@@ -1,87 +1,146 @@
 # STRK[20] Provably Fair On-Chain Poker
 
-Hackathon entry for https://strk20.starknet.io/hackathon, answering the
-[Provably Fair On-Chain Poker RFP](https://strk20.starknet.io/rfp/private-poker).
-Hole cards as encrypted STRK20 notes, commit-reveal dealing, paymaster-hidden
-player identity, private buy-ins and payouts. See **[docs/DESIGN.md](docs/DESIGN.md)**
-for the full architecture and current scope (V1: trusted-dealer commit-reveal,
-not yet the STARK-proven-shuffle V2).
+Texas hold'em where **no one deals**. There is no server that knows the deck,
+no trusted operator, and no player who has to be taken on trust — including
+the one who created the table. Every card is encrypted under a key no single
+party holds, every shuffle is a STARK proof verified on Starknet, and a card
+becomes readable only when every player at the table has contributed a share
+of the decryption.
 
-Scaffolded from [Akashneelesh/strk20-starter-kit](https://github.com/Akashneelesh/strk20-starter-kit)
-(Next.js + Wallet API pre-wired) — original app code is otherwise untouched
-so far; the poker-specific pieces are `cairo/src/lib.cairo`,
-`scripts/deal_verify.py`, and `docs/DESIGN.md`.
+Hackathon entry for the [STRK20 Private Sprint](https://strk20.starknet.io/hackathon),
+answering the [Provably Fair On-Chain Poker RFP](https://strk20.starknet.io/rfp/private-poker).
 
-## What's inside?
+**Live demo: https://zkpoker-three.vercel.app** — runs against Starknet
+Sepolia. Open it in two browser tabs and you can play a whole hand against
+yourself; two people on two machines need the share relay (below).
 
-- `cairo/src/lib.cairo` — `PokerGame`, the STRK20 anonymizer (`privacy_invoke`)
-  for this table: table/seat setup, commit-reveal dealing, bet/fold pot
-  accounting, per-note settlement. Unaudited skeleton — see the TODOs and
-  `docs/DESIGN.md` "Open items".
-- `scripts/deal_verify.py` — independent fairness check. Feed it a revealed
-  seed and it recomputes the deal; diff against what was actually dealt.
-- `src/` — the starter kit's Next.js app (wallet connect, shield/unshield/
-  transfer/echo actions). Still the original demo UI; wiring in `PokerGame`
-  actions is the next step (see `docs/DESIGN.md`).
+## Status, stated plainly
 
-## Quick start
+| | |
+|---|---|
+| Contract | Deployed and playable on **Starknet Sepolia** |
+| Mainnet | **Not deployed.** No transactions against the live STRK20 pool |
+| Tests | 282 passing (`snforge`), including the shuffle chain, side pots and the hand evaluator |
+| Security | 8 recorded review rounds in `security-review-*.md`; findings fixed and referenced from the code |
+| Audit | None. Do not put money on this |
+
+The mainnet row is the honest one and it is the hackathon's own headline
+criterion. This entry does not meet it: `strk20.json` carries no mainnet
+transaction hashes, because none were made. Everything else here is real and
+verifiable on Sepolia.
+
+## How it actually works
+
+The protocol is written up in full in **[docs/PROTOCOL.md](docs/PROTOCOL.md)** —
+including the things that are still wrong with it, which is the more useful
+half. The short version:
+
+**Keys.** Every seat generates a Grumpkin keypair in the browser and proves
+knowledge of the secret with a Schnorr proof. The table's joint key is the sum
+of the shares, `Y = Σ pk_i`, and the contract *checks* that sum rather than
+trusting the number it was handed. It has to: the shuffle circuit honestly
+proves re-randomisation under whatever key it is given, and each Schnorr proof
+only says that seat knows its own secret. Nothing tied the two together until
+the contract did.
+
+**Shuffling.** The deck starts as 52 public ElGamal encryptions of the
+canonical order. Each player in turn permutes and re-randomises the whole deck
+and proves in Noir that the output is a permutation of the input under the
+joint key, without revealing the permutation. The chain is `k = n`: every
+player shuffles, so the deck is unknown to anyone unless *everyone* colludes.
+The last player's proof is fused with the deck-opening proof — one transaction
+instead of two, which is where 22.6 STRK per hand went.
+
+**Dealing and showing.** Decryption is n-of-n. To read a card, each seat
+publishes a partial decryption share with a DLEQ proof that it used the same
+secret it registered — so a share cannot be faked or withheld silently. Your
+hole cards are the two positions only *you* aggregate; the board is the five
+everyone does.
+
+**Money.** A table with a buy-in escrows chips at `join_table`; betting draws
+them down; a seat that cannot cover may fold or push what it has, and
+settlement splits the pot into layers so a short stack wins only what it
+actually matched. Blinds can rise on a schedule. A player who loses their last
+chip sits the next hand out rather than being dealt in and unable to act, and
+when one player holds every chip the table closes and they cash out.
+
+**STRK20.** `PokerGame` is an anonymizer contract: `privacy_invoke` is the
+pool's phase-7 `InvokeExternal` hook, and the pool address is pinned in the
+constructor — `privacy_invoke` asserts the caller *is* that address, after a
+review found the original compared a caller-supplied argument against itself.
+The intended flow is buy in from a shielded note and take the payout into an
+open note, so the amounts move without the addresses. This is implemented and
+tested against a mock pool; it has never run against the live one.
+
+## What's inside
+
+- `cairo/src/lib.cairo` — `PokerGame`. The table state machine, the shuffle
+  chain, threshold reveals, betting, side pots, the blind ladder, the
+  accusation and timeout paths, and `privacy_invoke`.
+- `circuits/` — Noir circuits: `shuffle` (permutation + re-randomisation),
+  `deck_open`, and `shuffle_open`, the fused proof the last shuffler submits.
+  Their Cairo verifiers are generated by [Garaga](https://github.com/keep-starknet-strange/garaga).
+- `src/` — the Next.js client. Proving runs **in the browser** via bb.js
+  (WASM), so no server ever sees a shuffle or a key.
+- `docs/PROTOCOL.md` — the design, and every hole found in it so far.
+- `cairo/address.md` — every deployment, what it cost, and what was verified
+  on-chain afterwards.
+- `security-review-*.md` — eight review rounds. Findings are cited by number
+  in the code at the line that fixes them.
+
+## Running it
 
 ```bash
 npm install
-cp .env.example .env.local     # add your Alchemy key
-npm run dev                    # http://localhost:3000
+npm run dev            # http://localhost:3000/poker
 ```
 
-Needs a free [Alchemy](https://alchemy.com) Starknet RPC key and a
-privacy-enabled wallet (Ready) on Sepolia or Mainnet.
-
-### Cairo contract
-
-Requires [Scarb](https://docs.swmansion.com/scarb/) 2.18.0 (pinned in
-`cairo/.tool-versions`) — not installed in this environment yet. Once
-installed:
+Against a local devnet:
 
 ```bash
-cd cairo
-scarb build
+starknet-devnet --seed 0 --host 127.0.0.1 --port 5050
+npm run deploy:local
+npm run smoke:local
 ```
 
-Deploying requires one constructor argument: the STRK20 pool's address
-(`privacy_invoke` now checks the caller against this pinned value, not a
-caller-supplied argument — see `security-review-20260830-194015.md`).
-
-Run `cairo-auditor` again after any further change to `lib.cairo`, and run
-`cairo-testing` to build out the required-tests list from that report,
-before deploying anywhere real — it currently holds pooled funds across
-concurrent tables, and several findings (see `docs/DESIGN.md` "Still open")
-remain unfixed.
-
-### Fairness verification tool
+Cairo tests need [Scarb](https://docs.swmansion.com/scarb/) 2.18.0 and
+`snforge`:
 
 ```bash
-python3 scripts/deal_verify.py --seed 0xdeadbeef --seats 6
-python3 scripts/deal_verify.py --seed 0xdeadbeef --seats 6 --claimed claimed_deal.json
-
-# 2 players sat down at a 6-seat table: pass the table's capacity, or the
-# community cards get read from the wrong deck positions.
-python3 scripts/deal_verify.py --seed 0xdeadbeef --seats 2 --max-seats 6
+cd cairo && snforge test --features testing     # 282 tests
 ```
 
-## Skills used
+### Two players on two machines
 
-- `strk20-privacy`, `strk20-anonymizer-contracts`, `strk20-privacy-sdk`,
-  `strk20-wallet-api` — STRK20 concepts, `privacy_invoke` pattern, SDK/wallet
-  integration.
-- `starknet-skills` (`cairo-contract-authoring`, `cairo-auditor`,
-  `cairo-testing`, `cairo-optimization`) — writing and hardening the Cairo
-  contract.
+A hole card needs a decryption share from every seat, and those shares have to
+get between browsers. `scripts/relay.mjs` is a dumb pipe for them — it is
+trusted with nothing, since every share is sealed to the recipient's
+registered key and carries a DLEQ proof, so anyone including a player can host
+it. Without one the client falls back to `BroadcastChannel`, which reaches
+only other tabs of the same browser.
+
+## What is not done
+
+Listed because a README that omits them is not worth reading:
+
+- **No mainnet deployment and no STRK20 pool transactions.** See above.
+- **Liveness depends on every player.** n-of-n decryption means one player
+  walking away stalls a hand. There are accusation and timeout paths that void
+  the hand and refund, but "the hand is voided" is not the same as "the hand
+  finishes".
+- **Unaudited**, holding pooled funds across concurrent tables.
+- `docs/PROTOCOL.md` §8 and §9 record the remaining trust and liveness gaps in
+  detail.
 
 ## Links
 
 [STRK20 by example](https://strk20-by-example.org/) ·
 [Privacy SDK](https://github.com/starkware-libs/starknet-privacy) ·
-[RFP: Provably Fair On-Chain Poker](https://strk20.starknet.io/rfp/private-poker) ·
+[RFP](https://strk20.starknet.io/rfp/private-poker) ·
 [Hackathon](https://strk20.starknet.io/hackathon)
 
-Bootstrapped from [Akashneelesh/strk20-starter-kit](https://github.com/Akashneelesh/strk20-starter-kit),
-itself bootstrapped from [PhilippeR26/Starknet-WalletAccount](https://github.com/PhilippeR26/Starknet-WalletAccount).
+Scaffolded from [Akashneelesh/strk20-starter-kit](https://github.com/Akashneelesh/strk20-starter-kit),
+itself from [PhilippeR26/Starknet-WalletAccount](https://github.com/PhilippeR26/Starknet-WalletAccount).
+The poker protocol, circuits, contract and client are this project's.
+
+MIT licensed.
