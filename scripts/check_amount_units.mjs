@@ -13,14 +13,18 @@
 // guessed at (scientific notation, negatives, more than 18 decimal places),
 // and a round trip, since the UI both parses and formats.
 
-import { build } from '/home/x/Documents/zkpoker/node_modules/esbuild/lib/main.js';
+import { build } from 'esbuild';
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { pathToFileURL } from 'node:url';
-const root='/home/x/Documents/zkpoker', out=`${root}/node_modules/.cache/zkpoker-units`;
+import { dirname, join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+// Find the repo from this file's location, like the other check scripts do,
+// so the check runs on any machine and not only where it was first written.
+const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+const out = join(root, 'node_modules', '.cache', 'zkpoker-units');
 mkdirSync(out,{recursive:true});
-writeFileSync(`${out}/e.ts`, `export { strkToBase, baseToStrk, fmtAmount } from ${JSON.stringify(root+'/src/app/poker/contract.ts')};`);
-await build({entryPoints:[`${out}/e.ts`],bundle:true,format:'esm',platform:'node',outfile:`${out}/t.mjs`,logLevel:'error',alias:{'@':`${root}/src`}});
-const { strkToBase, baseToStrk, fmtAmount } = await import(pathToFileURL(`${out}/t.mjs`).href+`?v=${Date.now()}`);
+writeFileSync(join(out, 'e.ts'), `export { strkToBase, baseToStrk, fmtAmount } from ${JSON.stringify(join(root, 'src', 'app', 'poker', 'contract.ts'))};`);
+await build({entryPoints:[join(out, 'e.ts')],bundle:true,format:'esm',platform:'node',outfile:join(out, 't.mjs'),logLevel:'error',alias:{'@':join(root, 'src')}});
+const { strkToBase, baseToStrk, fmtAmount } = await import(pathToFileURL(join(out, 't.mjs')).href+`?v=${Date.now()}`);
 
 const E = 10n**18n;
 const ok = [
